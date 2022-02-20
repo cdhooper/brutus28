@@ -135,6 +135,26 @@ incoming_data(uint32_t in, uint32_t out)
 }
 
 /*
+ * bcdbinary
+ * ---------
+ * Convert binary coded decimal binary value to binary.
+ * Example: the value 0x11111111 becomes 0xff
+ * Example: the value 0x10100101 becomes 0xa5
+ */
+static uint8_t
+bcdbinary(uint32_t value)
+{
+    return (((value & BIT(28)) >> 21) |
+            ((value & BIT(24)) >> 18) |
+            ((value & BIT(20)) >> 15) |
+            ((value & BIT(16)) >> 12) |
+            ((value & BIT(12)) >> 9) |
+            ((value & BIT(8)) >> 6) |
+            ((value & BIT(4)) >> 3) |
+             (value & BIT(0)));
+}
+
+/*
  * read_cap_file
  * -------------
  * Read a capture file from disk and process all records present.
@@ -149,7 +169,7 @@ read_cap_file(const char *filename)
     FILE *fp;
     char *ptr;
     int line_num = 0;
-    int count = 0;
+    int data_line_num = 0;
     int content_type = CONTENT_UNKNOWN;
 
     fp = fopen(filename, "r");
@@ -157,7 +177,7 @@ read_cap_file(const char *filename)
         err(EXIT_FAILURE, "Unable to open %s for read", filename);
 
     while (fgets(line, sizeof (line), fp) != NULL) {
-        if (count++ > 10)
+        if (line_num++ > 100)
             break;
         ptr = strstr(line, "---- BYTES=");
         if (ptr != NULL) {
@@ -185,7 +205,7 @@ read_cap_file(const char *filename)
     if ((pld_in == NULL) || (pld_out == NULL))
         err(EXIT_FAILURE, "Unable to allocate %u bytes", total_lines * 4);
 
-    line_num = 1;
+    data_line_num = 1;
     if (content_type == CONTENT_RAW_BINARY) {
         uint32_t buf[2];
         while (fread(buf, sizeof (buf), 1, fp) == 1) {
@@ -195,6 +215,7 @@ read_cap_file(const char *filename)
             }
             incoming_data(buf[0], buf[1]);
             line_num++;
+            data_line_num++;
         }
     } else {
         /* ASCII unknown content type */
@@ -213,15 +234,22 @@ read_cap_file(const char *filename)
                 break;
             switch (content_type) {
                 case CONTENT_ASCII_BINARY: {
-                    uint32_t v1a, v1b, v1c;
-                    uint32_t v2a, v2b, v2c;
-                    if (sscanf(line, "%04x:%08x:%08x %04x:%08x:%08x",
-                               &v1a, &v1b, &v1c, &v2a, &v2b, &v2c) != 6) {
-                        warnx("line %u invalid: %s\n", count, line);
+                    uint32_t v1a, v1b, v1c, v1d;
+                    uint32_t v2a, v2b, v2c, v2d;
+                    if (sscanf(line, "%04x:%08x:%08x:%08x %04x:%08x:%08x:%08x",
+                               &v1a, &v1b, &v1c, &v1d,
+                               &v2a, &v2b, &v2c, &v2d) != 8) {
+                        warnx("line %u invalid: %s\n", line_num, line);
                     } else {
-                        incoming_data((v1a << 16) | (v1b << 8) | v1c,
-                                      (v2a << 16) | (v2b << 8) | v2c);
-                        printf("%x ", v1a);
+                        uint32_t v1 = (bcdbinary(v1a) << 24) |
+                                      (bcdbinary(v1b) << 16) |
+                                      (bcdbinary(v1c) << 8) |
+                                      (bcdbinary(v1d));
+                        uint32_t v2 = (bcdbinary(v2a) << 24) |
+                                      (bcdbinary(v2b) << 16) |
+                                      (bcdbinary(v2c) << 8) |
+                                      (bcdbinary(v2d));
+                        incoming_data(v1, v2);
                     }
                     break;
                 }
@@ -229,14 +257,15 @@ read_cap_file(const char *filename)
                     uint32_t v1;
                     uint32_t v2;
                     if (sscanf(line, "%08x %08x", &v1, &v2) != 2) {
-                        warnx("line %u invalid: %s\n", count, line);
+                        warnx("line %u invalid: %s\n", line_num, line);
                     } else {
                         incoming_data(v1, v2);
                     }
                     break;
                 }
             }
-            if (line_num++ == total_lines)
+            line_num++;
+            if (data_line_num++ == total_lines)
                 break;
         }
     }
