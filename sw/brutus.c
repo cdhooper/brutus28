@@ -40,8 +40,9 @@
 #define CONTENT_ASCII_HEX     4  // ASCII hex
 
 #define KEYWORD_UNKNOWN 0
-#define KEYWORD_DEVICE  1
-#define KEYWORD_PIN     2
+#define KEYWORD_END     1 // No more content
+#define KEYWORD_DEVICE  2 // DEVICE <name>
+#define KEYWORD_PIN     3 // PIN <num> = <name>
 
 #define ARRAY_SIZE(x) ((sizeof (x) / sizeof ((x)[0])))
 #define BIT(x)      (1 << (x))
@@ -86,8 +87,97 @@ static const uint8_t bit_to_pin_g22v10[] =
      0,  1,  2,  3,  4,  5,  6,  0,
      7,  8,  9, 10, 11, 12,  0, 13,
     14, 15, 16, 17, 18,  0, 19, 20,
-    21, 22, 23, 24,  0,  0,  0,  0,
+    21, 22, 23, 24,
 };
+
+static const uint8_t bit_to_pin_dip24[] =
+{
+     1,  2,  3,  4,  5,  6,  7,  8,
+     9, 10, 11, 12, 13, 14, 15, 16,
+    17, 18, 19, 20, 21, 22, 23, 24,
+     0,  0,  0,  0,
+};
+
+static const uint8_t bit_to_pin_dip22[] =
+{
+     1,  2,  3,  4,  5,  6,  7,  8,
+     9, 10, 11,  0,  0, 12, 13, 14,
+    15, 16, 17, 18, 19, 20, 21, 22,
+     0,  0,  0,  0,
+};
+
+static const uint8_t bit_to_pin_dip20[] =
+{
+     1,  2,  3,  4,  5,  6,  7,  8,
+     9, 10,  0,  0,  0,  0, 11, 12,
+    13, 14, 15, 16, 17, 18, 19, 20,
+     0,  0,  0,  0,
+};
+
+static const uint8_t bit_to_pin_dip18[] =
+{
+     1,  2,  3,  4,  5,  6,  7,  8,
+     9,  0,  0,  0,  0,  0,  0, 10,
+    11, 12, 13, 14, 15, 16, 17, 18,
+     0,  0,  0,  0,
+};
+
+static const uint8_t bit_to_pin_dip16[] =
+{
+     1,  2,  3,  4,  5,  6,  7,  8,
+     0,  0,  0,  0,  0,  0,  0,  0,
+     9, 10, 11, 12, 13, 14, 15, 16,
+     0,  0,  0,  0,  0,  0,  0,  0,
+};
+
+static const uint8_t bit_to_pin_dip14[] =
+{
+     1,  2,  3,  4,  5,  6,  7,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,
+     0,  8,  9, 10, 11, 12, 13, 14,
+     0,  0,  0,  0,  0,  0,  0,  0,
+};
+
+static const uint8_t bit_to_pin_dip12[] =
+{
+     1,  2,  3,  4,  5,  6,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  7,  8,  9, 10, 11, 12,
+     0,  0,  0,  0,  0,  0,  0,  0,
+};
+
+static const uint8_t bit_to_pin_dip10[] =
+{
+     1,  2,  3,  4,  5,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  6,  7,  8,  9, 10,
+     0,  0,  0,  0,  0,  0,  0,  0,
+};
+
+static const uint8_t bit_to_pin_dip8[] =
+{
+     1,  2,  3,  4,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  5,  6,  7,  8,
+     0,  0,  0,  0,  0,  0,  0,  0,
+};
+
+static const uint8_t bit_to_pin_dip6[] =
+{
+     1,  2,  3,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  4,  5,  6,
+     0,  0,  0,  0,  0,  0,  0,  0,
+};
+
+static const uint8_t bit_to_pin_dip4[] =
+{
+     1,  2,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  3,  4,
+     0,  0,  0,  0,  0,  0,  0,  0,
+};
+
 static const uint8_t *bit_to_pin = NULL;
 
 /*
@@ -371,23 +461,58 @@ static void
 cfg_keyword_device(const char *sptr, const char *eptr, uint line)
 {
     uint bit;
+    char devname[32];
+    char *ptr;
 
     sptr += 6;  // DEVICE
     if ((*sptr == ' ') || (*sptr == '\t'))
         sptr++;
 
-    if (strncasecmp(sptr, "G22V10", 6) == 0) {
-        bit_to_pin = bit_to_pin_g22v10;
-        return;
+    strncpy(devname, sptr, sizeof (devname));
+    devname[sizeof (devname) - 1] = '\0';
+    for (ptr = devname; *ptr != '\0'; ptr++) {
+        if (((*ptr < '0') || (*ptr > 'z')) ||
+            ((*ptr > '9') && (*ptr < 'A')) ||
+            ((*ptr > 'Z') && (*ptr < 'a'))) {
+            *ptr = '\0';
+            break;
+        }
     }
+
+    if (strncasecmp(devname, "G22V10", 6) == 0)
+        bit_to_pin = bit_to_pin_g22v10;
+    else if (strcasecmp(devname, "DIP24") == 0)
+        bit_to_pin = bit_to_pin_dip24;
+    else if (strcasecmp(devname, "DIP22") == 0)
+        bit_to_pin = bit_to_pin_dip22;
+    else if (strcasecmp(devname, "DIP20") == 0)
+        bit_to_pin = bit_to_pin_dip20;
+    else if (strcasecmp(devname, "DIP18") == 0)
+        bit_to_pin = bit_to_pin_dip18;
+    else if (strcasecmp(devname, "DIP16") == 0)
+        bit_to_pin = bit_to_pin_dip16;
+    else if (strcasecmp(devname, "DIP14") == 0)
+        bit_to_pin = bit_to_pin_dip14;
+    else if (strcasecmp(devname, "DIP12") == 0)
+        bit_to_pin = bit_to_pin_dip12;
+    else if (strcasecmp(devname, "DIP10") == 0)
+        bit_to_pin = bit_to_pin_dip10;
+    else if (strcasecmp(devname, "DIP8") == 0)
+        bit_to_pin = bit_to_pin_dip8;
+    else if (strcasecmp(devname, "DIP6") == 0)
+        bit_to_pin = bit_to_pin_dip6;
+    else if (strcasecmp(devname, "DIP4") == 0)
+        bit_to_pin = bit_to_pin_dip4;
+    else
+        fatal_cfg(line, line, "invalid device '%s'", devname);
+
     if (bit_to_pin != NULL) {
-        for (bit = 0; bit < 32; bit++)
+        for (bit = 0; bit < 28; bit++)
             pinfo[bit].pi_num = bit_to_pin[bit];
     } else {
-        for (bit = 0; bit < 32; bit++)
+        for (bit = 0; bit < 28; bit++)
             pinfo[bit].pi_num = bit + 1;
     }
-    fatal_cfg(line, line, "invalid device '%s'", sptr);
 }
 
 /*
@@ -453,8 +578,12 @@ parse_cfg_file(const char *filename)
         uint tline;
         uint kline;
         eptr = strnchr(sptr, cfg_file_end - sptr, ';');
-        if (eptr == NULL)
-            break;
+        if (eptr == NULL) {
+            if (sptr < cfg_file_end)
+                eptr = cfg_file_end;
+            else
+                break;
+        }
         for (tline = line, tptr = sptr; tptr <= eptr; tptr++) {
             if (tptr == eptr)
                 break;
@@ -463,8 +592,17 @@ parse_cfg_file(const char *filename)
                 tline++;
         }
         kptr = find_next_keyword(sptr, eptr, &keyword);
-        if (kptr == NULL)
-            fatal_cfg(line, tline, "missing keyword");
+        if (kptr == NULL) {
+            /* If just whitespace or comments remain, then these can be ignored */
+            const char *ptr;
+            for (ptr = sptr; ptr < eptr; ptr++) {
+                if ((*sptr != '\n') || (*sptr != ' ') || (*sptr != '\t'))
+                    continue;
+                break;
+            }
+            if (ptr < eptr)
+                fatal_cfg(line, tline, "missing keyword");
+        }
         for (kline = line, tptr = sptr; tptr <= eptr; tptr++) {
             if (tptr == eptr)
                 break;
@@ -478,6 +616,9 @@ parse_cfg_file(const char *filename)
                 break;
             case KEYWORD_PIN:
                 cfg_keyword_pin(kptr, eptr, kline);
+                break;
+            case KEYWORD_END:
+                sptr = cfg_file_end;
                 break;
         }
 
@@ -1551,7 +1692,7 @@ main(int argc, char *argv[])
 
     count = 0;
     while (eliminate_common_terms() > 1) {
-        if (count++ > 5) {
+        if (count++ > 10) {
             printf("Too many iterations eliminating single terms\n");
             break;
         }
