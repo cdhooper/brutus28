@@ -997,12 +997,20 @@ cmd_pld_get_ignore_mask(int argc, char * const *argv,
                     uint32_t present;
                     pld_detect_part_present(&present);
 
-                    if ((present & PRESENT_PINS_PLCC28) == PRESENT_PINS_PLCC28)
+                    if ((present & PRESENT_PINS_PLCC28) ==
+                                   PRESENT_PINS_PLCC28) {
                         ignore_mask = PLCC_22V20_IGNORE_PINS;
-                    else if (present != 0)
+                    } else if (present != 0) {
+                        uint32_t vcc_pins;
+                        uint32_t gnd_pins;
                         ignore_mask = ~present;
-                    else
+                        rc = pld_report_gnd_and_vcc_jumpers(1, &vcc_pins,
+                                                            &gnd_pins);
+                        if (rc == RC_SUCCESS)
+                            ignore_mask |= vcc_pins | gnd_pins;
+                    } else {
                         return (RC_FAILURE);
+                    }
                     ignore_initialized = 1;
                     continue;
                 }
