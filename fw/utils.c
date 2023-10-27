@@ -147,6 +147,7 @@ show_reset_reason(void)
 void
 identify_cpu(void)
 {
+    uint16_t flashsize;
     const char *runtime_cpu;
     switch (SCB_CPUID) {
         case 0x410fc241:
@@ -165,9 +166,9 @@ identify_cpu(void)
             runtime_cpu = "?";
             break;
     }
-    printf("    CPUID=%08lx Dev=%04lx Rev=%04lx (compile: %s BOARD=%d)\n",
+    printf("\tCPUID=%08lx Dev=%04lx Rev=%04lx (compile: %s BOARD=%d)\n",
            SCB_CPUID, DBGMCU_DEVID, DBGMCU_REVID, COMPILE_CPU, BOARD_REV);
-    printf("    Hardware: %s", runtime_cpu);
+    printf("\tHW: %s", runtime_cpu);
     if (DBGMCU_DEVID != 0) {
         const char *core_type;
         const char *core_rev = "?";
@@ -294,17 +295,19 @@ identify_cpu(void)
                 core_type = "Unknown-density";
                 break;
         }
-        printf("    %s revision %s\n", core_type, core_rev);
+        printf("\t%s revision %s\n", core_type, core_rev);
     }
-    printf("    HCLK=%ld MHz  APB1=%ld MHz  APB2=%ld MHz\n",
+    printf("\tHCLK=%ld MHz  APB1=%ld MHz  APB2=%ld MHz\n",
            HCLK_FREQ / 1000000, APB1_FREQ / 1000000, APB2_FREQ / 1000000);
 
-#if 0
-#ifdef STM32F1XX
-    printf("    FlashSize=%u KB FlashPage=%u KB\n", *ADDR16(FLASHSIZE_BASE),
-            FLASH_PAGE_SIZE / 1024);
-#else
-    printf("    FlashSize=%u KB\n", *ADDR16(FLASHSIZE_BASE));
+    flashsize = *ADDR16(DESIG_FLASH_SIZE_BASE);  // FLASHSIZE_BASE
+    if ((flashsize != 0) && (flashsize != 0xffff)) {
+        printf("\tFlash=%u KB", flashsize);
+    }
+#if defined(STM32F1) || defined(STM32F1XX)
+#define UNIQUE_ID_BASE 0x1ffff7e8
 #endif
-#endif
+    printf("\tUID=%04x %04x %08lx %08lx\n",
+           *ADDR16(UNIQUE_ID_BASE + 0), *ADDR16(UNIQUE_ID_BASE + 2),
+           *ADDR32(UNIQUE_ID_BASE + 4), *ADDR32(UNIQUE_ID_BASE + 8));
 }

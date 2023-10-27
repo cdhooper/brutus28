@@ -2,10 +2,30 @@ The STM32 can't shut off PLD VCC if jumper is set to 5V. This is because
     the pull-up for EN_VCC gets clipped by the STM32 internal gate protection
     diode down to 3.3V. This causes the BSS84 to turn on. Place an N-channel
     MOSFET in front of it.
+    Rework: View PCB bottom. Orient PCB so silkscreen text is right-side up.
+            Locate first horizontal above the "By" text. This trace starts at a
+            via, goes to the right, and then turns no degrees to head toward
+            the close edge of the board.
+            1. Cut this trace, creating a gap.
+            2. Solder the middle leg (3 drain) of a BSS138 to the left side
+               of the cut trace (this leads to the gate of Q1.
+            3. Solder right leg (2 source) to the GND plane.
+            4. Connect a wire from the left leg (1 gate) to the right side
+               of the cut trace (EN_VCC this leads to STM32 PB5).
+    Fixed in Rev 2
 
-Decrease PLD current limit resister (currently 22 Ohm) to something like
+Decrease PLD current limit resistor (currently 22 Ohm) to something like
     10 Ohm. With 22 Ohm and GAL installed, voltage is about 3.6V.
+    Fixed in Rev 2 - Will use 2x 22 Ohm resistors in parallel
 
 Add hole under center of TH PLCC socket for easier removal
+    Fixed in Rev 2
 
 Add pin numbers next to DIP socket
+    Fixed in Rev 2
+
+Add optional LED row, one for each pin of tested device
+    Fixed in Rev 2
+
+Add PLCC-20 socket and wide DIP socket
+    Fixed in Rev 2

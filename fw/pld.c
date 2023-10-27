@@ -537,12 +537,13 @@ pld_report_5v_3p3v_jumper(int verbose)
     /*
      * Test whether 3.3V / 5V jumper is installed,
      */
+    adc_enable();
+    timer_delay_msec(10);
     pld_power_disable();
     pld_gnd_enable();
     timer_delay_msec(1);
     pld_gnd_disable();
     pld_vcc_enable();
-    adc_enable();
     timer_delay_msec(10);
     pld_vcc = adc_get_pld_readings(&pld_gnd);
     pld_vcc_disable();
@@ -557,7 +558,7 @@ pld_report_5v_3p3v_jumper(int verbose)
             show_reading("VCC source:  3.3V   PLD VCC=", pld_vcc);
             printf("\n");
         }
-    } else if ((pld_gnd < 300) && (pld_vcc >= 4200) && (pld_vcc <= 5500)) {
+    } else if ((pld_gnd < 300) && (pld_vcc >= 4200) && (pld_vcc <= 5800)) {
         pld_vcc_jumper = PLD_VCC_5V;
         if (verbose) {
             show_reading("VCC source:  5V   PLD VCC=", pld_vcc);
