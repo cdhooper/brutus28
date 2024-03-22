@@ -136,12 +136,13 @@ show_reset_reason(void)
         printf("    %s\n", "Window Watchdog reset");
     if (reg & RCC_CSR_IWDGRSTF)
         printf("    %s\n", "Independent Watchdog reset");
-    if (reg & RCC_CSR_PORRSTF)
+    if (reg & RCC_CSR_PORRSTF) {
         printf("    %s\n", "Power-on reset");
-    else if (reg & RCC_CSR_SFTRSTF)
+    } else if (reg & RCC_CSR_SFTRSTF) {
         printf("    %s\n", "Software reset");
-    else if (reg & RCC_CSR_PINRSTF)
+    } else if (reg & RCC_CSR_PINRSTF) {
         printf("    %s\n", "NRST pin reset");
+    }
 }
 
 void
@@ -166,9 +167,9 @@ identify_cpu(void)
             runtime_cpu = "?";
             break;
     }
-    printf("\tCPUID=%08lx Dev=%04lx Rev=%04lx (compile: %s BOARD=%d)\n",
+    printf("    CPUID=%08lx Dev=%04lx Rev=%04lx (compile: %s BOARD=%d)\n",
            SCB_CPUID, DBGMCU_DEVID, DBGMCU_REVID, COMPILE_CPU, BOARD_REV);
-    printf("\tHW: %s", runtime_cpu);
+    printf("    Hardware: %s", runtime_cpu);
     if (DBGMCU_DEVID != 0) {
         const char *core_type;
         const char *core_rev = "?";
@@ -311,3 +312,11 @@ identify_cpu(void)
            *ADDR16(UNIQUE_ID_BASE + 0), *ADDR16(UNIQUE_ID_BASE + 2),
            *ADDR32(UNIQUE_ID_BASE + 4), *ADDR32(UNIQUE_ID_BASE + 8));
 }
+
+/* Deal with annoying newlib warnings */
+void _close(void);
+void _close(void) { }
+void _close_r(void) __attribute__((alias("_close")));
+void _lseek(void)   __attribute__((alias("_close")));
+void _read(void)    __attribute__((alias("_close")));
+void _write(void)   __attribute__((alias("_close")));

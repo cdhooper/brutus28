@@ -47,7 +47,7 @@ typedef uint32_t USART_TypeDef_P;
 static volatile uint cons_in_rb_producer; // Console input current writer pos
 static uint          cons_in_rb_consumer; // Console input current reader pos
 static uint8_t       cons_in_rb[1024];    // Console input ring buffer (FIFO)
-static uint8_t       usb_out_buf[256];    // USB output buffer
+static uint8_t       usb_out_buf[2048];   // USB output buffer
 static uint16_t      usb_out_bufpos = 0;  // USB output buffer position
 static bool          uart_console_active = false;
 
@@ -133,7 +133,6 @@ cons_rb_get(void)
     if (cons_in_rb_consumer == cons_in_rb_producer)
         return (-1);  // Ring buffer empty
 
-    uart_console_active = true;
     ch = cons_in_rb[cons_in_rb_consumer];
     cons_in_rb_consumer = (cons_in_rb_consumer + 1) % sizeof (cons_in_rb);
     return (ch);
@@ -222,7 +221,7 @@ usb_putchar_wait(int ch)
     if ((usb_console_active == true) &&
         (usb_out_bufpos >= sizeof (usb_out_buf))) {
         /* Buffer is full; need to first force a flush */
-        uint64_t timeout = timer_tick_plus_msec(50);
+        uint64_t timeout = timer_tick_plus_msec(10);
         while (usb_out_bufpos >= sizeof (usb_out_buf)) {
             usb_putchar_flush();
             if (timer_tick_has_elapsed(timeout)) {
@@ -239,9 +238,8 @@ usb_puts_wait(uint8_t *buf, uint32_t len)
 {
     if (usb_console_active == 0)
         return (1);
-
     if (usb_out_bufpos != 0) {
-        /* Must first flush outstanding text */
+        /* First flush outstanding text */
         uint64_t timeout = timer_tick_plus_msec(400);
         usb_putchar_flush();
         while (usb_out_bufpos != 0) {
@@ -288,6 +286,8 @@ putchar(int ch)
     last_putc = ch;
 
     usb_putchar_wait(ch);
+    if (usb_console_active && !uart_console_active)
+        return (0);
     return (uart_putchar(ch));
 }
 
@@ -312,6 +312,8 @@ getchar(void)
 void
 CONSOLE_IRQHandler(void)
 {
+    if (USART_SR(CONSOLE_USART) & (USART_SR_RXNE | USART_SR_ORE))
+        uart_console_active = true;
     while (USART_SR(CONSOLE_USART) & (USART_SR_RXNE | USART_SR_ORE))
         uart_rb_put(uart_recv(CONSOLE_USART));
 }

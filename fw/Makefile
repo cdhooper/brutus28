@@ -1,8 +1,8 @@
-BOARD_REV ?= 1
+BOARD_REV ?= 2
 
 SRCS   := main.c clock.c gpio.c printf.c timer.c uart.c usb.c version.c \
 	  led.c irq.c mem_access.c readline.c cmdline.c cmds.c pcmds.c \
-	  utils.c adc.c button.c pld.c
+	  utils.c adc.c button.c pld.c stm32flash.c scanf.c
 
 OBJDIR := objs
 OBJS   := $(SRCS:%.c=$(OBJDIR)/%.o)
@@ -66,7 +66,7 @@ OBJCOPY		:= $(PREFIX)-objcopy
 OBJDUMP		:= $(PREFIX)-objdump
 GDB		:= $(PREFIX)-gdb
 STFLASH		= $(shell which st-flash)
-OPT		:= -Os
+OPT		:= -O2
 DEBUG		:= -ggdb3
 CSTD		?= -std=gnu99
 
@@ -102,6 +102,9 @@ TGT_LDFLAGS		+= -Wl,--gc-sections
 ifeq ($(V),99)
 TGT_LDFLAGS		+= -Wl,--print-gc-sections
 endif
+
+#TGT_CFLAGS	+= -g
+#TGT_LDFLAGS	+= -g
 
 # Used libraries
 DEFS		+= -I$(OPENCM3_DIR)/include
@@ -151,7 +154,7 @@ $(OBJDIR)/%.o: %.cpp
 
 $(OBJDIR)/%.size: $(OBJDIR)/%.elf
 	@echo "Output code size:"
-	@$(SIZE) -A -d $< | egrep 'text|data|bss' | awk ' \
+	@$(SIZE) -A -d $< | grep -Ee 'text|data|bss' | awk ' \
     function human(x) { \
         if (x<1000) {return x} else {x/=1024} \
         s="kMGTEPZY"; \
@@ -204,32 +207,47 @@ just-dfu: $(UDEV_FILE_PATHS)
 dfu-unprotect: $(UDEV_FILE_PATHS)
 	$(DFU_UTIL) -s 0:force:unprotect -a 0 --device 0483:df11 --alt 0 --download $(BINARY).bin
 
+dfu-clobber: $(UDEV_FILE_PATHS)
+	$(DFU_UTIL) -s 0:force:unprotect --alt 1 --download flash_clobber.bin -Z 0x10 --dfuse-address 0x1ffff800:leave
+
+#dfu-clobber: $(UDEV_FILE_PATHS)
+#	$(DFU_UTIL) -s 0:force:unprotect --alt 1 --download flash_clobber.bin -Z 0xd --dfuse-address 0x1ffff800:leave
+
 # Write STM32 flash using ST-Link
-just-flash: just-erase $(ST_TOOLS_PATH)/st-flash | $(BINARY).bin $(UDEV_FILE_PATHS)
-	$(ST_TOOLS_PATH)/st-flash --reset write $(BINARY).bin 0x08000000
+just-flash: $(ST_TOOLS_PATH)/st-flash | $(BINARY).bin $(UDEV_FILE_PATHS)
+	$(ST_TOOLS_PATH)/st-flash $(ST_ARGS) --reset write $(BINARY).bin 0x08000000
 
 # Erase STM32 flash using ST-Link
 just-erase: $(ST_TOOLS_PATH)/st-flash | $(UDEV_FILE_PATHS)
-	$(ST_TOOLS_PATH)/st-flash --flash=0x100000 erase
+	$(ST_TOOLS_PATH)/st-flash $(ST_ARGS) --flash=0x100000 erase 0x08000000 0x3c000
 
 # Protect/unprotect/clobber flash by writing the option byte area
 # The following can also be done by the STM32CubeProgrammer.
 # F105 unlocked  1ffff800: a5 5a 07 f8 00 ff 00 ff ff 00 ff 00 ff 00 ff 00
 # F105 protect   1ffff800: 00 ff 07 f8 ff 00 ff 00 00 ff 00 ff 00 ff 00 ff
 # F105 clobber   1ffff800: 00 00 00 00 00 03 00 03 00 ff 00 ff 00 ff 00 ff
+
+# Select specific programmer ("make stinfo" to get serial)
+# export ST_ARGS="--serial 57FF6E064975545225502187"		# amiga1
+# export ST_ARGS="--serial 53FF74064986525547421187"		# amiga2
+# export ST_ARGS="--serial 303030303030303030303031"		# amiga1
+
 just-unprotect: $(ST_TOOLS_PATH)/st-flash | $(UDEV_FILE_PATHS)
-	$(ST_TOOLS_PATH)/st-flash --reset write flash_unprotect.bin 0x1ffff800
+	$(ST_TOOLS_PATH)/st-flash $(ST_ARGS) --reset write flash_unprotect.bin 0x1ffff800
 just-protect: $(ST_TOOLS_PATH)/st-flash | $(UDEV_FILE_PATHS)
-	$(ST_TOOLS_PATH)/st-flash --reset write flash_protect.bin 0x1ffff800
+	$(ST_TOOLS_PATH)/st-flash $(ST_ARGS) --reset write flash_protect.bin 0x1ffff800
 just-clobber: $(ST_TOOLS_PATH)/st-flash | $(UDEV_FILE_PATHS)
-	$(ST_TOOLS_PATH)/st-flash --reset write flash_clobber.bin 0x1ffff800
+	$(ST_TOOLS_PATH)/st-flash $(ST_ARGS) --reset write flash_clobber.bin 0x1ffff800
 
 dfu: all just-dfu
 flash: all just-flash
 
 # Connect to remote STM32 via ST-Link (follow with "make gdb")
-stlink: | $(UDEV_FILE_PATHS)
-	$(ST_TOOLS_PATH)/st-util --no-reset
+stlink: $(ST_TOOLS_PATH)/st-flash | $(UDEV_FILE_PATHS)
+	$(ST_TOOLS_PATH)/st-util $(ST_ARGS) --no-reset
+
+stinfo reset: $(ST_TOOLS_PATH)/st-flash | $(UDEV_FILE_PATHS)
+	$(ST_TOOLS_PATH)/st-info --probe
 
 # Get ST-TOOLS
 $(ST_BUILD_DIR) get-stutils:

@@ -90,6 +90,7 @@ static const uint8_t bit_to_pin_g22v10[] =
     21, 22, 23, 24,
 };
 
+#if BOARD_REV == 1
 static const uint8_t bit_to_pin_dip24[] =
 {
      1,  2,  3,  4,  5,  6,  7,  8,
@@ -127,7 +128,7 @@ static const uint8_t bit_to_pin_dip16[] =
      1,  2,  3,  4,  5,  6,  7,  8,
      0,  0,  0,  0,  0,  0,  0,  0,
      9, 10, 11, 12, 13, 14, 15, 16,
-     0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,
 };
 
 static const uint8_t bit_to_pin_dip14[] =
@@ -135,7 +136,7 @@ static const uint8_t bit_to_pin_dip14[] =
      1,  2,  3,  4,  5,  6,  7,  0,
      0,  0,  0,  0,  0,  0,  0,  0,
      0,  8,  9, 10, 11, 12, 13, 14,
-     0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,
 };
 
 static const uint8_t bit_to_pin_dip12[] =
@@ -143,7 +144,7 @@ static const uint8_t bit_to_pin_dip12[] =
      1,  2,  3,  4,  5,  6,  0,  0,
      0,  0,  0,  0,  0,  0,  0,  0,
      0,  0,  7,  8,  9, 10, 11, 12,
-     0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,
 };
 
 static const uint8_t bit_to_pin_dip10[] =
@@ -151,7 +152,7 @@ static const uint8_t bit_to_pin_dip10[] =
      1,  2,  3,  4,  5,  0,  0,  0,
      0,  0,  0,  0,  0,  0,  0,  0,
      0,  0,  0,  6,  7,  8,  9, 10,
-     0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,
 };
 
 static const uint8_t bit_to_pin_dip8[] =
@@ -159,7 +160,7 @@ static const uint8_t bit_to_pin_dip8[] =
      1,  2,  3,  4,  0,  0,  0,  0,
      0,  0,  0,  0,  0,  0,  0,  0,
      0,  0,  0,  0,  5,  6,  7,  8,
-     0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,
 };
 
 static const uint8_t bit_to_pin_dip6[] =
@@ -167,7 +168,7 @@ static const uint8_t bit_to_pin_dip6[] =
      1,  2,  3,  0,  0,  0,  0,  0,
      0,  0,  0,  0,  0,  0,  0,  0,
      0,  0,  0,  0,  0,  4,  5,  6,
-     0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,
 };
 
 static const uint8_t bit_to_pin_dip4[] =
@@ -175,8 +176,113 @@ static const uint8_t bit_to_pin_dip4[] =
      1,  2,  0,  0,  0,  0,  0,  0,
      0,  0,  0,  0,  0,  0,  0,  0,
      0,  0,  0,  0,  0,  0,  3,  4,
-     0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,
 };
+#else
+static const uint8_t bit_to_pin_dip28[] =
+{
+     1,  2,  3,  4,  5,  6,  7,  8,
+     9, 10, 11, 12, 13, 14, 15, 16,
+    17, 18, 19, 20, 21, 22, 23, 24,
+    25, 26, 27, 28
+};
+
+static const uint8_t bit_to_pin_dip26[] =
+{
+     1,  2,  3,  4,  5,  6,  7,  8,
+     9, 10, 11, 12, 13,  0,  0, 14,
+    15, 16, 17, 18, 19, 20, 21, 22,
+    23, 24, 25, 26
+};
+
+static const uint8_t bit_to_pin_dip24[] =
+{
+     1,  2,  3,  4,  5,  6,  7,  8,
+     9, 10, 11, 12,  0,  0,  0,  0,
+    13, 14, 15, 16, 17, 18, 19, 20,
+    21, 22, 23, 24,
+};
+
+static const uint8_t bit_to_pin_dip22[] =
+{
+     1,  2,  3,  4,  5,  6,  7,  8,
+     9, 10, 11,  0,  0,  0,  0,  0,
+     0, 12, 13, 14, 15, 16, 17, 18,
+    19, 20, 21, 22,
+};
+
+static const uint8_t bit_to_pin_dip20[] =
+{
+     1,  2,  3,  4,  5,  6,  7,  8,
+     9, 10,  0,  0,  0,  0,  0,  0,
+     0,  0, 11, 12, 13, 14, 15, 16,
+    17, 18, 19, 20,
+};
+
+static const uint8_t bit_to_pin_dip18[] =
+{
+     1,  2,  3,  4,  5,  6,  7,  8,
+     9,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0, 10, 11, 12, 13, 14,
+    15, 16, 17, 18,
+};
+
+static const uint8_t bit_to_pin_dip16[] =
+{
+     1,  2,  3,  4,  5,  6,  7,  8,
+     0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  9, 10, 11, 12,
+    13, 14, 15, 16,
+};
+
+static const uint8_t bit_to_pin_dip14[] =
+{
+     1,  2,  3,  4,  5,  6,  7,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  8,  9, 10,
+    11, 12, 13, 14,
+};
+
+static const uint8_t bit_to_pin_dip12[] =
+{
+     1,  2,  3,  4,  5,  6,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  7,  8,
+     9, 10, 11, 12,
+};
+
+static const uint8_t bit_to_pin_dip10[] =
+{
+     1,  2,  3,  4,  5,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  6,
+     7,  8,  9, 10,
+};
+
+static const uint8_t bit_to_pin_dip8[] =
+{
+     1,  2,  3,  4,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,
+     5,  6,  7,  8,
+};
+
+static const uint8_t bit_to_pin_dip6[] =
+{
+     1,  2,  3,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,
+     0,  4,  5,  6,
+};
+
+static const uint8_t bit_to_pin_dip4[] =
+{
+     1,  2,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  3,  4,
+};
+#endif
 
 static const uint8_t *bit_to_pin = NULL;
 
@@ -377,11 +483,13 @@ fatal_cfg(uint sline, uint eline, const char *fmt, ...)
 {
     va_list ap;
 
-    fprintf(stderr, "%s:%u", cfg_filename, sline);
-    if (sline != eline)
-        fprintf(stderr, "-%u ", eline);
-    else
-        fprintf(stderr, " ");
+    if (sline != 0) {
+        fprintf(stderr, "%s:%u", cfg_filename, sline);
+        if (sline != eline)
+            fprintf(stderr, "-%u ", eline);
+        else
+            fprintf(stderr, " ");
+    }
 
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
@@ -452,24 +560,16 @@ pin_to_bit(uint pin)
 }
 
 /*
- * pin_to_bit
- * ----------
- * Handle "DEVICE" keyword in a config file.
- * The current version only supports GAL22V10 parts.
+ * cfg_device_name
+ * ---------------
+ * Handle the specified device.
  */
 static void
-cfg_keyword_device(const char *sptr, const char *eptr, uint line)
+cfg_device_name(char *devname, uint line)
 {
-    uint bit;
-    char devname[32];
     char *ptr;
+    uint bit;
 
-    sptr += 6;  // DEVICE
-    if ((*sptr == ' ') || (*sptr == '\t'))
-        sptr++;
-
-    strncpy(devname, sptr, sizeof (devname));
-    devname[sizeof (devname) - 1] = '\0';
     for (ptr = devname; *ptr != '\0'; ptr++) {
         if (((*ptr < '0') || (*ptr > 'z')) ||
             ((*ptr > '9') && (*ptr < 'A')) ||
@@ -479,8 +579,13 @@ cfg_keyword_device(const char *sptr, const char *eptr, uint line)
         }
     }
 
-    if (strncasecmp(devname, "G22V10", 6) == 0)
+    if ((strncasecmp(devname, "G22V10", 6) == 0) ||
+        (strncasecmp(devname, "GAL22V10", 6) == 0))
         bit_to_pin = bit_to_pin_g22v10;
+    else if (strcasecmp(devname, "DIP28") == 0)
+        bit_to_pin = bit_to_pin_dip28;
+    else if (strcasecmp(devname, "DIP26") == 0)
+        bit_to_pin = bit_to_pin_dip26;
     else if (strcasecmp(devname, "DIP24") == 0)
         bit_to_pin = bit_to_pin_dip24;
     else if (strcasecmp(devname, "DIP22") == 0)
@@ -513,6 +618,26 @@ cfg_keyword_device(const char *sptr, const char *eptr, uint line)
         for (bit = 0; bit < 28; bit++)
             pinfo[bit].pi_num = bit + 1;
     }
+}
+
+/*
+ * cfg_keyword_device
+ * ------------------
+ * Handle "DEVICE" keyword in a config file.
+ * The current version only supports GAL22V10 parts.
+ */
+static void
+cfg_keyword_device(const char *sptr, const char *eptr, uint line)
+{
+    char devname[32];
+
+    sptr += 6;  // DEVICE
+    if ((*sptr == ' ') || (*sptr == '\t'))
+        sptr++;
+
+    strncpy(devname, sptr, sizeof (devname));
+    devname[sizeof (devname) - 1] = '\0';
+    cfg_device_name(devname, line);
 }
 
 /*
@@ -760,7 +885,7 @@ build_bit_flip_offsets(void)
  * walk_find_affected
  * ------------------
  * This function will walk every bit of all input lines, comparing the
- * input line with it's bit-flipped version at each bit. Any bit difference
+ * input line with its bit-flipped version at each bit. Any bit difference
  * in the output will be recorded as the flipped bit caused that. This is
  * not necessarily true, as registered (latched) and clocked values will
  * confuse this logic.
@@ -1645,24 +1770,34 @@ main(int argc, char *argv[])
     int line_num = 0;
     int count = 0;
     int content_type = CONTENT_UNKNOWN;
+    char *cfg_device = NULL;
 
     for (arg = 1; arg < argc; arg++) {
-        if (cap_filename == NULL) {
-            cap_filename = argv[arg];
+        const char *ptr = argv[arg];
+        if (strcmp(ptr, "-d") == 0) {
+            arg++;
+            cfg_device = strdup(argv[arg]);
+        } else if (cap_filename == NULL) {
+            cap_filename = ptr;
         } else if (cfg_filename == NULL) {
-            cfg_filename = argv[arg];
+            cfg_filename = ptr;
         } else {
-            errx(EXIT_FAILURE, "Unknown argument %s", argv[arg]);
+            warnx("Unknown argument %s", argv[arg]);
+            printf("Usage: cap_file [cfg_file] [-d <devtype>]\n"
+                   "       <devtype> is one of dip4...dip28, g220v10");
+            exit(EXIT_FAILURE);
         }
     }
 
     if (cap_filename == NULL)
-        errx(EXIT_FAILURE, "You must specify a cap_filename to read");
+        errx(EXIT_FAILURE, "You must specify a cap_filename and optional cfg_filename");
 
     initialize_pinfo();
 
     read_cfg_file(cfg_filename);
     read_cap_file(cap_filename);
+    if (cfg_device != NULL)
+        cfg_device_name(cfg_device, 0);
     analyze();
     collect_or_masks();
     merge_or_masks();

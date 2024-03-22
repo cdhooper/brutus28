@@ -70,11 +70,16 @@
 #define GPIO_SETMODE_OUTPUT_AF_ODRAIN_50 0xf  // 50 MHz, Alt func. Open-Drain
 #endif
 
+#define NUM_GPIO_BANKS 6
+
 void gpio_setv(uint32_t GPIOx, uint16_t GPIO_Pins, int value);
 void gpio_setmode(uint32_t GPIOx, uint16_t GPIO_Pins, uint value);
+uint gpio_getmode(uint32_t GPIOx, uint pin);
 void gpio_init(void);
-void gpio_show(int whichport, int whichpin);
-void gpio_assign(int whichport, int whichpin, const char *assign);
+void gpio_show(int whichport, int pins);
+void gpio_assign(int whichport, int pins, const char *assign);
+uint gpio_name_match(const char **name, uint16_t pins[NUM_GPIO_BANKS]);
+char *gpio_to_str(uint32_t port, uint16_t pin);
 
 #endif /* _GPIO_H */
 

@@ -46,7 +46,7 @@ main(void)
     reset_everything();
     clock_init();
     timer_init();
-    timer_delay_msec(500);  // Just for development purposes
+    timer_delay_msec(10);  // Just for development purposes
     gpio_init();
     led_busy(1);
     uart_init();

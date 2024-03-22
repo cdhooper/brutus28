@@ -231,7 +231,7 @@ gpio_setmode(uint32_t GPIOx, uint16_t GPIO_Pins, uint value)
  * ------------
  * Get the input/output mode of the specified GPIO pins.
  */
-static uint
+uint
 gpio_getmode(uint32_t GPIOx, uint pin)
 {
 #ifdef STM32F1
@@ -259,6 +259,25 @@ gpio_num_to_gpio(uint num)
     return (gpios[num]);
 }
 
+char *
+gpio_to_str(uint32_t port, uint16_t pin)
+{
+    uint gpio;
+    uint bit;
+    static char name[8];
+    static const uint32_t gpios[] = {
+        GPIOA, GPIOB, GPIOC, GPIOD, GPIOE, GPIOF
+    };
+    for (gpio = 0; gpio < ARRAY_SIZE(gpios); gpio++)
+        if (gpios[gpio] == port)
+            break;
+    for (bit = 0; bit < 16; bit++)
+        if (pin & BIT(bit))
+            break;
+    sprintf(name, "P%c%u", gpio + 'A', bit);
+    return (name);
+}
+
 #ifdef STM32F1
 static const char * const gpio_mode_short[] = {
     "A", "O1", "O2", "O5",      // AnalogI, Output {10, 2, 50} MHz
@@ -278,27 +297,173 @@ static const char * const gpio_mode_long[] = {
 };
 #endif
 
+typedef struct {
+    char    name[10];
+    uint8_t port;
+    uint8_t pin;
+} gpio_names_t;
+
+#define GPIO_A 0
+#define GPIO_B 1
+#define GPIO_C 2
+#define GPIO_D 3
+#define GPIO_E 4
+static const gpio_names_t gpio_names[] = {
+    { "EN_VCC",    GPIO_B, 5 },
+    { "EN_GND",    GPIO_C, 12 },
+    { "POWERPLD",  GPIO_B, 8 },
+    { "POWER",     GPIO_B, 9 },
+    { "ALERT",     GPIO_B, 10 },
+    { "BUSY",      GPIO_B, 11 },
+    { "PLD_1",     GPIO_E, 0 },
+    { "PLD_2",     GPIO_E, 1 },
+    { "PLD_3",     GPIO_E, 2 },
+    { "PLD_4",     GPIO_E, 3 },
+    { "PLD_5",     GPIO_E, 4 },
+    { "PLD_6",     GPIO_E, 5 },
+    { "PLD_7",     GPIO_E, 6 },
+    { "PLD_8",     GPIO_E, 7 },
+    { "PLD_9",     GPIO_E, 8 },
+    { "PLD_10",    GPIO_E, 9 },
+    { "PLD_11",    GPIO_E, 10 },
+    { "PLD_12",    GPIO_E, 11 },
+    { "PLD_13",    GPIO_E, 12 },
+    { "PLD_14",    GPIO_E, 13 },
+    { "PLD_15",    GPIO_E, 14 },
+    { "PLD_16",    GPIO_E, 15 },
+    { "PLD_17",    GPIO_C, 0 },
+    { "PLD_18",    GPIO_C, 1 },
+    { "PLD_19",    GPIO_C, 2 },
+    { "PLD_20",    GPIO_C, 3 },
+    { "PLD_21",    GPIO_C, 4 },
+    { "PLD_22",    GPIO_C, 5 },
+    { "PLD_23",    GPIO_C, 6 },
+    { "PLD_24",    GPIO_C, 7 },
+    { "PLD_25",    GPIO_C, 8 },
+    { "PLD_26",    GPIO_C, 9 },
+    { "PLD_27",    GPIO_C, 10 },
+    { "PLD_28",    GPIO_C, 11 },
+    { "PLDD1",     GPIO_D, 0 },
+    { "PLDD2",     GPIO_D, 1 },
+    { "PLDD3",     GPIO_D, 2 },
+    { "PLDD4",     GPIO_D, 3 },
+    { "PLDD5",     GPIO_D, 4 },
+    { "PLDD6",     GPIO_D, 5 },
+    { "PLDD7",     GPIO_D, 6 },
+    { "PLDD8",     GPIO_D, 7 },
+    { "PLDD9",     GPIO_D, 8 },
+    { "PLDD10",    GPIO_D, 9 },
+    { "PLDD11",    GPIO_D, 10 },
+    { "PLDD12",    GPIO_D, 11 },
+    { "PLDD13",    GPIO_D, 12 },
+    { "PLDD14",    GPIO_D, 13 },
+    { "PLDD15",    GPIO_D, 14 },
+    { "PLDD16",    GPIO_D, 15 },
+    { "PLDD17",    GPIO_A, 0 },
+    { "PLDD18",    GPIO_A, 1 },
+    { "PLDD19",    GPIO_A, 2 },
+    { "PLDD20",    GPIO_A, 3 },
+    { "PLDD21",    GPIO_A, 4 },
+    { "PLDD22",    GPIO_A, 5 },
+    { "PLDD23",    GPIO_A, 6 },
+    { "PLDD24",    GPIO_A, 7 },
+    { "PLDD25",    GPIO_B, 12 },
+    { "PLDD26",    GPIO_B, 13 },
+    { "PLDD27",    GPIO_B, 14 },
+    { "PLDD28",    GPIO_B, 15 },
+    { "ABORTP",    GPIO_B, 4 },
+    { "USB_CC1",   GPIO_A, 8 },
+    { "USB_V5",    GPIO_A, 9 },
+    { "USB_CC2",   GPIO_A, 10 },
+    { "USB_DM",    GPIO_A, 11 },
+    { "USB_DP",    GPIO_A, 12 },
+    { "CONS_TX",   GPIO_B, 6 },
+    { "CONS_RX",   GPIO_B, 7 },
+};
+
+/*
+ * gpio_name_match
+ * ---------------
+ * Convert a text name for a GPIO to the actual port and pin used.
+ * This function returns 0 on match and non-zero on failure to match.
+ */
+uint
+gpio_name_match(const char **namep, uint16_t pins[NUM_GPIO_BANKS])
+{
+    const char *name = *namep;
+    const char *ptr;
+    uint cur;
+    uint len;
+    uint wildcard = 0;
+    uint matched = 0;
+    for (ptr = name; *ptr != ' '; ptr++) {
+        if (((*ptr < '0') || ((*ptr > '9') && (*ptr < 'A')) ||
+             (*ptr > 'z') || ((*ptr > 'Z') && (*ptr < 'a'))) &&
+            (*ptr != '_')) {
+            break;  // Not alphanumeric
+        }
+    }
+    len = ptr - name;
+    if (strncmp(name, "?", len) == 0) {
+        printf("GPIO names\n ");
+        for (cur = 0; cur < ARRAY_SIZE(gpio_names); cur++)
+            printf(" %s", gpio_names[cur].name);
+        printf("\n");
+        return (1);
+    }
+    if (*ptr == '*') {
+        ptr++;
+        wildcard = 1;
+    }
+
+    for (cur = 0; cur < ARRAY_SIZE(gpio_names); cur++) {
+        if ((strncasecmp(name, gpio_names[cur].name, len) == 0) &&
+            (wildcard || (gpio_names[cur].name[len] == '\0'))) {
+            uint port = gpio_names[cur].port;
+            if (port >= NUM_GPIO_BANKS)
+                return (1);
+            pins[port] |= BIT(gpio_names[cur].pin);
+            matched++;
+        }
+    }
+    if (matched == 0)
+        return (1);  // No match
+    *namep = ptr;
+    return (0);
+}
+
+static const char *
+gpio_to_name(int port, int pin)
+{
+    uint cur;
+    for (cur = 0; cur < ARRAY_SIZE(gpio_names); cur++) {
+        if ((port == gpio_names[cur].port) && (pin == gpio_names[cur].pin))
+            return (gpio_names[cur].name);
+    }
+    return (NULL);
+}
+
 /*
  * gpio_show
  * ---------
  * Display current values and input/output state of GPIOs.
  */
 void
-gpio_show(int whichport, int whichpin)
+gpio_show(int whichport, int pins)
 {
     int port;
     int pin;
     uint mode;
-    uint print_all = (whichport < 0) && (whichpin < 0);
+    uint print_all = (whichport < 0) && (pins == 0xffff);
 
     if (print_all) {
         printf("PLD  EN_VCC=!PB5 EN_GND=PC12 SenseVCC=PB0 SenseGND=PB1\n"
-               "LED  PLDVCC=PB8 Power=PB9 Alert=PB10 Busy=PB11\n"
+               "LED  PowerPLD=PB8 Power=PB9 Alert=PB10 Busy=PB11\n"
                "PLD  1-16=PE0-PE15 17-28=PC0-PC11\n"
                "PLDD 1-16=PD0-PD15 17-24=PA0-PA7 25-28=PB12-PB15\n"
                "USB  V5=PA9 CC1=PA8 CC2=PA10 DM=PA11 DP=PA12\n");
         printf("\nMODE  ");
-        for (pin = 0; pin < 16; pin++)
+        for (pin = 15; pin >= 0; pin--)
             printf("%4d", pin);
         printf("\n");
     }
@@ -309,9 +474,9 @@ gpio_show(int whichport, int whichpin)
             continue;
         if (print_all)
             printf("GPIO%c ", 'A' + port);
-        for (pin = 0; pin < 16; pin++) {
+        for (pin = 15; pin >= 0; pin--) {
             const char *mode_txt;
-            if ((whichpin >= 0) && (pin != whichpin))
+            if ((BIT(pin) & pins) == 0)
                 continue;
             mode = gpio_getmode(gpio, pin);
 #ifdef STM32F1
@@ -329,6 +494,7 @@ gpio_show(int whichport, int whichpin)
             if (print_all) {
                 printf("%4s", mode_txt);
             } else {
+                const char *name;
                 char mode_extra[8];
                 uint pinstate = !!(gpio_get(gpio, BIT(pin)));
                 mode_extra[0] = '\0';
@@ -338,8 +504,12 @@ gpio_show(int whichport, int whichpin)
                     if (outval != pinstate)
                         sprintf(mode_extra, "=%d>", outval);
                 }
-                printf("P%c%d=%s (%s%d)\n",
+                printf("P%c%d=%s (%s%d)",
                         'A' + port, pin, mode_txt, mode_extra, pinstate);
+                name = gpio_to_name(port, pin);
+                if (name != NULL)
+                    printf(" %s", name);
+                printf("\n");
             }
         }
         if (print_all)
@@ -350,14 +520,14 @@ gpio_show(int whichport, int whichpin)
         return;
 
     printf("\nState ");
-    for (pin = 0; pin < 16; pin++)
+    for (pin = 15; pin >= 0; pin--)
         printf("%4d", pin);
     printf("\n");
 
     for (port = 0; port < 5; port++) {
         uint32_t gpio = gpio_num_to_gpio(port);
         printf("GPIO%c ", 'A' + port);
-        for (pin = 0; pin < 16; pin++) {
+        for (pin = 15; pin >= 0; pin--) {
             uint pinstate = !!(gpio_get(gpio, BIT(pin)));
             if ((gpio_getmode(gpio, pin) & 3) != 0) {
                 /* Not in an input mode */
@@ -380,11 +550,10 @@ gpio_show(int whichport, int whichpin)
  * user-specified string.
  */
 void
-gpio_assign(int whichport, int whichpin, const char *assign)
+gpio_assign(int whichport, int pins, const char *assign)
 {
     uint mode;
     uint gpio;
-    uint pins;
     if (*assign == '?') {
         printf("Valid modes:");
         for (mode = 0; mode < ARRAY_SIZE(gpio_mode_short); mode++)
@@ -393,7 +562,6 @@ gpio_assign(int whichport, int whichpin, const char *assign)
         return;
     }
     gpio = gpio_num_to_gpio(whichport);
-    pins = BIT(whichpin);
     for (mode = 0; mode < ARRAY_SIZE(gpio_mode_short); mode++) {
         if (strcasecmp(gpio_mode_short[mode], assign) == 0) {
             gpio_setmode(gpio, pins, mode);
@@ -424,11 +592,18 @@ gpio_assign(int whichport, int whichpin, const char *assign)
             break;
         case '0':
             if (assign[1] == '\0') {
+                uint pin;
                 gpio_setv(gpio, pins, 0);
-                mode = gpio_getmode(gpio, whichpin);
-                if ((mode & 3) == 0) {
-                    /* Currently an input mode -- default to 2MHz Output */
-                    gpio_setmode(gpio, pins, GPIO_SETMODE_OUTPUT_PPULL_2);
+change_to_output:
+                for (pin = 0; pin < 16; pin++) {
+                    if ((pins & BIT(pin)) == 0)
+                        continue;
+                    mode = gpio_getmode(gpio, pin);
+                    if ((mode & 3) == 0) {
+                        /* Currently an input mode -- default to 2MHz Output */
+                        gpio_setmode(gpio, BIT(pin),
+                                     GPIO_SETMODE_OUTPUT_PPULL_2);
+                    }
                 }
                 return;
             }
@@ -436,11 +611,7 @@ gpio_assign(int whichport, int whichpin, const char *assign)
         case '1':
             if (assign[1] == '\0') {
                 gpio_setv(gpio, pins, 1);
-                if ((mode & 3) == 0) {
-                    /* Currently an input mode -- default to 2MHz Output */
-                    gpio_setmode(gpio, pins, GPIO_SETMODE_OUTPUT_PPULL_2);
-                }
-                return;
+                goto change_to_output;
             }
             break;
         case 'p':

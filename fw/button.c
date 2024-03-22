@@ -34,7 +34,7 @@ button_poll(void)
 }
 
 /*
- * is_abort_button_pressed() turns reports whether the abort button was
+ * is_abort_button_pressed() reports whether the abort button was
  *                           pressed since the last time it was called.
  *                           Note that this function implements an edge
  *                           detector, so that if the button is held,
@@ -47,20 +47,6 @@ button_poll(void)
 int
 is_abort_button_pressed(void)
 {
-    static int was_pressed = false;
-    bool       pressed;
-
     button_poll();
-
-    pressed = abort_pressed;
-    abort_pressed = false;
-
-    if (was_pressed) {
-        if (pressed == false)
-            was_pressed = false;  // no longer pressed
-        return (false);
-    }
-    if (pressed)
-        was_pressed = true;
-    return (pressed);
+    return (abort_pressed);
 }

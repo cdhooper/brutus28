@@ -34,6 +34,7 @@
 #define PLD_VCC_5V      2
 static uint8_t pld_vcc_jumper;
 
+#if BOARD_REV == 1
 #define PRESENT_PINS_PLCC28 0x0fdfbf7e
 #define PRESENT_PINS_DIP24  0x00ffffff
 #define PRESENT_PINS_DIP22  0x00ffe7ff
@@ -46,24 +47,47 @@ static uint8_t pld_vcc_jumper;
 #define PRESENT_PINS_DIP8   0x00f0000f
 #define PRESENT_PINS_DIP6   0x00e00007
 #define PRESENT_PINS_DIP4   0x00c00003
+#else
+#define PRESENT_PINS_PLCC28 0x0fdfbf7e
+#define PRESENT_PINS_DIP28  0x0fffffff
+#define PRESENT_PINS_DIP26  0x0fff9fff
+#define PRESENT_PINS_DIP24  0x0fff0fff
+#define PRESENT_PINS_DIP22  0x0ffe07ff
+#define PRESENT_PINS_DIP20  0x0ffc03ff
+#define PRESENT_PINS_DIP18  0x0ff801ff
+#define PRESENT_PINS_DIP16  0x0ff000ff
+#define PRESENT_PINS_DIP14  0x0fe0007f
+#define PRESENT_PINS_DIP12  0x0fc0003f
+#define PRESENT_PINS_DIP10  0x0f80001f
+#define PRESENT_PINS_DIP8   0x0f00000f
+#define PRESENT_PINS_DIP6   0x0e000007
+#define PRESENT_PINS_DIP4   0x0c000003
+#endif
+
+static void pld_output(uint32_t data);
 
 static const struct {
     uint32_t          present;
     const char *const name;
+    uint              gnd_pins;
+    uint              vcc_pins;
 } installed_types[] = {
-    { PRESENT_PINS_PLCC28, "PLCC28" },
-    { PRESENT_PINS_DIP24,  "DIP24" },
-    { PRESENT_PINS_DIP22,  "DIP22" },
-    { PRESENT_PINS_DIP20,  "DIP20" },
-    { PRESENT_PINS_DIP18,  "DIP18" },
-    { PRESENT_PINS_DIP16,  "DIP16" },
-    { PRESENT_PINS_DIP14,  "DIP14" },
-    { PRESENT_PINS_DIP12,  "DIP12" },
-    { PRESENT_PINS_DIP10,  "DIP10" },
-    { PRESENT_PINS_DIP8,   "DIP8"  },
-    { PRESENT_PINS_DIP6,   "DIP6"  },
-    { PRESENT_PINS_DIP4,   "DIP4"  },
+    { PRESENT_PINS_PLCC28, "PLCC28", BIT(14), BIT(28) },
+    { PRESENT_PINS_DIP28,  "DIP28",  BIT(14), BIT(28) },
+    { PRESENT_PINS_DIP26,  "DIP26",  BIT(13), BIT(28) },
+    { PRESENT_PINS_DIP24,  "DIP24",  BIT(12), BIT(28) },
+    { PRESENT_PINS_DIP22,  "DIP22",  BIT(11), BIT(28) },
+    { PRESENT_PINS_DIP20,  "DIP20",  BIT(10), BIT(28) },
+    { PRESENT_PINS_DIP18,  "DIP18",   BIT(9), BIT(28) },
+    { PRESENT_PINS_DIP16,  "DIP16",   BIT(8), BIT(28) },
+    { PRESENT_PINS_DIP14,  "DIP14",   BIT(7), BIT(28) },
+    { PRESENT_PINS_DIP12,  "DIP12",   BIT(6), BIT(28) },
+    { PRESENT_PINS_DIP10,  "DIP10",   BIT(5), BIT(28) },
+    { PRESENT_PINS_DIP8,   "DIP8",    BIT(4), BIT(28) },
+    { PRESENT_PINS_DIP6,   "DIP6",    BIT(3), BIT(28) },
+    { PRESENT_PINS_DIP4,   "DIP4",    BIT(2), BIT(28) },
 };
+int device_inserted = -1;
 
 /*
  * pld_vcc_disable
@@ -166,6 +190,36 @@ pldd_gpio_setmode(uint32_t pins, uint mode)
 }
 
 /*
+ * pldd_gpio_getmode
+ * -----------------
+ * Get GPIO pin configuration for the STM32 PLDD_* pins.
+ */
+static uint
+pldd_gpio_getmode(uint pin)
+{
+    if (pin >= 24)
+        return (gpio_getmode(PLDD25_PORT, pin - 24 + 12));
+    else if (pin >= 16)
+        return (gpio_getmode(PLDD17_PORT, pin - 16));
+    else
+        return (gpio_getmode(PLDD1_PORT, pin));
+}
+
+/*
+ * pld_gpio_getmode
+ * ----------------
+ * Get GPIO pin configuration for the STM32 PLD_* pins.
+ */
+static uint
+pld_gpio_getmode(uint pin)
+{
+    if (pin >= 16)
+        return (gpio_getmode(PLD17_PORT, pin - 16));
+    else
+        return (gpio_getmode(PLD1_PORT, pin));
+}
+
+/*
  * pld_output_disable
  * ------------------
  * Configure STM32 PLD_* and PLDD_* pins as inputs (stop driving).
@@ -177,7 +231,20 @@ pld_output_disable(void)
 {
     /* Configure PLD and PLDD pins as input */
     pld_gpio_setmode(0x0fffffff, GPIO_SETMODE_INPUT);
-    pldd_gpio_setmode(0x0fffffff, GPIO_SETMODE_INPUT);
+    pldd_gpio_setmode(0x0fffffff, GPIO_SETMODE_INPUT_PULLUPDOWN);
+    pld_output(0);
+}
+
+/*
+ * pld_output_value
+ * ----------------
+ * Report the current value being driven to the PLD_* pins, so long
+ * as they are configured as outputs or pull-up/pull-down.
+ */
+static uint32_t
+pld_output_value(void)
+{
+    return (GPIO_ODR(PLD1_PORT) | ((GPIO_ODR(PLD17_PORT) & 0x0fff) << 16));
 }
 
 /*
@@ -276,12 +343,18 @@ pldd_output_pld_input(uint32_t wvalue)
 {
     pldd_output(wvalue);
 
+#if 0
     /*
      * Delay to allow for PLD gate latency
      * 72 MHz = 13.9 ns. 2x nop should allow 27 ns of latency.
      */
     __asm__ volatile("nop");
     __asm__ volatile("nop");
+    __asm__ volatile("nop");
+    __asm__ volatile("nop");
+#else
+    timer_delay_usec(1);
+#endif
 
     return (pld_input());
 }
@@ -297,6 +370,7 @@ pld_disable(void)
 {
     pld_output_disable();
     pld_power_disable();
+    pldd_output(0);
     adc_enable();
 }
 
@@ -591,22 +665,29 @@ pld_report_5v_3p3v_jumper(int verbose)
 static rc_t
 pld_report_gnd_and_vcc_jumpers(int verbose, uint32_t *vcc_p, uint32_t *gnd_p)
 {
-    uint pld_gnd;
-    uint pld_vcc;
+    uint values;
     uint pin;
     uint vcc_pins = 0;
     uint gnd_pins = 0;
+    uint voltage_vcc[28];
+    uint voltage_gnd[28];
+    uint vcc_peak = 0;
+    uint gnd_peak = 0;
 
     adc_enable();
 
     /*
-     * Find potential VCC and GND pins. This can be difficult because if
-     * there is a PLD in a socket, both VCC and GND will show voltage on
-     * pins due to backpower through the device.
+     * Find VCC and GND pins. This can be difficult because if there is a
+     * PLD in a socket, both VCC and GND will show voltage on pins due to
+     * backpower through the device.
      *
      * 1. Drain residual power
-     * 2. Set all PLDD pins to input
-     * 3. On at a time, set PLDD pins to output 1
+     * 2. Set all PLDD pins to pulldown
+     * 3. One at a time, set PLDD pins to output 1
+     * 4. Capture which pins cause VCC and GND to have the highest voltage.
+     * 5. After iterating all pins, drive PLD VCC and GND
+     * 6. Capture which of the candidate VCC and GND pins go to 1 or 0.
+     *
      * 4. At each set PLDD pin, measure VCC and GND.
      * 5. If no PLD is installed, we should get a very clear > 1.2V reading
      *    for pins connected to VCC or GND.
@@ -622,68 +703,51 @@ pld_report_gnd_and_vcc_jumpers(int verbose, uint32_t *vcc_p, uint32_t *gnd_p)
     pldd_output_enable();
     timer_delay_msec(10);
     pldd_gpio_setmode(0x0fffffff, GPIO_SETMODE_INPUT);
-    pldd_output(0x0fffffff);
+    pld_gpio_setmode(0x0fffffff, GPIO_SETMODE_INPUT);
+    pld_output(0x0fffffff);
 
     for (pin = 0; pin < 28; pin++) {
         pldd_output(BIT(pin));
-        pldd_gpio_setmode(0x0fffffff, GPIO_SETMODE_INPUT);
         pldd_gpio_setmode(BIT(pin), GPIO_SETMODE_OUTPUT_PPULL_2);
         timer_delay_msec(1);
-        pld_vcc = adc_get_pld_readings(&pld_gnd);
-        if (pld_vcc > 1200)
-            vcc_pins |= BIT(pin);  // 1.200V threshold
-        if (pld_gnd > 1200)
-            gnd_pins |= BIT(pin);  // 1.200V threshold
-    }
-#ifdef DEBUG_VCC_AND_GND_JUMPERS
-    pld_disable();
-    printf("PLD_VCC=");
-    print_binary(vcc_pins);
-    printf("\nPLD_GND=");
-    print_binary(gnd_pins);
-    printf("\n");
-#endif
 
-    /*
-     * Second part of the test is just to differentiate VCC and GND
-     * connected pins when a PLD is installed in the socket.
-     *
-     * 1. Enable PLD GND plane
-     * 2. Walk the potential VCC and GND pins, setting each one individually
-     *    high using the strong drive PLD pins.
-     * 3. Observe VCC and GND analog readings. VCC will not be above 1.0V
-     *    on the GND-connected pin. GND should be low in all cases.
-     * 4. If VCC is above 1.0V, then the pin is connected to VCC and not GND.
-     */
-    pld_disable();
-    pld_gnd_enable();
-    pld_output(0x00000000);
-    pld_gpio_setmode(0x0fffffff, GPIO_SETMODE_INPUT);
-
-    for (pin = 0; pin < 28; pin++) {
-        if ((BIT(pin) & (vcc_pins | gnd_pins)) == 0)
-            continue;
-        pld_gpio_setmode(0x0fffffff, GPIO_SETMODE_INPUT);
-        pld_output(BIT(pin));
-        pld_gpio_setmode(BIT(pin), GPIO_SETMODE_OUTPUT_PPULL_2);
-        timer_delay_msec(1);
-
-        pld_vcc = adc_get_pld_readings(&pld_gnd);
+        voltage_vcc[pin] = adc_get_pld_readings(&voltage_gnd[pin]);
+        if (vcc_peak < voltage_vcc[pin])
+            vcc_peak = voltage_vcc[pin];
+        if (gnd_peak < voltage_gnd[pin])
+            gnd_peak = voltage_gnd[pin];
+        pldd_output(0);
+        pldd_gpio_setmode(BIT(pin), GPIO_SETMODE_INPUT);
 #ifdef DEBUG_VCC_AND_GND_JUMPERS
         uint input = pld_input();
         printf("Pin%-2u ", pin + 1);
         print_binary(input);
-        show_reading(" VCC=", pld_vcc);
-        show_reading(" GND=", pld_gnd);
+        show_reading(" VCC=", voltage_vcc[pin]);
+        show_reading(" GND=", voltage_gnd[pin]);
         printf("\n");
 #endif
-        if (pld_vcc < 1200)
-            vcc_pins &= ~BIT(pin);
-        else
-            gnd_pins &= ~BIT(pin);
+    }
+    pld_disable();
+
+    /* Find interesting VCC and GND pins */
+    for (pin = 0; pin < 28; pin++) {
+        if ((voltage_vcc[pin] * 100 / vcc_peak) < 95)
+            voltage_vcc[pin] = 0;
+        if ((voltage_gnd[pin] * 100 / gnd_peak) < 95)
+            voltage_gnd[pin] = 0;
     }
 
-    pld_disable();
+    /* Test the interesting pins when VCC and GND are applied */
+    pld_power_enable();
+    timer_delay_msec(1);
+    values = pld_input();
+    pld_power_disable();
+    for (pin = 0; pin < 28; pin++) {
+        if (voltage_vcc[pin] && (values & BIT(pin)))
+            vcc_pins |= BIT(pin);
+        if (voltage_gnd[pin] && ((values & BIT(pin)) == 0))
+            gnd_pins |= BIT(pin);
+    }
 
     printf("VCC jumpers:");
     for (pin = 0; pin < 28; pin++)
@@ -707,6 +771,24 @@ pld_report_gnd_and_vcc_jumpers(int verbose, uint32_t *vcc_p, uint32_t *gnd_p)
                (gnd_pins == (BIT(12) >> 1)) &&
                (pld_vcc_jumper == PLD_VCC_5V)) {
         printf("Jumper configuration is standard for a DIP GAL22V10\n");
+    } else if (device_inserted >= 0) {
+        if ((gnd_pins == (installed_types[device_inserted].gnd_pins >> 1)) &&
+            (vcc_pins == (installed_types[device_inserted].vcc_pins >> 1))) {
+            printf("Jumper configuration is standard for %s\n",
+                   installed_types[device_inserted].name);
+        } else {
+            printf("Jumper configuration is not standard for %s\n",
+                   installed_types[device_inserted].name);
+            printf("    Expected GND=");
+            for (pin = 1; pin <= 28; pin++)
+                if (installed_types[device_inserted].gnd_pins & BIT(pin))
+                    printf("Pin%u ", pin);
+            printf(" VCC=");
+            for (pin = 1; pin <= 28; pin++)
+                if (installed_types[device_inserted].vcc_pins & BIT(pin))
+                    printf("Pin%u", pin);
+            printf("\n");
+        }
     } else {
         printf("Jumper configuration is not standard\n"
                "    For PLCC GAL22V10, need 5V, VCC=Pin28, GND=Pin14\n"
@@ -731,6 +813,7 @@ pld_detect_part_present(uint32_t *pins_present)
     uint pld_indata;
     uint present = 0;
     uint count;
+    uint dip;
     pld_disable();
 
     pldd_output(0x0fffffff);
@@ -752,28 +835,28 @@ pld_detect_part_present(uint32_t *pins_present)
 
     count = bit_count(present);
 
-    if ((present & PRESENT_PINS_PLCC28) == PRESENT_PINS_PLCC28) {
-        printf("Detected %s device inserted\n", installed_types[0].name);
+    device_inserted = -1;
+    for (dip = 0; dip < ARRAY_SIZE(installed_types); dip++) {
+        if (present == installed_types[dip].present) {
+            printf("Detected %s device inserted\n",
+                   installed_types[dip].name);
+            break;
+        }
+    }
+    if (dip < ARRAY_SIZE(installed_types)) {
+        device_inserted = dip;
     } else if ((count > 23) && (present & 0x0f000000)) {
         printf("Likely PLCC28 device inserted\n    ");
         print_binary(present);
         printf("\n");
+        device_inserted = 0;
     } else if (count < 4) {
         printf("No part inserted\n");
+        device_inserted = -2;
     } else {
-        uint dip;
-        for (dip = 0; dip < ARRAY_SIZE(installed_types); dip++) {
-            if (present == installed_types[dip].present) {
-                printf("Detected %s device inserted\n",
-                       installed_types[dip].name);
-                break;
-            }
-        }
-        if (dip >= ARRAY_SIZE(installed_types)) {
-            printf("Unknown device inserted\n    ");
-            print_binary(present);
-            printf("\n");
-        }
+        printf("Unknown device inserted\n    ");
+        print_binary(present);
+        printf("\n");
     }
     if (pins_present != NULL)
         *pins_present = present;
@@ -802,13 +885,13 @@ pld_check(void)
     pld_detect_part_present(NULL);
     rc = pld_report_5v_3p3v_jumper(1);
     if (rc != RC_SUCCESS)
-        return (rc);
+        goto fail;
     rc = pld_report_gnd_and_vcc_jumpers(1, &vcc_pins, &gnd_pins);
     if (rc != RC_SUCCESS)
-        return (rc);
+        goto fail;
     rc = pld_check_vcc_gnd_shorts();
     if (rc != RC_SUCCESS)
-        return (rc);
+        goto fail;
 
     ignore_pins = vcc_pins | gnd_pins;
 
@@ -934,8 +1017,8 @@ pld_check(void)
             rc = RC_FAILURE;
         }
     }
+fail:
     pld_disable();
-
     return (rc);
 }
 
@@ -989,6 +1072,18 @@ cmd_pld_get_ignore_mask(int argc, char * const *argv,
         const char *ptr = argv[arg];
         const char *nptr;
         int         mode;
+        uint        type;
+
+        /* Check for exact match of type, such as "dip18" */
+        for (type = 0; type < ARRAY_SIZE(installed_types); type++) {
+            if (strcasecmp(installed_types[type].name, ptr) == 0)
+                break;
+        }
+        if (type < ARRAY_SIZE(installed_types)) {
+            ignore_mask = ~installed_types[type].present;
+            ignore_initialized = 1;
+            continue;
+        }
         switch (*ptr) {
             case '?':
                 printf("%s", cmd_pld_walk_help);
@@ -1027,12 +1122,12 @@ cmd_pld_get_ignore_mask(int argc, char * const *argv,
             case 'd':
                 if (strncmp("deep", ptr, strlen(ptr)) == 0) {
                     *flags |= WALK_FLAG_ANALYZE_DEEP | WALK_FLAG_ANALYZE;
-                    continue;
-                }
-                if (strncmp("dip", ptr, strlen(ptr)))
+                } else if (strcmp("dip", ptr) == 0) {
+                    ignore_mask = DIP_22V20_IGNORE_PINS;
+                    ignore_initialized = 1;
+                } else {
                     goto invalid_argument;
-                ignore_mask = DIP_22V20_IGNORE_PINS;
-                ignore_initialized = 1;
+                }
                 continue;
             case 'i':
                 if (strncmp("invert", ptr, strlen(ptr)))
@@ -1425,6 +1520,200 @@ walk_abort:
     return (rc);
 }
 
+static const char *
+pld_get_pin_drive_state_str(uint pin, uint output_dd, uint output_d)
+{
+    char *state = "i";
+    uint mode = pld_gpio_getmode(pin);
+    if (mode == GPIO_SETMODE_INPUT) {
+        /* Direct GPIO pin is input; check GPIO pin through 1K resistor */
+        mode = pldd_gpio_getmode(pin);
+        if (mode == GPIO_SETMODE_INPUT) {
+            state = "i";
+        } else if (mode == GPIO_SETMODE_INPUT_PULLUPDOWN) {
+            if (output_dd & BIT(pin))
+                state = "pu";
+            else
+                state = "pd";
+        } else if ((mode == GPIO_SETMODE_OUTPUT_PPULL_2) ||
+                   (mode == GPIO_SETMODE_OUTPUT_PPULL_10) ||
+                   (mode == GPIO_SETMODE_OUTPUT_PPULL_50)) {
+            if (output_dd & BIT(pin))
+                state = "1";
+            else
+                state = "0";
+        } else {
+            state = "x?";
+        }
+    } else if (mode == GPIO_SETMODE_INPUT_PULLUPDOWN) {
+        /* Direct GPIO pin is input; check GPIO pin through 1K resistor */
+        mode = pldd_gpio_getmode(pin);
+        if (mode == GPIO_SETMODE_INPUT) {
+            if (output_d & BIT(pin))
+                state = "pU";
+            else
+                state = "pD";
+        } else if (mode == GPIO_SETMODE_INPUT_PULLUPDOWN) {
+            if ((output_d & BIT(pin)) && (output_dd & BIT(pin)))
+                state = "PU";
+            else if ((!(output_d & BIT(pin))) && (!(output_dd & BIT(pin))))
+                state = "PD";
+            else
+                state = "P?";
+        } else if ((mode == GPIO_SETMODE_OUTPUT_PPULL_2) ||
+                   (mode == GPIO_SETMODE_OUTPUT_PPULL_10) ||
+                   (mode == GPIO_SETMODE_OUTPUT_PPULL_50)) {
+            if (output_dd & BIT(pin))
+                state = "1";
+            else
+                state = "0";
+        } else {
+            state = "y?";
+        }
+    } else if ((mode == GPIO_SETMODE_OUTPUT_PPULL_2) ||
+               (mode == GPIO_SETMODE_OUTPUT_PPULL_10) ||
+              (mode == GPIO_SETMODE_OUTPUT_PPULL_50)) {
+        if (output_d & BIT(pin))
+            state = "1";
+        else
+            state = "0";
+    } else {
+        state = "z?";
+    }
+    return (state);
+}
+
+static void
+pld_show(int argc, char * const *argv)
+{
+    uint output_d  = pld_output_value();
+    uint output_dd = pldd_output_value();
+    uint input     = pld_input();
+    uint pin;
+
+    printf("Output=%07x Input=%07x\n\n"
+           "  In Out Pin         Pin Out In\n"
+           "            ___   ___                  In ",
+           output_dd, input);
+    for (pin = 4; pin > 0; pin--) {
+        uint i = input & BIT(pin - 1) ? 1 : 0;
+        printf("  %u", i);
+    }
+    for (pin = 28; pin > 25; pin--) {
+        uint i = input & BIT(pin - 1) ? 1 : 0;
+        printf("  %u", i);
+    }
+    printf("\n");
+
+    for (pin = 0; pin < 14; pin++) {
+        const char *line;
+        const char *mid     = "     ";
+        const char *drive_l = "i";
+        const char *drive_r = "i";
+        uint input_l = input & BIT(pin) ? 1 : 0;
+        uint input_r = input & BIT(27 - pin) ? 1 : 0;
+        uint cpin;
+
+        if (pin == 0)
+            mid = " \\_/ ";
+        if (pin == 13)
+            mid = "_____";
+
+        drive_l = pld_get_pin_drive_state_str(pin, output_dd, output_d);
+        drive_r = pld_get_pin_drive_state_str(27 - pin, output_dd, output_d);
+
+        printf("  %u  %-3s %2u|_|%s|_|%-2u %3s  %u    ",
+               input_l, drive_l, pin + 1, mid, 28 - pin, drive_r, input_r);
+        switch (pin) {
+            case 0:
+                line = "   Out ";
+                break;
+            case 1:
+                line = "        ////////////////////\\";
+                break;
+            case 2:
+                line = "In Out / 4  3  2  1 28 27 26 |Out In";
+                break;
+            case 3:
+                line = "|5                   25|";
+                break;
+            case 4:
+                line = "|6                   24|";
+                break;
+            case 5:
+                line = "|7                   23|";
+                break;
+            case 6:
+                line = "|8       PLCC28      22|";
+                break;
+            case 7:
+                line = "|9                   21|";
+                break;
+            case 8:
+                line = "|10                  20|";
+                break;
+            case 9:
+                line = "|11                  19|";
+                break;
+            case 10:
+                line = "      | 12 13 14 15 16 17 18 |";
+                break;
+            case 11:
+                line = "       \\--------------------/";
+                break;
+            case 12:
+                line = "   Out ";
+                break;
+            case 13:
+                line = "    In ";
+                break;
+            default:
+                line = "";
+                break;
+        }
+// XXX need to shift everything up 1 row
+//     This means "In" pins get printed after "___   ___" header
+        if (pin == 0) {
+            const char *d;
+            printf("%s", line);
+            for (cpin = 4; cpin > 0; cpin--) {
+                d = pld_get_pin_drive_state_str(cpin - 1, output_dd, output_d);
+                printf(" %2s", d);
+            }
+            for (cpin = 28; cpin > 25; cpin--) {
+                d = pld_get_pin_drive_state_str(cpin - 1, output_dd, output_d);
+                printf(" %2s", d);
+            }
+            printf("\n");
+        } else if ((pin >= 3) && (pin <= 9)) {
+            uint p = pin + 1;
+            input_l = input & BIT(p) ? 1 : 0;
+            input_r = input & BIT(28 - p) ? 1 : 0;
+            drive_l = pld_get_pin_drive_state_str(p, output_dd, output_d);
+            drive_r = pld_get_pin_drive_state_str(29 - p, output_dd, output_d);
+            printf(" %u %-2s %s %-2s %u\n",
+                   input_l, drive_l, line, drive_r, input_r);
+        } else if (pin == 12) {
+            const char *d;
+            printf("%s", line);
+            for (cpin = 12; cpin <= 18; cpin++) {
+                d = pld_get_pin_drive_state_str(cpin - 1, output_dd, output_d);
+                printf(" %2s", d);
+            }
+            printf("\n");
+        } else if (pin == 13) {
+            printf("%s", line);
+            for (cpin = 12; cpin <= 18; cpin++) {
+                uint i = input & BIT(cpin - 1) ? 1 : 0;
+                printf("  %u", i);
+            }
+            printf("\n");
+        } else {
+            printf("%s\n", line);
+        }
+    }
+}
+
 const char cmd_pld_help[] =
 "pld check          - check GPIOs without PLD attached\n"
 "pld disable        - disable PLD power\n"
@@ -1468,13 +1757,14 @@ cmd_pld(int argc, char * const *argv)
             break;
         case 'i':  // input
         case 's':  // show value
-            printf("Output=%07lx Input=%07lx\n",
-                   pldd_output_value(), pld_input());
+            argc--;
+            argv++;
+            pld_show(argc, argv);
             break;
         case 'v':  // show value
             adc_show_sensors();
             break;
-        case 'w':  // show value
+        case 'w':  // show walk
             return (cmd_pld_walk(argc - 1, argv + 1));
         default:
             printf("Unknown argument %s\n", argv[1]);
