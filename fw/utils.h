@@ -16,7 +16,12 @@
 #define ADDR16(x)   ((uint16_t *) ((uintptr_t)(x)))
 #define ADDR32(x)   ((uint32_t *) ((uintptr_t)(x)))
 
+#define MIN(x, y)   ((x) < (y) ? (x) : (y))
+#define MAX(x, y)   ((x) > (y) ? (x) : (y))
+
 #define BIT(x)      (1 << (x))
+#define BITRANGE32(x, y) ((0xffffffff >> (31 - MAX(x, y))) & \
+                          (0xffffffff << MIN(x, y)))
 
 #define ARRAY_SIZE(x) (int)((sizeof (x) / sizeof ((x)[0])))
 

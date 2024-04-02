@@ -1,0 +1,160 @@
+Name     SPEED22V10;
+PartNo   U1;
+Date     2024-04-01;
+Revision 01;
+Designer Chris Hooper;
+Company  eebugs.com;
+Assembly None;
+Location Brutus PLD decoder board;
+Device   g22v10lcc;  /* G22V10CPLCC */
+
+/***********************************************************************
+ *                                                                     *
+ * This GAL implementation takes an input signal and creates an        *
+ * oscillating clock using the specified output pins, running at gate  *
+ * propagation speed. Up to 10 GAL outputs are used to propagate and   *
+ * delay the signal to provide sufficient time for an external device  *
+ * to capture and measure the generated clock. This a program which    *
+ * can be used by the Brutus firmware to get an approximate            *
+ * measurement of a part's gate propagation delay.                     *
+ *                                                                     *
+ * Drive both pin 2 and pin 3 low to enable pin check mode. Input      *
+ * pins 4-16 sequentially correspond to output pins 17-27. Any input   *
+ * pin driven high should cause the corresponding output pin to be     *
+ * driven high:                                                        *
+ *     Input   P16 P13 P12 P11 P10 P9  P7  P6  P5  P4                  *
+ *     Output  P27 P26 P25 P24 P23 P21 P20 P19 P18 P17                 *
+ *                                                                     *
+ * Drive pin 2 high and pin 3 low to enable reverse-order pin check    *
+ * mode.                                                               *
+ *     Input   P4  P5  P6  P7  P9  P10 P11 P12 P13 P16                 *
+ *     Output  P27 P26 P25 P24 P23 P21 P20 P19 P18 P17                 *
+ *                                                                     *
+ * Drive pin 2 low and pin 3 high to enable the clock. Capture at any  *
+ * GAL output pin. For Brutus, the best candidates are Pin 23-26.      *
+ * Divide the measured clock period by the number of enabled outputs   *
+ * to estimate average gate speed. You must enable output pins by      *
+ * driving corresponding input pins high. Driving specific input pins  *
+ * low will remove the corresponding output pin from the clock loop    *
+ * (the loop clock will run at a higher frequency). Up to three        *
+ * sequential output pins may be removed from the clock loop without   *
+ * breaking the cycle. To enable all output pins (17-21 and 23-27) to  *
+ * participate in the clock loop, drive the following pins high: 4-7,  *
+ * 9-13, and 16.                                                       *
+ *                                                                     *
+ * Driving pin 2 high and pin 3 high will cause all output pins to be  *
+ * driven low, regardless of the state of the corresponding input      *
+ * pins.                                                               *
+ *                                                                     *
+ ***********************************************************************/
+
+
+/* *************** INPUT PINS ******************* */
+PIN   2 = MODE0           ;  /* Mode select low order bit */
+PIN   3 = MODE1           ;  /* Mode select high order bit */
+PIN   4 = EN17            ;  /* P4 -> P17 */
+PIN   5 = EN18            ;  /* P5 -> P18 */
+PIN   6 = EN19            ;  /* P6 -> P19 */
+PIN   7 = EN20            ;  /* P7 -> P20 */
+PIN   9 = EN21            ;  /* P9 -> P21 */
+PIN  10 = EN23            ;  /* P10 -> P23 */
+PIN  11 = EN24            ;  /* P11 -> P24 */
+PIN  12 = EN25            ;  /* P12 -> P25 */
+PIN  13 = EN26            ;  /* P13 -> P26 */
+PIN  16 = EN27            ;  /* P16 -> P27 */
+
+/* *************** OUTPUT PINS ****************** */
+PIN  17 = O17             ;
+PIN  18 = O18             ;
+PIN  19 = O19             ;
+PIN  20 = O20             ;
+PIN  21 = O21             ;
+PIN  23 = O23             ;
+PIN  24 = O24             ;
+PIN  25 = O25             ;
+PIN  26 = O26             ;
+PIN  27 = O27             ;
+
+FIELD mode = [MODE1..MODE0];
+
+O27    = mode:[2] & EN27 &  EN17 &                 !O17  /* clock edge */
+       # mode:[2] & EN27 & !EN17 &  EN18 &         !O18  /* clock edge */
+       # mode:[2] & EN27 & !EN17 & !EN18 &  EN19 & !O19  /* clock edge */
+       # mode:[2] & EN27 & !EN17 & !EN18 & !EN19 & !O20  /* clock edge */
+       # mode:[1] & EN17                                 /* reverse */
+       # mode:[0] & EN27;
+O26    = mode:[2] & EN26 &  EN27 &                  O27
+       # mode:[2] & EN26 & !EN27 &  EN17 &         !O17  /* clock edge */
+       # mode:[2] & EN26 & !EN27 & !EN17 &  EN18 & !O18  /* clock edge */
+       # mode:[2] & EN26 & !EN27 & !EN17 & !EN18 & !O19  /* clock edge */
+       # mode:[1] & EN18                                 /* reverse */
+       # mode:[0] & EN26;
+O25    = mode:[2] & EN25 &  EN26 &                  O26
+       # mode:[2] & EN25 & !EN26 &  EN27 &          O27
+       # mode:[2] & EN25 & !EN26 & !EN27 &  EN17 & !O17  /* clock edge */
+       # mode:[2] & EN25 & !EN26 & !EN27 & !EN17 & !O18  /* clock edge */
+       # mode:[1] & EN19                                 /* reverse */
+       # mode:[0] & EN25;
+O24    = mode:[2] & EN24 &  EN25 &                  O25
+       # mode:[2] & EN24 & !EN25 &  EN26 &          O26
+       # mode:[2] & EN24 & !EN25 & !EN26 &  EN27 &  O27
+       # mode:[2] & EN24 & !EN25 & !EN26 & !EN27 & !O17  /* clock edge */
+       # mode:[1] & EN20                                 /* reverse */
+       # mode:[0] & EN24;
+O23    = mode:[2] & EN23 &  EN24 &                  O24
+       # mode:[2] & EN23 & !EN24 &  EN25 &          O25
+       # mode:[2] & EN23 & !EN24 & !EN25 &  EN26 &  O26
+       # mode:[2] & EN23 & !EN24 & !EN25 & !EN26 &  O27
+       # mode:[1] & EN21                                 /* reverse */
+       # mode:[0] & EN23;
+O21    = mode:[2] & EN21 &  EN23 &                  O23
+       # mode:[2] & EN21 & !EN23 &  EN24 &          O24
+       # mode:[2] & EN21 & !EN23 & !EN24 &  EN25 &  O25
+       # mode:[2] & EN21 & !EN23 & !EN24 & !EN25 &  O26
+       # mode:[1] & EN23                                 /* reverse */
+       # mode:[0] & EN21;
+O20    = mode:[2] & EN20 &  EN21 &                  O21
+       # mode:[2] & EN20 & !EN21 &  EN23 &          O23
+       # mode:[2] & EN20 & !EN21 & !EN23 &  EN24 &  O24
+       # mode:[2] & EN20 & !EN21 & !EN23 & !EN24 &  O25
+       # mode:[1] & EN24                                 /* reverse */
+       # mode:[0] & EN20;
+O19    = mode:[2] & EN19 &  EN20 &                  O20
+       # mode:[2] & EN19 & !EN20 &  EN21 &          O21
+       # mode:[2] & EN19 & !EN20 & !EN21 &  EN23 &  O23
+       # mode:[2] & EN19 & !EN20 & !EN21 & !EN23 &  O24
+       # mode:[1] & EN25                                 /* reverse */
+       # mode:[0] & EN19;
+O18    = mode:[2] & EN18 &  EN19 &                  O19
+       # mode:[2] & EN18 & !EN19 &  EN20 &          O20
+       # mode:[2] & EN18 & !EN19 & !EN20 &  EN21 &  O21
+       # mode:[2] & EN18 & !EN19 & !EN20 & !EN21 &  O23
+       # mode:[1] & EN26                                 /* reverse */
+       # mode:[0] & EN18;
+O17    = mode:[2] & EN17 &  EN18 &                  O18
+       # mode:[2] & EN17 & !EN18 &  EN19 &          O19
+       # mode:[2] & EN17 & !EN18 & !EN19 &  EN20 &  O20
+       # mode:[2] & EN17 & !EN18 & !EN19 & !EN20 &  O21
+       # mode:[1] & EN27                                 /* reverse */
+       # mode:[0] & EN17;
+
+/*
+ * Relevant mappings for STM32 capture
+ *
+ * GAL22V10 PIN 23 = STM32 PC6 = TIM3_CH1  OUTCLK
+ * GAL22V10 PIN 24 = STM32 PC7 = TIM3_CH2
+ * GAL22V10 PIN 25 = STM32 PC8 = TIM3_CH3
+ * GAL22V10 PIN 26 = STM32 PC9 = TIM3_CH4  OUTREF
+ *
+ *
+ * Miscellaneous Oscilloscope captures (some parts counterfeit)
+ *     GAL22V10D-5LJ   44ns
+ *     ATF22V10C-5JC   68ns
+ *     GAL22V10C-6LJ   78ns
+ *     GAL22V10B-7LJ   114ns
+ *     GAL22V10B-10LJ  74ns 105ns
+ *     ATF22V10C-10JC  109ns
+ *     GAL22V10D-10LJI 128ns
+ *     GAL22V10B-15LJ  168ns
+ *     GAL22V10C-25LJ  135ns
+ */

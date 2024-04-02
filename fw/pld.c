@@ -2,7 +2,7 @@
  * This is free and unencumbered software released into the public domain.
  * See the LICENSE file for additional details.
  *
- * Designed by Chris Hooper in 2022.
+ * Designed by Chris Hooper in 2024.
  *
  * ---------------------------------------------------------------------
  *
@@ -25,6 +25,10 @@
 #include "cmds.h"
 #include "pcmds.h"
 #include "button.h"
+#include "irq.h"
+#include <libopencm3/stm32/timer.h>
+#include <libopencm3/stm32/rcc.h>
+#include <libopencm3/stm32/f1/gpio.h>
 
 #undef DEBUG_DETECT_PART_PRESENT
 #undef DEBUG_VCC_AND_GND_JUMPERS
@@ -1073,6 +1077,7 @@ cmd_pld_get_ignore_mask(int argc, char * const *argv,
         const char *nptr;
         int         mode;
         uint        type;
+        uint        plen;
 
         /* Check for exact match of type, such as "dip18" */
         for (type = 0; type < ARRAY_SIZE(installed_types); type++) {
@@ -1084,12 +1089,13 @@ cmd_pld_get_ignore_mask(int argc, char * const *argv,
             ignore_initialized = 1;
             continue;
         }
+        plen = strlen(ptr);
         switch (*ptr) {
             case '?':
                 printf("%s", cmd_pld_walk_help);
                 return (RC_FAILURE);
             case 'a':
-                if (strncmp("auto", ptr, strlen(ptr)) == 0) {
+                if (strncmp("auto", ptr, plen) == 0) {
                     uint32_t present;
                     pld_detect_part_present(&present);
 
@@ -1110,17 +1116,17 @@ cmd_pld_get_ignore_mask(int argc, char * const *argv,
                     ignore_initialized = 1;
                     continue;
                 }
-                if (strncmp("analyze", ptr, strlen(ptr)))
+                if (strncmp("analyze", ptr, plen))
                     goto invalid_argument;
                 *flags |= WALK_FLAG_ANALYZE;
                 continue;
             case 'b':
-                if (strncmp("binary", ptr, strlen(ptr)))
+                if (strncmp("binary", ptr, plen))
                     goto invalid_argument;
                 *flags |= WALK_FLAG_SHOW_BINARY;
                 continue;
             case 'd':
-                if (strncmp("deep", ptr, strlen(ptr)) == 0) {
+                if (strncmp("deep", ptr, plen) == 0) {
                     *flags |= WALK_FLAG_ANALYZE_DEEP | WALK_FLAG_ANALYZE;
                 } else if (strcmp("dip", ptr) == 0) {
                     ignore_mask = DIP_22V20_IGNORE_PINS;
@@ -1130,28 +1136,28 @@ cmd_pld_get_ignore_mask(int argc, char * const *argv,
                 }
                 continue;
             case 'i':
-                if (strncmp("invert", ptr, strlen(ptr)))
+                if (strncmp("invert", ptr, plen))
                     goto invalid_argument;
                 *flags |= WALK_FLAG_INVERT_IGNORE;
                 continue;
             case 'p':
-                if (strncmp("plcc", ptr, strlen(ptr)))
+                if (strncmp("plcc", ptr, plen))
                     goto invalid_argument;
                 ignore_mask = PLCC_22V20_IGNORE_PINS;
                 ignore_initialized = 1;
                 continue;
             case 'r':
-                if (strncmp("raw", ptr, strlen(ptr)))
+                if (strncmp("raw", ptr, plen))
                     goto invalid_argument;
                 *flags |= WALK_FLAG_RAW_BINARY | WALK_FLAG_VALUES;
                 continue;
             case 'v':
-                if (strncmp("values", ptr, strlen(ptr)))
+                if (strncmp("values", ptr, plen))
                     goto invalid_argument;
                 *flags |= WALK_FLAG_VALUES;
                 continue;
             case 'z':
-                if (strncmp("zero", ptr, strlen(ptr))) {
+                if (strncmp("zero", ptr, plen)) {
 invalid_argument:
                     printf("Invalid argument '%s'\n", ptr);
                     return (RC_FAILURE);
@@ -1520,6 +1526,524 @@ walk_abort:
     return (rc);
 }
 
+
+
+/*
+ * PLD Pins        GPIO Pins
+ * -------------   ---------
+ * PLD1-PLD16    = PE0-PE15
+ * PLD17-PLD28   = PC0-PC11
+ * PLDD1-PLDD16  = PD0-PD15
+ * PLDD17-PLDD24 = PA0-PA7
+ * PLDD25-PLDD28 = PB12-PB15
+ *
+ * Trigger pins
+ * PLDD17 PA0   TIM2_CH1_ETR | TIM5_CH1
+ * PLDD18 PA1   TIM2_CH2 | TIM5_CH2
+ * PLDD19 PA2   TIM2_CH3 | TIM5_CH3
+ * PLDD20 PA3   TIM2_CH4 | TIM5_CH4
+ * PLDD23 PA6                           Alt TIM1_BKIN
+ * PLDD24 PA7    TIM3_CH2               Alt TIM1_CH1N
+ *        PA8   TIM1_CH1
+ *        PA9   TIM1_CH2
+ *        PA10  TIM1_CH3
+ *        PA11  TIM1_CH4
+ *        PA12  TIM1_ETR
+ *        PB0                           Alt TIM1_CH2N
+ *        PB1                           Alt TIM1_CH3N
+ *        PB6    TIM4_CH1
+ *        PB7    TIM4_CH2
+ *        PB8    TIM4_CH3
+ *        PB9    TIM4_CH4
+ *        PB10   TIM4_CH4               Alt TIM2_CH3
+ *        PB11   TIM4_CH4               Alt TIM2_CH4
+ * PLDD25 PB12  TIM1_BKIN
+ * PLDD26 PB13  TIM1_CH1N
+ * PLDD27 PB14  TIM1_CH2N
+ * PLDD28 PB15  TIM1_CH3N
+ * PLD23  PC6                           Alt TIM3_CH1    *
+ * PLD24  PC7                           Alt TIM3_CH2    *
+ * PLD25  PC8                           Alt TIM3_CH3    *
+ * PLD26  PC9                           Alt TIM3_CH4    *
+ * PLDD3  PD2    TIM5_ETR
+ * PLDD13 PD12                          Alt TIM4_CH1
+ * PLDD14 PD13                          Alt TIM4_CH2
+ * PLDD15 PD14                          Alt TIM4_CH3
+ * PLDD16 PD15                          Alt TIM4_CH4
+ * PLD1   PE0   TIM4_ETR
+ * PLD8   PE7                           Alt TIM1_ETR
+ * PLD9   PE8                           Alt TIM1_CH1N
+ * PLD10  PE9                           Alt TIM1_CH1    *
+ * PLD11  PE10                          Alt TIM1_CH2N
+ * PLD12  PE11                          Alt TIM1_CH2    *
+ * PLD13  PE12                          Alt TIM1_CH3N
+ * PLD14  PE13                          Alt TIM1_CH3    *
+ * PLD15  PE14                          Alt TIM1_CH4    *
+ * PLD16  PE15                          Alt TIM1_BKIN
+ *
+ * TIM2 is the low speed tick, so can't be used for capture.
+ * TIM3 is the high speed tick
+ *         There is no usable PLDD pin which is routed to TIM3.
+ *         Could use PLD23-PLD26 on TIM3 as Alt
+ *
+ * Maybe switch TIM2 with TIM5 for the high speed tick?
+ * Could synchronized start TIM1 with TIM5?
+ * Could synchronized start TIM1 with TIM3?
+ *
+ * PLD23-PLD26 are the best bet using Alt TIM3.
+ * They are the only PLD outputs which are not connected through a resistor
+ * to the STM32 and which can be used as a timer trigger.
+ *
+ * The PLD configuration will implement a cycling clock pulse running
+ * at the speed that the gates of the PLD can forward the clock pulse.
+ *
+ *
+ * PLD1   PE0   TIM4_ETR
+ * PLD2   PE1               This is the PLD-generated clock enable
+ * PLDD17 PA0   TIM2_CH1_ETR | TIM5_CH1
+ */
+static void
+pld_measure_setup(void)
+{
+    pld_output_disable();   // All input, pins=0
+    pld_enable();           // Sets PLDD pins to 1K pulldown
+    pldd_gpio_setmode(BITRANGE32(6, 1) | BITRANGE32(12, 8) | BIT(15),
+                      GPIO_SETMODE_OUTPUT_PPULL_10);
+
+    /* Remap PC6 PC7 PC8 PC9 to TIM3 CH1 CH2 CH3 CH4 */
+    AFIO_MAPR |= AFIO_MAPR_TIM3_REMAP_FULL_REMAP;
+
+    rcc_periph_clock_enable(RCC_TIM3);
+    rcc_periph_reset_pulse(RST_TIM3);
+
+    /* Set timer CR1 mode (No clock division, Edge, Dir Up) */
+    TIM_CR1(TIM3) &= ~(TIM_CR1_CKD_CK_INT_MASK | TIM_CR1_CMS_MASK |
+                       TIM_CR1_DIR_DOWN);
+    timer_set_period(TIM3, 0xffff);  // Rollover at 2^16
+
+    /* XXX: just to show location of initial values */
+    timer_set_oc_value(TIM3, TIM_OC1, 0x1111);
+    timer_set_oc_value(TIM3, TIM_OC2, 0x2222);
+    timer_set_oc_value(TIM3, TIM_OC3, 0x3333);
+    timer_set_oc_value(TIM3, TIM_OC4, 0x4444);
+
+    /*
+     * Input capture mode
+     *   Divide external clock by 8
+     */
+    timer_ic_set_prescaler(TIM3, TIM_IC1, TIM_IC_PSC_8);
+    timer_ic_set_prescaler(TIM3, TIM_IC2, TIM_IC_PSC_8);
+    timer_ic_set_prescaler(TIM3, TIM_IC3, TIM_IC_PSC_8);
+    timer_ic_set_prescaler(TIM3, TIM_IC4, TIM_IC_PSC_8);
+    timer_ic_set_input(TIM3, TIM_IC1, TIM_IC_IN_TI1);
+    timer_ic_set_input(TIM3, TIM_IC2, TIM_IC_IN_TI2);
+    timer_ic_set_input(TIM3, TIM_IC3, TIM_IC_IN_TI1);  // TI3
+    timer_ic_set_input(TIM3, TIM_IC4, TIM_IC_IN_TI2);  // TI4
+
+#if 0
+    timer_set_oc_polarity_low(TIM3, TIM_OC1);
+    timer_set_oc_polarity_low(TIM3, TIM_OC2);
+    timer_set_oc_polarity_low(TIM3, TIM_OC3);
+    timer_set_oc_polarity_low(TIM3, TIM_OC4);
+#endif
+
+    timer_continuous_mode(TIM3);
+
+#if 0
+    timer_enable_oc_output(TIM3, TIM_OC1);
+    timer_enable_oc_output(TIM3, TIM_OC2);
+    timer_enable_oc_output(TIM3, TIM_OC3);
+    timer_enable_oc_output(TIM3, TIM_OC4);
+#endif
+    timer_enable_counter(TIM3);
+}
+
+static void
+print_saw_pins(uint bits, uint bitsbad)
+{
+    int bit;
+    printf(" ");
+    for (bit = 9; bit >= 0; bit--) {
+        if (bitsbad & BIT(bit))
+            printf(" *%c*", (bits & BIT(bit)) ? '1' : '0');
+        else
+            printf("  %c ", (bits & BIT(bit)) ? '*' : ' ');
+    }
+}
+
+/*
+ * pld_measure_diagnose
+ * --------------------
+ * If for some reason, the external device is not generating a clock,
+ * this function will attempt to diagnose the issue by asserting most, but
+ * not all clock enable signals.
+ *
+ * PLD Pin 2 and Pin 3 specify the mode.
+ *
+ * Mode 0 = Input pin drives output pin
+ *       Input   P16 P13 P12 P11 P10 P9  P7  P6  P5  P4
+ *       Output  P27 P26 P25 P24 P23 P21 P20 P19 P18 P17
+ * Mode 1 = Input pin drives output pin, reverse order
+ *       Input   P4  P5  P6  P7  P9 P10 P11 P12 P13 P16
+ *       Output  P27 P26 P25 P24 P23 P21 P20 P19 P18 P17
+ * Mode 2 = Clock mode
+ *      When all pins are enabled, P27 inverts P17, and the remaining
+ *      outputs just copy the state of the next higher output. Pin 23
+ *      is used for capture of the clock, unless it is disabled.
+ * Mode 3 = Zero outputs
+ *      All outputs are driven low, regardless of the state of the input
+ *      pins.
+ */
+static rc_t
+pld_measure_diagnose(uint flag_keep, uint verbose)
+{
+    uint current;
+    uint first;
+    uint last;
+    uint timeout;
+    uint count;
+    uint clk_diff;
+    uint usec;
+    uint psec_per_tick;
+    uint khz;
+    uint bit;
+    uint dis_bit1;
+    uint dis_bit2;
+    volatile uint32_t *ccr;
+    uint saw_mask = 0;
+    uint fail_mask = 0;
+    uint gotmask;
+    uint opinmask;
+    uint did_header = 0;
+
+    pld_measure_setup();
+    timer_delay_msec(10);   // Allow time for poweron
+    pldd_output(0);
+    timer_delay_msec(1);   // Allow time for pins to settle
+    opinmask = pld_input();
+    gotmask = ((opinmask >> 16) & BITRANGE32(4, 0)) |
+              ((opinmask >> 17) & BITRANGE32(9, 5));
+    if (gotmask != 0) {
+        printf("Out    P27 P26 P25 P24 P23 P21 P20 P19 P18 P17\n");
+        printf("     ");
+        print_saw_pins(gotmask, gotmask);
+        printf("   No pins (P17-P27) should be 1\n");
+        fail_mask |= gotmask;
+    }
+
+    /*
+     * The first pass uses reverse mode for P4-P16 mapping to P17-P27 pins:
+     *     In      P4  P5  P6  P7  P9 P10 P11 P12 P13 P16
+     *     Out    P27 P26 P25 P24 P23 P21 P20 P19 P18 P17
+     * The second pass uses the standard order mapping:
+     *     In     P16 P13 P12 P11 P10 P9  P7  P6  P5  P4
+     *     Out    P27 P26 P25 P24 P23 P21 P20 P19 P18 P17
+     *
+     * This is done to help isolate input pin from output pin problems.
+     */
+    for (count = 1; count <= 2; count++) {
+        for (bit = 0; bit <= 9; bit++) {
+            uint mask = BIT(bit);
+            uint bmask;
+            uint ipinmask;
+
+            if (count == 1)
+                bmask = BIT(9 - bit);
+            else
+                bmask = mask;
+            ipinmask = ((bmask << 3) & BITRANGE32(6, 3)) |
+                       ((bmask << 4) & BITRANGE32(12, 8)) |
+                       ((bmask << 6) & BIT(15));
+            /* Pin 8, Pin 14, and Pin 15 should not be driven */
+            if (count == 1)
+                ipinmask |= BIT(1);  // reverse order
+            pldd_output(ipinmask);
+            timer_delay_msec(1);   // Allow time for pins to settle
+            opinmask = pld_input();
+            gotmask = ((opinmask >> 16) & BITRANGE32(4, 0)) |
+                      ((opinmask >> 17) & BITRANGE32(9, 5));
+            pldd_output(0);
+
+            if (verbose || (gotmask ^ mask)) {
+                if (did_header != count) {
+                    if (did_header != 0) {
+                        printf("Out    "
+                               "P27 P26 P25 P24 P23 P21 P20 P19 P18 P17\n");
+                    }
+                    did_header = count;
+                    if (count == 1) {
+                        printf("In     "
+                               " P4  P5  P6  P7  P9 P10 P11 P12 P13 P16\n");
+                    } else {
+                        printf("In     "
+                               "P16 P13 P12 P11 P10 P9  P7  P6  P5  P4\n");
+                    }
+                }
+                printf("     ");
+                print_saw_pins(gotmask, gotmask ^ mask);
+                fail_mask |= (gotmask ^ mask);
+                if ((gotmask ^ mask) != 0)
+                    printf("   FAIL");
+                else
+                    printf("   Good");
+                printf("\n");
+            }
+        }
+    }
+    printf("Out    P27 P26 P25 P24 P23 P21 P20 P19 P18 P17\n");
+    for (dis_bit1 = 0; dis_bit1 <= 8; dis_bit1++) {
+        for (dis_bit2 = dis_bit1 + 1; dis_bit2 <= 9; dis_bit2++) {
+            uint mask = 0x3ff & ~BIT(dis_bit1) & ~BIT(dis_bit2);
+            uint pinmask;
+
+            if ((verbose < 2) && ((saw_mask & mask) == mask))
+                continue;
+
+            pld_measure_setup();
+            if (mask & BIT(5)) {
+                timer_enable_oc_output(TIM3, TIM_OC1);
+                ccr = &TIM_CCR1(TIM3);
+            } else if (mask & BIT(6)) {
+                timer_enable_oc_output(TIM3, TIM_OC2);
+                ccr = &TIM_CCR2(TIM3);
+            } else if (mask & BIT(7)) {
+                timer_enable_oc_output(TIM3, TIM_OC3);
+                ccr = &TIM_CCR3(TIM3);
+            } else {
+                timer_enable_oc_output(TIM3, TIM_OC4);
+                ccr = &TIM_CCR4(TIM3);
+            }
+            /* Pin 8, Pin 14, and Pin 15 should not be driven */
+            pinmask = ((mask << 3) & BITRANGE32(6, 3)) |
+                      ((mask << 4) & BITRANGE32(12, 8)) |
+                      ((mask << 6) & BIT(15));
+            timer_delay_msec(10);   // Allow time for poweron
+            pldd_output(BIT(2));
+            timer_delay_msec(10);   // Allow time for settle
+            pldd_output(BIT(2) | pinmask);
+
+#define TICK_SPIN_TIMEOUT 50000
+
+            current = last = *ccr;
+            for (timeout = TICK_SPIN_TIMEOUT; timeout > 0; timeout--) {
+                current = *ccr;
+                if (current != last)
+                    break;
+            }
+            if (timeout == 0) {
+                printf("     ");
+                print_saw_pins(mask, 0);
+                printf("   FAIL (no tick)\n");
+                continue;
+            }
+
+            /* Measure loop speed */
+            timeout = TICK_SPIN_TIMEOUT;
+            disable_irq();
+            count = 0;
+            first = last = *ccr;
+            for (; timeout != 0; timeout--) {
+again:
+                current = *ccr;
+                if (last != current) {
+                    last = current;
+                    if (++count < 500)
+                        goto again;
+                    break;
+                }
+            }
+            enable_irq();
+            if (flag_keep == 0)
+                pldd_output(BIT(2));
+
+            /* Got 500 ticks of the external clock */
+            clk_diff = (uint16_t) (last - first);
+            usec = timer_tick_to_usec(clk_diff);
+            psec_per_tick = usec * (1000000 / 8) / count;
+            khz = 1000000000 / psec_per_tick;
+
+            /* Round up */
+            khz           += 5;
+            psec_per_tick += 50;
+            if (timeout != 0)
+                saw_mask |= mask;
+
+            if (verbose || (timeout == 0)) {
+                printf("     ");
+                print_saw_pins(mask, 0);
+                printf("   %u.%02u MHz  %u.%u ns",
+                       khz / 1000, (khz % 1000) / 10,
+                       psec_per_tick / 1000, (psec_per_tick % 1000) / 100);
+                if (timeout == 0)
+                    printf(" TIMEOUT");
+                printf("\n");
+            }
+        }
+    }
+    if (flag_keep == 0)
+        pld_disable();
+
+    printf("     ");
+    saw_mask &= ~fail_mask;
+    print_saw_pins(saw_mask, 0);
+    if (saw_mask == 0) {
+        if (fail_mask)
+            printf("   FAIL: part not programmed?\n");
+        else
+            printf("   No ticks from any PLD loop\n");
+        return (RC_FAILURE);
+    } else if (saw_mask == BITRANGE32(9, 0)) {
+        printf("   Good\n");
+        return (RC_SUCCESS);
+    } else {
+        printf("   FAIL: Some good (*)\n");
+        return (RC_FAILURE);
+    }
+}
+
+const char cmd_pld_measure_help[] =
+"pld measure options\n"
+"  count    - show current counters\n"
+"  diagnose - diagnose PLD with broken clock\n"
+"  keep     - keep PLD powered after measurement\n"
+"  same     - do not set up PLD (use with previous keep)\n"
+"  verbose  - verbose output\n";
+
+/*
+ * pld_measure
+ * -----------
+ * Measure and report the PLD speed (currently only GAL22V10 is supported).
+ * External programming of the part is required (use pld/SPEED22V10.jed)
+ */
+static rc_t
+pld_measure(int argc, char * const *argv)
+{
+    uint count;
+    uint current;
+    uint first;
+    uint last;
+    uint clk_diff;
+    uint usec;
+    uint psec_per_tick;
+    uint psec_silicon;
+    uint khz;
+    uint timeout;
+    uint flag_diagnose = 0;
+    uint flag_keep = 0;
+    uint flag_same = 0;
+    uint flag_verbose = 0;
+    int arg;
+
+    for (arg = 2; arg < argc; arg++) {
+        const char *ptr = argv[arg];
+        switch (*ptr) {
+            default:
+                printf("Unknown argument %s\n", ptr);
+                /* FALLTHROUGH */
+            case '?':
+                printf("%s", cmd_pld_measure_help);
+                return (RC_SUCCESS);
+            case 'c':
+                printf("%04lx %04lx %04lx %04lx %04lx\n",
+                       TIM_CNT(TIM3), TIM_CCR1(TIM3), TIM_CCR2(TIM3),
+                       TIM_CCR3(TIM3), TIM_CCR4(TIM3));
+                return (RC_SUCCESS);
+            case 'd':
+                flag_diagnose++;
+                break;
+            case 's':
+                flag_same++;
+                break;
+            case 'k':
+                flag_keep++;
+                break;
+            case 'v':
+                flag_verbose++;
+                break;
+        }
+    }
+    if (flag_diagnose)
+        return (pld_measure_diagnose(flag_keep, flag_verbose));
+
+    if (flag_same == 0) {
+        pld_measure_setup();
+        timer_enable_oc_output(TIM3, TIM_OC1);
+        timer_delay_msec(10);   // Allow time for poweron
+        pldd_output(BIT(2));    // Set Pin3 = 1 (enable clock)
+        timer_delay_msec(1);    // Allow time for settle
+        pldd_output(BITRANGE32(6, 2) | BITRANGE32(12, 8) | BIT(15));  // All
+        timer_delay_usec(1);
+    }
+
+    current = last = TIM_CCR1(TIM3);
+    for (timeout = TICK_SPIN_TIMEOUT; timeout > 0; timeout--) {
+        current = TIM_CCR1(TIM3);
+        if (current != last)
+            break;
+    }
+    if (timeout == 0) {
+        printf("Did not see change in PLD capture ticks\n");
+        return (pld_measure_diagnose(flag_keep, flag_verbose));
+    }
+
+    timeout = TICK_SPIN_TIMEOUT;
+    disable_irq();
+    first = last = TIM_CCR1(TIM3);
+    for (count = 0; count < 500; ) {
+        current = TIM_CCR1(TIM3);
+        if (last != current) {
+            last = current;
+            count++;
+        } else if (--timeout == 0) {
+            printf("[Timeout] ");
+            break;
+        }
+    }
+    enable_irq();
+
+#define SILICON_GATES_IN_USE 10  // Approximate
+
+    /* Got 500 ticks of the external clock */
+    clk_diff = (uint16_t) (last - first);
+    usec = timer_tick_to_usec(clk_diff);
+    psec_per_tick = usec * (1000000 / 8) / count;
+    psec_silicon  = psec_per_tick / SILICON_GATES_IN_USE;
+    khz = 1000000000 / psec_per_tick;
+    if (flag_verbose)
+        printf("Saw %u external ticks in %u APB ticks (%u usec)\n",
+               count, clk_diff, usec);
+
+    /* Round up */
+    khz           += 5;
+    psec_per_tick += 50;
+    psec_silicon  += 50;
+
+    printf("   Clock %u.%02u MHz  %u.%u ns  Estimated silicon %u.%u ns\n",
+           khz / 1000, (khz % 1000) / 10,
+           psec_per_tick / 1000, (psec_per_tick % 1000) / 100,
+           psec_silicon / 1000, (psec_silicon % 1000) / 100);
+
+    if (flag_keep == 0)
+        pld_disable();
+
+    if (timeout == 0)
+        return (pld_measure_diagnose(flag_keep, flag_verbose));
+    return (RC_SUCCESS);
+}
+
+/*
+ * Capture with CLOCK
+ *                     Scope  MHz    STM32  MHz
+ *     GAL22V10D-5LJ    43ns  23.547  45.5  21.978
+ *     GAL22V10C-6LJ    79ns  12.617  78.0  12.820
+ *     GAL22V10B-7LJ   115ns   8.547 118.3   8.456
+ *     GAL22V10B-10LJ  105ns   9.311 108.0   9.259
+ *     ATF22V10C-10JC  111ns   8.904 112.3   8.908
+ *     GAL22V10B-15LJ  111ns   8.815 114.3   8.733
+ *     GAL22V10B-15LJ  163ns   6.051 166.3   6.015
+ *     GAL22V10C-25LJ  132ns   7.499 134.5   7.434
+ */
+
 static const char *
 pld_get_pin_drive_state_str(uint pin, uint output_dd, uint output_d)
 {
@@ -1589,12 +2113,24 @@ pld_show(int argc, char * const *argv)
     uint output_d  = pld_output_value();
     uint output_dd = pldd_output_value();
     uint input     = pld_input();
-    uint pin;
+    int pin;
 
-    printf("Output=%07x Input=%07x\n\n"
-           "  In Out Pin         Pin Out In\n"
-           "            ___   ___                  In ",
-           output_dd, input);
+    printf("Output=");
+    for (pin = 27; pin >= 0; pin--) {
+        const char *d = pld_get_pin_drive_state_str(pin, output_d, output_dd);
+
+        if (d[0] == 'i')
+            d = "-";
+        else if ((d[0] == 'p') || (d[0] == 'P'))
+            d++;  // 'pd' or 'pu' or similar
+        printf("%c", d[0]);
+    }
+    printf(" Input=");
+    for (pin = 27; pin >= 0; pin--) {
+        printf("%c", '0' + ((input & BIT(pin)) ? 1 : 0));
+    }
+    printf("\n\n"
+           "  In Out Pin___   ___Pin Out In        In ");
     for (pin = 4; pin > 0; pin--) {
         uint i = input & BIT(pin - 1) ? 1 : 0;
         printf("  %u", i);
@@ -1718,6 +2254,7 @@ const char cmd_pld_help[] =
 "pld check          - check GPIOs without PLD attached\n"
 "pld disable        - disable PLD power\n"
 "pld enable         - enable PLD power\n"
+"pld measure        - measure PLD speed (requires custom programming)\n"
 "pld output <value> - drive PLDD pins (resistor-protected GPIOs)\n"
 "pld show           - show current PLD pin values\n"
 "pld voltage        - show sensor readings\n"
@@ -1745,6 +2282,8 @@ cmd_pld(int argc, char * const *argv)
         case 'd':  // disable
             pld_disable();
             break;
+        case 'm':  // measure
+            return (pld_measure(argc, argv));
         case 'o':  // output value
             if (argc <= 2) {
                 printf("Value required\n");
