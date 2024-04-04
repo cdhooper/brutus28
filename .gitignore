@@ -15,3 +15,7 @@ cscope.out
 .cscope_*
 objs/
 datasheet/
+pld/*.abs
+pld/*.doc
+pld/*.sim
+pld/*.pdf
