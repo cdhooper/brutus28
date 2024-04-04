@@ -15,5 +15,3 @@ cscope.out
 .cscope_*
 objs/
 datasheet/
-fw/libopencm3/
-fw/stutils/
