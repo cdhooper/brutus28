@@ -582,10 +582,12 @@ cfg_device_name(char *devname, uint line)
     if ((strncasecmp(devname, "G22V10", 6) == 0) ||
         (strncasecmp(devname, "GAL22V10", 8) == 0))
         bit_to_pin = bit_to_pin_g22v10;
+#if BOARD_REV >= 2
     else if (strcasecmp(devname, "DIP28") == 0)
         bit_to_pin = bit_to_pin_dip28;
     else if (strcasecmp(devname, "DIP26") == 0)
         bit_to_pin = bit_to_pin_dip26;
+#endif
     else if (strcasecmp(devname, "DIP24") == 0)
         bit_to_pin = bit_to_pin_dip24;
     else if (strcasecmp(devname, "DIP22") == 0)
