@@ -77,8 +77,10 @@ static const struct {
     uint              vcc_pins;
 } installed_types[] = {
     { PRESENT_PINS_PLCC28, "PLCC28", BIT(14), BIT(28) },
+#if BOARD_REV >= 2
     { PRESENT_PINS_DIP28,  "DIP28",  BIT(14), BIT(28) },
     { PRESENT_PINS_DIP26,  "DIP26",  BIT(13), BIT(28) },
+#endif
     { PRESENT_PINS_DIP24,  "DIP24",  BIT(12), BIT(28) },
     { PRESENT_PINS_DIP22,  "DIP22",  BIT(11), BIT(28) },
     { PRESENT_PINS_DIP20,  "DIP20",  BIT(10), BIT(28) },
