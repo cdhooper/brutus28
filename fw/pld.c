@@ -83,7 +83,7 @@ static const struct {
 #endif
     { PRESENT_PINS_DIP24,  "DIP24",  BIT(12), BIT(28) },
     { PRESENT_PINS_DIP22,  "DIP22",  BIT(11), BIT(28) },
-    { PRESENT_PINS_DIP20,  "DIP20",  BIT(10), BIT(28) },
+    { PRESENT_PINS_DIP20,  "DIP20",  BIT(10), BIT(20) },
     { PRESENT_PINS_DIP18,  "DIP18",   BIT(9), BIT(28) },
     { PRESENT_PINS_DIP16,  "DIP16",   BIT(8), BIT(28) },
     { PRESENT_PINS_DIP14,  "DIP14",   BIT(7), BIT(28) },
