@@ -2,7 +2,7 @@ Individual pin LEDs are too bright. Maybe switch from 2.2K resistors to 4.7K.
     Current work-around is to replace LEDs jumper with a 470 Ohm resistor.
 
 Dual 22 Ohm resistors R13 and R14 limit PLD voltage too much.
-    Switch to 250mA polyfuse
+    Switch to 250mA polyfuse (PPTC)
 
 Wide DIP socket (P2) label overlays pin text
 

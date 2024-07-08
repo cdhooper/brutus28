@@ -46,22 +46,23 @@ main(void)
     reset_everything();
     clock_init();
     timer_init();
-    timer_delay_msec(10);  // Just for development purposes
+//  timer_delay_msec(10);  // Just for development purposes
     gpio_init();
     led_busy(1);
     uart_init();
     pld_init();
+
+    printf("\r\nBrutus-28 %s\n", version_str);
+    identify_cpu();
+    show_reset_reason();
+    usb_startup();
 
     rl_initialize();  // Enable command editing and history
     using_history();
 
     adc_init();
 
-    printf("\r\nBrutus-28 %s\n", version_str);
-    identify_cpu();
-    show_reset_reason();
 
-    usb_startup();
     led_power(1);
     led_busy(0);
 

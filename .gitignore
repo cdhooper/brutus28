@@ -19,3 +19,5 @@ pld/*.abs
 pld/*.doc
 pld/*.sim
 pld/*.pdf
+sw/brutus
+sw/term

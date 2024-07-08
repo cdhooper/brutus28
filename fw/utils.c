@@ -31,7 +31,6 @@
 
 static void SystemInit_post(void) { }
 
-
 #ifdef STM32F103xE
 #define COMPILE_CPU "STM32F103xE"
 #elif defined(STM32F105xC)
@@ -296,19 +295,19 @@ identify_cpu(void)
                 core_type = "Unknown-density";
                 break;
         }
-        printf("\t%s revision %s\n", core_type, core_rev);
+        printf("    %s revision %s\n", core_type, core_rev);
     }
-    printf("\tHCLK=%ld MHz  APB1=%ld MHz  APB2=%ld MHz\n",
+    printf("    HCLK=%ld MHz  APB1=%ld MHz  APB2=%ld MHz\n",
            HCLK_FREQ / 1000000, APB1_FREQ / 1000000, APB2_FREQ / 1000000);
 
     flashsize = *ADDR16(DESIG_FLASH_SIZE_BASE);  // FLASHSIZE_BASE
     if ((flashsize != 0) && (flashsize != 0xffff)) {
-        printf("\tFlash=%u KB", flashsize);
+        printf("    Flash=%u KB", flashsize);
     }
 #if defined(STM32F1) || defined(STM32F1XX)
 #define UNIQUE_ID_BASE 0x1ffff7e8
 #endif
-    printf("\tUID=%04x %04x %08lx %08lx\n",
+    printf("    UID=%04x %04x %08lx %08lx\n",
            *ADDR16(UNIQUE_ID_BASE + 0), *ADDR16(UNIQUE_ID_BASE + 2),
            *ADDR32(UNIQUE_ID_BASE + 4), *ADDR32(UNIQUE_ID_BASE + 8));
 }

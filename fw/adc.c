@@ -156,8 +156,8 @@ adc_init(void)
     adc_enable_vbat_sensor();
 #else
     /* STM32F1... */
-    uint32_t dma = DMA1;
-    uint32_t channel = 1;  // STM32F1xx RM Table 78 Summary of DMA1 requests...
+    uint32_t dma = DMA1;  // STM32F1xx RM Table 78 Summary of DMA1 requests...
+    uint32_t channel = DMA_CHANNEL1;
 
     adc_enable();
 
@@ -204,6 +204,12 @@ adc_init(void)
 
     /* Start the ADC and triggered DMA */
     adc_start_conversion_regular(adcbase);
+}
+
+void
+adc_shutdown(void)
+{
+    dma_disable_channel(DMA1, DMA_CHANNEL1);
 }
 
 static void

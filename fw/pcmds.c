@@ -77,7 +77,8 @@ const char cmd_snoop_help[] =
 const char cmd_usb_help[] =
 "usb disable - reset and disable USB\n"
 "usb regs    - display USB device registers\n"
-"usb reset   - reset and restart USB device";
+"usb reset   - reset and restart USB device\n"
+"usb stats   - USB statistics";
 
 typedef struct {
     const char *const name;
@@ -459,7 +460,11 @@ cmd_reset(int argc, char * const *argv)
     if (argc < 2) {
         printf("Resetting...\n");
         uart_flush();
-        timer_delay_msec(1);
+        usb_shutdown();
+        usb_signal_reset_to_host(1);
+        timer_delay_msec(30);
+        adc_shutdown();
+        timer_shutdown();
         reset_cpu();
         return (RC_FAILURE);
     } else if (strcmp(argv[1], "dfu") == 0) {
@@ -468,6 +473,8 @@ cmd_reset(int argc, char * const *argv)
         usb_shutdown();
         usb_signal_reset_to_host(1);
         timer_delay_msec(30);
+        adc_shutdown();
+        timer_shutdown();
         reset_dfu();
         return (RC_SUCCESS);
     } else if (strcmp(argv[1], "usb") == 0) {
@@ -514,6 +521,8 @@ cmd_usb(int argc, char * const *argv)
         usb_signal_reset_to_host(1);
         usb_startup();
         return (RC_SUCCESS);
+    } else if (strncmp(argv[1], "stat", 2) == 0) {
+        usb_show_stats();
     } else {
         printf("Unknown argument %s\n", argv[1]);
         return (RC_USER_HELP);

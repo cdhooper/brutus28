@@ -59,7 +59,8 @@ static const cmd_t cmd_list[] = {
                         "[bwlqohS] <addr> <value...>", "change memory" },
     { cmd_delay,   "delay",   2, NULL, "<time> [s|ms|us]", "delay for time" },
     { cmd_d,       "d",       1, cmd_d_help,
-                        "[bwlqohRS] <addr> [<len>]", "display memory" },
+                        "[bwlqohRS] [flash] <addr> [<len>]",
+                        "display memory" },
     { cmd_echo,    "echo",    0, NULL, " <text>", "display text" },
 #ifdef EMBEDDED_CMD
     { cmd_gpio,    "gpio",    1, cmd_gpio_help,
@@ -73,7 +74,7 @@ static const cmd_t cmd_list[] = {
 #ifdef EMBEDDED_CMD
     { cmd_map,     "map",     1, NULL, "", "show memory map" },
 #endif
-    { cmd_echo,    "print",   0, NULL, " <text>", "display text" },
+    { cmd_echo,    "print",   0, NULL, NULL, NULL },
 #ifndef EMBEDDED_CMD
     { cmd_echo,    "quit",    1, NULL, "", "exit program" },
 #endif
@@ -134,14 +135,17 @@ check_for_do_not_eval(const char *str)
 static rc_t
 cmd_help(int argc, char * const *argv)
 {
-    int    cur;
+    size_t cur;
     rc_t   rc = RC_SUCCESS;
     int    arg;
 
     if (argc <= 1) {
         for (cur = 0; cur < ARRAY_SIZE(cmd_list); cur++) {
-            int len = strlen(cmd_list[cur].cl_name) +
-                      strlen(cmd_list[cur].cl_help_args);
+            int len;
+            if (cmd_list[cur].cl_help_desc == NULL)
+                continue;  // hidden command
+            len = strlen(cmd_list[cur].cl_name) +
+                  strlen(cmd_list[cur].cl_help_args);
             printf("%s%s", cmd_list[cur].cl_name, cmd_list[cur].cl_help_args);
             if (len < 38)
                 printf("%*s", 38 - len, "");
@@ -152,12 +156,31 @@ cmd_help(int argc, char * const *argv)
     }
     for (arg = 1; arg < argc; arg++) {
         bool_t matched = FALSE;
+        int arglen = strlen(argv[arg]);
         for (cur = 0; cur < ARRAY_SIZE(cmd_list); cur++) {
             int         cl_len  = cmd_list[cur].cl_len;
             const char *cl_name = cmd_list[cur].cl_name;
 
+            if ((cl_len < arglen) && (cl_len != 0))
+                cl_len = arglen;
             if ((strcmp(argv[arg], cl_name) == 0) ||
                 ((cl_len != 0) && (strncmp(argv[arg], cl_name, cl_len) == 0))) {
+                if (cmd_list[cur].cl_help_desc == NULL) {
+                    size_t ccur;
+                    for (ccur = 0; ccur < ARRAY_SIZE(cmd_list); ccur++) {
+                        if (cur == ccur)
+                            continue;
+                        if (cmd_list[cur].cl_func == cmd_list[ccur].cl_func) {
+                            printf("%s is an alias for %s\n",
+                                   cl_name, cmd_list[ccur].cl_name);
+                            cur = ccur;
+                            goto show_alias;
+                        }
+                    }
+                    printf("%s is a hidden command\n", cl_name);
+                    return (RC_SUCCESS);  // hidden command
+                }
+show_alias:
                 printf("%s%s - %s\n", cl_name,
                        cmd_list[cur].cl_help_args, cmd_list[cur].cl_help_desc);
                 if (cmd_list[cur].cl_help_long != NULL)
@@ -355,7 +378,7 @@ scan_int(const char *str, int *intval)
 static rc_t
 cmd_exec_argv_single(int argc, char * const *argv)
 {
-    int cur;
+    size_t cur;
     int rc = RC_SUCCESS;
 #ifdef DEBUG_ARGLIST
     printf("exec_argv\n");
@@ -371,7 +394,7 @@ cmd_exec_argv_single(int argc, char * const *argv)
             if (rc == RC_USER_HELP) {
                 if (cmd_list[cur].cl_help_long != NULL)
                     printf("%s\n", cmd_list[cur].cl_help_long);
-                else
+                else if (cmd_list[cur].cl_help_desc != NULL)
                     printf("%s%s - %s\n", cl_name, cmd_list[cur].cl_help_args,
                            cmd_list[cur].cl_help_desc);
             }
@@ -846,12 +869,12 @@ eval_cmdline_expr(const char *str)
     char *buf = strdup(str);
     char *sptr = NULL;
 
+    if (buf == NULL)
+        errx(EXIT_FAILURE, "Unable to allocate memory");
+
     /* Some commands should not have arguments evaluated / expanded */
     if (check_for_do_not_eval(str))
         return (buf);
-
-    if (buf == NULL)
-        errx(EXIT_FAILURE, "Unable to allocate memory");
 
     /* Repeatedly scan string, evaluating expressions within parens first */
 eval_again:

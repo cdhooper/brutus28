@@ -204,7 +204,7 @@ usb_putchar_flush(void)
     if (usb_out_bufpos == 0)
         return;
     if (CDC_Transmit_FS(usb_out_buf, usb_out_bufpos) == USBD_OK)
-        usb_out_bufpos = 0;
+        usb_out_bufpos = 0;  // Flush was successful
 }
 
 static void
@@ -240,7 +240,7 @@ usb_puts_wait(uint8_t *buf, uint32_t len)
         return (1);
     if (usb_out_bufpos != 0) {
         /* First flush outstanding text */
-        uint64_t timeout = timer_tick_plus_msec(400);
+        uint64_t timeout = timer_tick_plus_msec(50);
         usb_putchar_flush();
         while (usb_out_bufpos != 0) {
             if (timer_tick_has_elapsed(timeout)) {
@@ -250,22 +250,31 @@ usb_puts_wait(uint8_t *buf, uint32_t len)
             usb_putchar_flush();
         }
     }
-    if ((len > 0) && (CDC_Transmit_FS(buf, len) != USBD_OK)) {
-        uint64_t timeout = timer_tick_plus_msec(500);
-        while (CDC_Transmit_FS(buf, len) != USBD_OK) {
-            if (timer_tick_has_elapsed(timeout)) {
-                printf("Host Timeout on USB send\n");
-                return (1);
+    // XXX: Simplify below loop if both STM32 HAL and opencm3 libraries
+    //      support transmitting more than 64 bytes at a time.
+    while (len > 0) {
+        uint32_t tlen = len;
+        if (CDC_Transmit_FS(buf, tlen) != USBD_OK) {
+            uint64_t timeout = timer_tick_plus_msec(50);
+            while (CDC_Transmit_FS(buf, tlen) != USBD_OK) {
+                if (timer_tick_has_elapsed(timeout)) {
+                    printf("Host Timeout on USB send\n");
+                    usb_send_timeouts++;
+                    return (1);
+                }
+                timer_delay_msec(1);
             }
         }
+        len -= tlen;
+        buf += tlen;
     }
     return (0);
 }
 
 int
-puts_binary(void *buf, uint32_t len)
+puts_binary(const void *buf, uint32_t len)
 {
-    uint8_t *ptr = buf;
+    uint8_t *ptr = (uint8_t *) buf;
     if (last_input_source == SOURCE_UART) {
         while (len-- > 0)
             uart_putchar(*(ptr++));

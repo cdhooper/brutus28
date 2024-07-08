@@ -71,7 +71,18 @@ const char cmd_c_help[] =
 "   q = quad (8 bytes)\n"
 "   o = oct (16 bytes)\n"
 "   h = hex (32 bytes)\n"
-"   S = swap bytes (endian)";
+"   S = swap bytes (endian)\n"
+"  <addr> may be prefixed by one of:"
+#ifdef HAVE_SPACE_FILE
+" file"
+#endif
+#ifdef HAVE_SPACE_FLASH
+" flash"
+#endif
+#ifdef HAVE_SPACE_PROM
+" prom"
+#endif
+"";
 
 const char cmd_comp_help[] =
 "comp[bwlqoh] <addr> <addr> <len>\n"
@@ -103,7 +114,18 @@ const char cmd_d_help[] =
 "   N = no output (only perform read)\n"
 "   R = raw output (no address or ASCII output)\n"
 "   S = swap bytes (endian)\n"
-"  SS = swap ASCII display (endian)";
+"  SS = swap ASCII display (endian)\n"
+"  <addr> may be prefixed by one of:"
+#ifdef HAVE_SPACE_FILE
+" file"
+#endif
+#ifdef HAVE_SPACE_FLASH
+" flash"
+#endif
+#ifdef HAVE_SPACE_PROM
+" prom"
+#endif
+"";
 
 const char cmd_patt_help[] =
 "patt[bwlqoh] <addr> <len> <pattern>\n"
@@ -121,16 +143,16 @@ const char cmd_patt_patterns[] =
 "specific value\n";
 
 const char cmd_test_help[] =
-"test[bwlqoh] <addr> <len> <mode> [read|write]\n"
+"test[bwlqoh] <addr> <len> <mode>\n"
 "   b = 1 byte\n"
 "   w = word (2 bytes)\n"
 "   l = long (4 bytes)\n"
 "   q = quad (8 bytes)\n"
 "   o = oct (16 bytes)\n"
 "   h = hex (32 bytes)\n"
-"   <mode> may be one, zero, rand, walk0, or walk1\n";
+"   <mode> may be one, zero, rand, walk0, walk1, or read\n";
 const char cmd_test_patterns[] =
-    "<mode> may be one, zero, rand, walk0, or walk1\n";
+    "<mode> may be one, zero, rand, walk0, walk1, or read\n";
 
 const char cmd_time_help[] =
 "time cmd <cmd> - measure command execution time\n"
@@ -148,7 +170,13 @@ const char cmd_time_help[] =
 void
 msleep(uint msec)
 {
-    Delay(msec * 1000 / TICKS_PER_SECOND);
+    while (msec > 1000) {
+        Delay(TICKS_PER_SECOND);
+        msec -= 1000;
+        if (is_user_abort())
+            return (1);
+    }
+    Delay(msec * TICKS_PER_SECOND / 1000);
 }
 
 void
@@ -1018,19 +1046,21 @@ remove_quotes(char *line)
  *      need for this function.
  */
 static char *
-loop_index_substitute(char *src, int value, int count)
+loop_index_substitute(char *src, int value, int count, int loop_level)
 {
     char   valbuf[10];
     int    vallen  = sprintf(valbuf, "%x", value);
     size_t newsize = strlen(src) + vallen * count + 1;
     char  *nstr    = malloc(newsize);
     char  *dptr    = nstr;
+    char   varstr[4] = "$a";
 
+    varstr[1] += loop_level;  // $a, $b, $c, etc.
     if (nstr == NULL)
         return (strdup(src));
 
     while (*src != '\0') {
-        char *ptr = strstr(src, "$a");
+        char *ptr = strstr(src, varstr);
         int   len;
         if (ptr == NULL) {
             /* Nothing more */
@@ -1051,11 +1081,14 @@ loop_index_substitute(char *src, int value, int count)
 }
 
 static int
-loop_index_count(char *src)
+loop_index_count(char *src, int loop_level)
 {
     int   count = 0;
+    char  varstr[4] = "$a";
+    varstr[1] += loop_level;  // $a, $b, $c, etc.
+
     while (*src != '\0') {
-        src = strstr(src, "$a");
+        src = strstr(src, varstr);
         if (src == NULL)
             break;
         count++;
@@ -1076,6 +1109,7 @@ cmd_loop(int argc, char * const *argv)
     char   *cmd;
     char   *cmdline;
     rc_t    rc = RC_SUCCESS;
+    static uint loop_level = 0;  // for nested loops
 
     if (argc <= 2) {
         printf("error: loop command requires count and command to execute\n");
@@ -1087,7 +1121,7 @@ cmd_loop(int argc, char * const *argv)
     if (cmdline == NULL)
         return (RC_FAILURE);
     cmd = remove_quotes(cmdline);
-    index_uses = loop_index_count(cmd);
+    index_uses = loop_index_count(cmd, loop_level);
     if (index_uses == 0)
         nargc = make_arglist(cmd, nargv);
 
@@ -1095,11 +1129,13 @@ cmd_loop(int argc, char * const *argv)
         if (index_uses > 0) {
             if (cur != 0)
                 free_arglist(nargc, nargv);
-            ptr = loop_index_substitute(cmd, cur, index_uses);
+            ptr = loop_index_substitute(cmd, cur, index_uses, loop_level);
             nargc = make_arglist(ptr, nargv);
             free(ptr);
         }
+        loop_level++;
         rc = cmd_exec_argv(nargc, nargv);
+        loop_level--;
         if (rc != RC_SUCCESS) {
             if (rc == RC_USER_HELP)
                 rc = RC_FAILURE;

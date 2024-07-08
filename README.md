@@ -1,30 +1,32 @@
 # Brutus-28 PAL decoder
 
-The goal of this project to build a brute-force decoder for traditional
-PAL and GAL 22V10 programmable logic parts. The implementation is not
-complete, but at this point, it can decode simple combinatorial gate
-devices back to an output which looks similar to what WinCUPL might take
+The goal of this project is to build a brute-force decoder for traditional
+PAL and GAL (such as 22V10) programmable logic parts. The implementation
+is not complete, but at this point, it can decode simple combinatorial
+gate devices to a point which looks similar to what WinCUPL might take
 as input.
 
 The rev1 directory contains board design files for the first version of
-this board. Note that there is a bug in the design which causes 5V to
-always be applied to the inserted PLD's VCC rail, although some protection
-can be afforded as the PLD's GND rail is correctly switched by firmware.
-This bug will be fixed in the Rev 2 design, once available.
+this board. There is a bug in the design which causes 5V to always be
+applied to the inserted PLD's VCC rail, although some protection can be
+afforded as the PLD's GND rail is correctly switched by firmware.  This
+bug is fixed in the Rev 2 design.
 
 The rev2 directory contains board design files for the second version of
 this board. This is the current version of Brutus. Improvements over the
 first version include bug fixes, the addition of a PLCC-20 socket, options
-for both narrow and wide DIP sockets, and finally optional LEDs which can
-show the state of each of the 28 pins for analysis progress.
+for both narrow and wide DIP sockets, and optional LEDs which can show
+the state of each of the 28 pins for analysis progress.
 
-The fw directory contains STM32 firmware for all board revisions.
+The fw directory contains STM32 firmware for all board revisions. You
+will need to change the Makefile to build for the rev1 board, if you have
+that design.
 
 The sw directory contains software which runs on your Linux or MacOS
-host to do analysis of the output from the STM32 firmware. Note that
-with current software, you must manually capture to a file the terminal
-output from the firmware. The host software can then perform an analysis
-on the captured file and provide decoded operations.
+host to do analysis of the output from the STM32 firmware. With current
+software, you must manually capture to a file the terminal output from
+the firmware. The host software can then perform an analysis on the
+captured file and provide decoded operations.
 
 As this is still a work in progress, there is still much debug output
 scattered throughout both the software and firmware.
@@ -60,8 +62,8 @@ Installing Brutus firmware on the Brutus-28 board from Linux (DFU method):
 
 Installing Brutus firmware on the board from Linux (ST-Link method):
 <UL>
-<LI> Connect the board to an ST-Link device, making sure that all pins are connected to their proper positions. The Brutus ST-Link connector pinout is identical to the STM32F4-Discovery board, so if you have one of those boards and a ribbon cable, it's an easy connection.
-<LI> Connect the ST-Link to your PC by USB (on the STM32F4-Discovery board, this is the USB Mini-B port
+<LI> Connect the board to an ST-Link device, making sure that all pins are connected to their proper positions. The Brutus ST-Link connector pinout is identical to the one on the STM32F4-Discovery board, so if you have one of those boards and a ribbon cable, it's an easy connection.
+<LI> Connect the ST-Link to your PC by USB (on the STM32F4-Discovery board, this is the USB Mini-B port).
 <LI> In the brutus28/fw directory, type <B>make flash</B>
 <LI> After firmware programming is complete, you should notice the Green power LED illuminate on your Brutus board.
 </UL>
@@ -70,18 +72,19 @@ Installing Brutus firmware on the board from Linux (ST-Link method):
 Capturing and analyzing
 <UL>
 <LI> Install the IC to analyze in a compatible socket with pin 1 of the chip facing pin 1 of the socket.
+<LI> Set the VCC and GND jumpers as appropriate for your device. Pin 28 is typically VCC with most parts. Note that if you are installing a DIP IC with less than 28 pins, then pin 28 will correspond to the highest pin number of your device.
 <LI> Connect the Brutus board by USB to your computer. It is not necessary to unplug Brutus while changing chips to analyze. Power is automatically removed from the chip when it's not in use.
 <LI> There is not yet an easy way to capture from Brutus. Under Linux, I use a program I wrote called term for this. Example:
 <PRE>
-    echo pld walk dip18 -9 -18 raw | term /dev/ttyACM0 >> chip.cap
+    echo pld walk dip18 -9 -18 raw | term /dev/ttyACM0 > chip.cap
 </PRE>
 <LI> Once you have a capture file, you can then run the software to analyze it.
 <PRE>
     brutus chip.cap -d dip18
 </PRE>
-The output from the brutus utility includes an analysis and logic statements in a format compatible with with WinCUPL language used for programming Lattice GAL22V10 parts.
+The output from the brutus utility includes analysis and logic statements in a format compatible with the WinCUPL language used for programming Lattice GAL parts.
 
 
 
-Eventually further information will be made available here:
+Further information will eventually be made available here:
     http://eebugs.com/brutus28
