@@ -3,14 +3,14 @@
 The goal of this project is to build a brute-force decoder for traditional
 PAL and GAL (such as 22V10) programmable logic parts. The implementation
 is not complete, but at this point, it can decode simple combinatorial
-gate devices to a point which looks similar to what WinCUPL might take
+gate devices to point which looks similar to what WinCUPL might take
 as input.
 
 The rev1 directory contains board design files for the first version of
 this board. There is a bug in the design which causes 5V to always be
 applied to the inserted PLD's VCC rail, although some protection can be
-afforded as the PLD's GND rail is correctly switched by firmware.  This
-bug is fixed in the Rev 2 design.
+afforded as the PLD's GND rail is correctly switched by firmware.
+This bug is fixed in the Rev 2 design.
 
 The rev2 directory contains board design files for the second version of
 this board. This is the current version of Brutus. Improvements over the
@@ -49,6 +49,20 @@ Building Brutus firmware from Linux:
     make
 </PRE>
 
+Setting up permissions
+<UL>
+Depending on your particular OS and version, you will likely need to allow
+your user access to have direct interation with Brutus and the programming
+hardware. In most versions, the easiest way to get access to the /dev/ttyACM*
+devices is to add your user to the dialup group. You'll need to logout and
+back in before permission changes take effect. For other USB interfaces,
+such as for DFU programming or ST-Link, it may be easier to create a new
+rule in /etc/udev/rules.d. Here is an example file "70-stm-rules" as a
+starting point:
+    SUBSYSTEMS=="usb", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="3748", MODE="0666"
+    SUBSYSTEMS=="usb", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="df11", MODE="666"
+</UL>
+
 Installing Brutus firmware on the Brutus-28 board from Linux (DFU method):
 <UL>
 <LI> Connect the board to your computer via the USB-C port
@@ -82,7 +96,7 @@ Capturing and analyzing
 <PRE>
     brutus chip.cap -d dip18
 </PRE>
-The output from the brutus utility includes analysis and logic statements in a format compatible with the WinCUPL language used for programming Lattice GAL parts.
+The output from the brutus utility includes an analysis followed by logic statements in a format compatible with the WinCUPL language used for programming Lattice parts.
 
 
 

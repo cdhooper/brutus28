@@ -67,9 +67,9 @@ static const char *cfg_file_end        = NULL;        // end of mapped config
 
 typedef struct {
     uint     pie_line;
-    uint8_t  pie_result_bit;
-    uint32_t pie_input_bits;
-    uint32_t pie_affecting_bits;
+    uint8_t  pie_result_bit;      // whether pin should be set to 1 or 0
+    uint32_t pie_affecting_bits;  // pins which affect this pin
+    uint32_t pie_input_bits;      // pin states which affect this pin
 } pi_ent_t;
 
 static struct {
@@ -556,7 +556,7 @@ pin_to_bit(uint pin)
     for (bit = 0; bit < 32; bit++)
         if (bit_to_pin[bit] == pin)
             return (bit);
-    return (0);
+    return (0xff);
 }
 
 /*
@@ -662,7 +662,7 @@ cfg_keyword_pin(const char *sptr, const char *eptr, uint line)
         fatal_cfg(line, line, "invalid pin number '%s'", sptr);
 
     bit = pin_to_bit(pin);
-    if (bit == 0)
+    if (bit == 0xff)
         fatal_cfg(line, line, "invalid pin number '%u'", pin);
 
     for (sptr += pos; *sptr != '='; sptr++)
@@ -1133,7 +1133,7 @@ show_counts(void)
     uint bit;
     for (bit = 0; bit < 32; bit++) {
         if (pinfo[bit].pi_count > 0) {
-            printf("P%d count=%u\n", pin_name(bit, 0), pinfo[bit].pi_count);
+            printf("%s count=%u\n", pin_name(bit, 0), pinfo[bit].pi_count);
         }
     }
 }
@@ -1438,6 +1438,38 @@ is_contained_within(uint supbit, uint subbit, uint result_bit)
      * For each element in the subbit, if there is a matching
      * element in the supbit, then this function will return true.
      * More and/or conditions may be present in the supbit.
+     *
+     * This one should match:
+     *          SUB = P1
+     *              # P2;
+     *          SUPER = P1 & P3
+     *                # P2 & P3;
+     *      ...
+     *          SUPER = SUB & P3
+     *                # SUB & P3;
+     *      ...
+     *          SUPER = SUB & P3;
+     *
+     *  This one (simpler) should also match:
+     *          SUB = P1
+     *              # P2;
+     *          SUPER = P1
+     *                # P2
+     *                # P3;
+     *      ...
+     *          SUPER = SUB
+     *                # SUB
+     *                # P3;
+     *      ...
+     *          SUPER = SUB
+     *                # P3;
+     *
+     *   A match should occur only when we find all terms of the sub
+     *   have matching non-sub bits in super. This one should not match:
+     *          SUB = P1
+     *              # P2;
+     *          SUPER = P1 & P3
+     *                # P2;
      */
     uint supcur;
     uint subcur;
@@ -1445,7 +1477,6 @@ is_contained_within(uint supbit, uint subbit, uint result_bit)
     uint matched = 0;
 
     for (subcur = 0; subcur < pinfo[subbit].pi_count; subcur++) {
-        uint matched = 0;
         if (pinfo[subbit].pi_ent[subcur].pie_result_bit != result_bit)
             continue;
         for (supcur = 0; supcur < pinfo[supbit].pi_count; supcur++) {
@@ -1477,8 +1508,8 @@ is_contained_within(uint supbit, uint subbit, uint result_bit)
                     affecting =
                         pinfo[supbit].pi_ent[supcur].pie_affecting_bits &
                         ~pinfo[subbit].pi_ent[subcur].pie_affecting_bits;
+                    matched = 1;
                 }
-                matched = 1;
                 break;
             }
         }
@@ -1524,13 +1555,15 @@ merge_common_subexpression(uint supbit, uint subbit, uint result_bit)
      */
     uint supcur;
     uint subcur;
+    uint32_t sub_affecting;
 
     for (subcur = 0; subcur < pinfo[subbit].pi_count; subcur++) {
         if (pinfo[subbit].pi_ent[subcur].pie_result_bit != result_bit)
             continue;   // Doesn't match the desired result
+
+        sub_affecting = pinfo[subbit].pi_ent[subcur].pie_affecting_bits;
 #if 0
-        if ((pinfo[subbit].pi_ent[subcur].pie_affecting_bits &
-            (pinfo[subbit].pi_ent[subcur].pie_affecting_bits - 1)) == 0)
+        if ((sub_affecting & (sub_affecting - 1)) == 0)
             continue;   // No point in swapping -- it's only a single bit
         /* Might need the above to allow for combining logic */
 #endif
@@ -1539,11 +1572,18 @@ merge_common_subexpression(uint supbit, uint subbit, uint result_bit)
             if (pinfo[supbit].pi_ent[supcur].pie_result_bit != result_bit)
                 continue;
             if (((pinfo[supbit].pi_ent[supcur].pie_affecting_bits &
-                  pinfo[subbit].pi_ent[subcur].pie_affecting_bits) ==
-                 pinfo[subbit].pi_ent[subcur].pie_affecting_bits) &&
+                  sub_affecting) == sub_affecting) &&
                 ((pinfo[supbit].pi_ent[supcur].pie_input_bits &
-                  pinfo[subbit].pi_ent[subcur].pie_input_bits) ==
-                 pinfo[subbit].pi_ent[subcur].pie_input_bits)) {
+                  sub_affecting) ==
+                 (pinfo[subbit].pi_ent[subcur].pie_input_bits &
+                  sub_affecting))) {
+                /*
+                 * Expression in superset where subset can be substituted:
+                 *   The output bit state is the same.
+                 *   Pins which affect the subset should be in the set
+                 *        which affect the superset.
+                 *   States of the affecting input pins should match.
+                 */
                 if (matched == 0) {
                     /* First match -- reduce this expression */
                     pinfo[supbit].pi_ent[supcur].pie_affecting_bits =
@@ -1585,7 +1625,7 @@ merge_common_subexpressions(void)
      * Find expressions where all conditions of PIN A are
      * fully captured by PIN B. The expression for Pin B
      * can then be simplified to include just PIN A with
-     * whatever additional constraints are required by PIN A.
+     * whatever additional constraints are required by PIN B.
      * This is complicated because you could have a multiple
      * entry expression, for example:
      *
@@ -1600,8 +1640,8 @@ merge_common_subexpressions(void)
      *      # !P16 && !P18 && P19
      * P26  = P25 && P26
      *
-     * Argh! Except the above example is not right because P26 is
-     * actually an open drain that should end up being
+     * The above example might not be right if P26 is actually an
+     * open drain that should end up being
      * P26    = 'b'2;
      * P26.OE = P25;
      */
@@ -1626,9 +1666,9 @@ merge_common_subexpressions(void)
             for (pin_state = 0; pin_state <= 1; pin_state++) {
                 if (is_contained_within(supbit, subbit, pin_state)) {
 #ifdef DEBUG_MERGE_COMMON_SUBEXPRESSIONS
-                    printf("%s contains %s\n",
-                           pin_name(supbit, !pin_state),
-                           pin_name(subbit, !pin_state));
+                    printf("%s contains ", pin_name(supbit, !pin_state));
+                    printf("%s state=%u\n", pin_name(subbit, !pin_state),
+                           pin_state);
 #endif
                     merge_common_subexpression(supbit, subbit, pin_state);
                     merge_count++;
@@ -1761,6 +1801,13 @@ initialize_pinfo(void)
         pinfo[pin].pi_num = pin + 1;  // Pin number at input / output
 }
 
+static void
+usage(void)
+{
+    printf("Usage: cap_file [cfg_file] [-d <devtype>]\n"
+           "       <devtype> is one of dip4...dip28, g220v10");
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -1785,14 +1832,15 @@ main(int argc, char *argv[])
             cfg_filename = ptr;
         } else {
             warnx("Unknown argument %s", argv[arg]);
-            printf("Usage: cap_file [cfg_file] [-d <devtype>]\n"
-                   "       <devtype> is one of dip4...dip28, g220v10");
+            usage();
             exit(EXIT_FAILURE);
         }
     }
 
-    if (cap_filename == NULL)
-        errx(EXIT_FAILURE, "You must specify a cap_filename and optional cfg_filename");
+    if (cap_filename == NULL) {
+        usage();
+        errx(EXIT_FAILURE, "You must specify at least cap_filename");
+    }
 
     initialize_pinfo();
 
@@ -1803,6 +1851,7 @@ main(int argc, char *argv[])
     analyze();
     collect_or_masks();
     merge_or_masks();
+    show_counts();
     collapse_duplicates();
 
     printf("after merge or masks\n");
@@ -1823,6 +1872,7 @@ main(int argc, char *argv[])
     printf("after merge common subexpressions\n");
     print_ents();
     print_ents_as_ops(1);
+    printf("// Inverted\n");
     print_ents_as_ops(0);
     printf("\n");
 #endif
