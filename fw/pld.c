@@ -2109,16 +2109,58 @@ pld_get_pin_drive_state_str(uint pin, uint output_dd, uint output_d)
     return (state);
 }
 
+static const char *const plcc28_lines[] = {
+    "   Out ",
+    "        ////////////////////\\",
+    "In Out / 4  3  2  1 28 27 26 |Out In",
+    "|5                   25|",
+    "|6                   24|",
+    "|7                   23|",
+    "|8       PLCC28      22|",
+    "|9                   21|",
+    "|10                  20|",
+    "|11                  19|",
+    "      | 12 13 14 15 16 17 18 |",
+    "       \\--------------------/",
+    "   Out ",
+    "    In ",
+};
+static const char *const plcc20_lines[] = {
+    "   Out ",
+    "        //////////////\\",
+    "In Out / 3  2  1 20 19 |Out In",
+    "|4             18|",
+    "|5             17|",
+    "|6    PLCC20   16|",
+    "|7             15|",
+    "|8             14|",
+    "      |  9 10 11 12 13 |",
+    "       \\--------------/",
+    "   Out ",
+    "    In ",
+};
+
 static void
 pld_show(int argc, char * const *argv)
 {
     uint output_d  = pld_output_value();
     uint output_dd = pldd_output_value();
     uint input     = pld_input();
+    int pin_max = 28;
     int pin;
+    int arg;
+    uint l_start;
+    uint r_start;
+    uint r_end;
+    uint cpin;
+
+    for (arg = 1; arg < argc; arg++) {
+        if (strcmp(argv[arg], "20") == 0)
+            pin_max = 20;
+    }
 
     printf("Output=");
-    for (pin = 27; pin >= 0; pin--) {
+    for (pin = pin_max - 1; pin >= 0; pin--) {
         const char *d = pld_get_pin_drive_state_str(pin, output_d, output_dd);
 
         if (d[0] == 'i')
@@ -2128,120 +2170,118 @@ pld_show(int argc, char * const *argv)
         printf("%c", d[0]);
     }
     printf(" Input=");
-    for (pin = 27; pin >= 0; pin--) {
+    for (pin = pin_max - 1; pin >= 0; pin--) {
         printf("%c", '0' + ((input & BIT(pin)) ? 1 : 0));
     }
     printf("\n\n"
            "  In Out Pin___   ___Pin Out In        In ");
-    for (pin = 4; pin > 0; pin--) {
-        uint i = input & BIT(pin - 1) ? 1 : 0;
+    if (pin_max == 20) {
+        l_start = 3;
+        r_start = 20;
+        r_end = 19;
+    } else {
+        l_start = 4;
+        r_start = 28;
+        r_end = 26;
+    }
+    for (cpin = l_start; cpin > 0; cpin--) {
+        uint i = input & BIT(cpin - 1) ? 1 : 0;
         printf("  %u", i);
     }
-    for (pin = 28; pin > 25; pin--) {
-        uint i = input & BIT(pin - 1) ? 1 : 0;
+    for (cpin = r_start; cpin >= r_end; cpin--) {
+        uint i = input & BIT(cpin - 1) ? 1 : 0;
         printf("  %u", i);
     }
     printf("\n");
 
     for (pin = 0; pin < 14; pin++) {
         const char *line;
-        const char *mid     = "     ";
+        const char *mid     = "";
         const char *drive_l = "i";
         const char *drive_r = "i";
         uint input_l = input & BIT(pin) ? 1 : 0;
         uint input_r = input & BIT(27 - pin) ? 1 : 0;
-        uint cpin;
 
         if (pin == 0)
-            mid = " \\_/ ";
-        if (pin == 13)
+            mid = "\\_/ ";
+        else if (pin == pin_max / 4 - 1)
+            mid = "DIP ";
+        else if (pin == pin_max / 4)
+            mid = (pin_max == 20) ? "20  " : "28  ";
+        else if (pin == 13)  // Bottom of socket
             mid = "_____";
+        else if (pin == (pin_max / 2) - 1)  // Bottom of chip
+            mid = "_ _ _";
 
         drive_l = pld_get_pin_drive_state_str(pin, output_dd, output_d);
         drive_r = pld_get_pin_drive_state_str(27 - pin, output_dd, output_d);
 
-        printf("  %u  %-3s %2u|_|%s|_|%-2u %3s  %u    ",
-               input_l, drive_l, pin + 1, mid, 28 - pin, drive_r, input_r);
-        switch (pin) {
-            case 0:
-                line = "   Out ";
-                break;
-            case 1:
-                line = "        ////////////////////\\";
-                break;
-            case 2:
-                line = "In Out / 4  3  2  1 28 27 26 |Out In";
-                break;
-            case 3:
-                line = "|5                   25|";
-                break;
-            case 4:
-                line = "|6                   24|";
-                break;
-            case 5:
-                line = "|7                   23|";
-                break;
-            case 6:
-                line = "|8       PLCC28      22|";
-                break;
-            case 7:
-                line = "|9                   21|";
-                break;
-            case 8:
-                line = "|10                  20|";
-                break;
-            case 9:
-                line = "|11                  19|";
-                break;
-            case 10:
-                line = "      | 12 13 14 15 16 17 18 |";
-                break;
-            case 11:
-                line = "       \\--------------------/";
-                break;
-            case 12:
-                line = "   Out ";
-                break;
-            case 13:
-                line = "    In ";
-                break;
-            default:
-                line = "";
-                break;
+        if (pin < pin_max / 2) {
+            printf("  %u  %-3s %2u|_|%5s|_|%-2u %3s  %u    ",
+                   input_l, drive_l, pin + 1, mid, 28 - pin, drive_r, input_r);
+        } else {
+            printf("         %2u|_|%5s|_|%-2u           ",
+                   pin + 1, mid, 28 - pin);
         }
-// XXX need to shift everything up 1 row
-//     This means "In" pins get printed after "___   ___" header
+        if ((pin_max == 28) && (pin < ARRAY_SIZE(plcc28_lines))) {
+            line = plcc28_lines[pin];
+        } else if ((pin_max == 20) && (pin < ARRAY_SIZE(plcc20_lines))) {
+            line = plcc20_lines[pin];
+        } else {
+            line = "";
+        }
+
         if (pin == 0) {
             const char *d;
             printf("%s", line);
-            for (cpin = 4; cpin > 0; cpin--) {
+            for (cpin = l_start; cpin > 0; cpin--) {
                 d = pld_get_pin_drive_state_str(cpin - 1, output_dd, output_d);
                 printf(" %2s", d);
             }
-            for (cpin = 28; cpin > 25; cpin--) {
+            for (cpin = r_start; cpin >= r_end; cpin--) {
                 d = pld_get_pin_drive_state_str(cpin - 1, output_dd, output_d);
                 printf(" %2s", d);
             }
             printf("\n");
-        } else if ((pin >= 3) && (pin <= 9)) {
-            uint p = pin + 1;
-            input_l = input & BIT(p) ? 1 : 0;
-            input_r = input & BIT(28 - p) ? 1 : 0;
-            drive_l = pld_get_pin_drive_state_str(p, output_dd, output_d);
-            drive_r = pld_get_pin_drive_state_str(29 - p, output_dd, output_d);
+        } else if (((pin_max == 28) && (pin >= 3) && (pin <= 9)) ||
+                   ((pin_max == 20) && (pin >= 3) && (pin <= 7))) {
+            uint p_l = pin + 1;
+            uint p_r = 27 - pin;
+            if (pin_max == 20) {
+                p_l = pin;
+                p_r = 21 - pin;
+            }
+            input_l = input & BIT(p_l) ? 1 : 0;
+            input_r = input & BIT(p_r) ? 1 : 0;
+            drive_l = pld_get_pin_drive_state_str(p_l, output_dd, output_d);
+            drive_r = pld_get_pin_drive_state_str(p_r, output_dd, output_d);
             printf(" %u %-2s %s %-2s %u\n",
                    input_l, drive_l, line, drive_r, input_r);
-        } else if (pin == 12) {
+        } else if (((pin_max == 28) && (pin == 12)) ||
+                   ((pin_max == 20) && (pin == 10))) {
             const char *d;
+            uint start = 12;
+            uint end = 18;
+            if (pin_max == 20) {
+                start = 9;
+                end = 13;
+            }
             printf("%s", line);
-            for (cpin = 12; cpin <= 18; cpin++) {
+            for (cpin = start; cpin <= end; cpin++) {
                 d = pld_get_pin_drive_state_str(cpin - 1, output_dd, output_d);
                 printf(" %2s", d);
             }
             printf("\n");
-        } else if (pin == 13) {
+        } else if (((pin_max == 28) && (pin == 13)) ||
+                   ((pin_max == 20) && (pin == 11))) {
+            uint start = 12;
+            uint end = 18;
+            if (pin_max == 20) {
+                start = 9;
+                end = 13;
+            }
             printf("%s", line);
-            for (cpin = 12; cpin <= 18; cpin++) {
+            for (cpin = start; cpin <= end; cpin++) {
                 uint i = input & BIT(cpin - 1) ? 1 : 0;
                 printf("  %u", i);
             }
@@ -2258,7 +2298,7 @@ const char cmd_pld_help[] =
 "pld enable         - enable PLD power\n"
 "pld measure        - measure PLD speed (requires custom programming)\n"
 "pld output <value> - drive PLDD pins (resistor-protected GPIOs)\n"
-"pld show           - show current PLD pin values\n"
+"pld show [20]      - show current PLD pin values\n"
 "pld voltage        - show sensor readings\n"
 "pld walk [?|opt]   - walk GPIO bits (use 'walk ?' for more help)\n";
 
