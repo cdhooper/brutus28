@@ -82,6 +82,22 @@ static struct {
     pi_ent_t   *pi_ent;
 } pinfo[32];
 
+static const uint8_t bit_to_pin_plcc20[] =
+{
+     1,  2,  3,  4,  5,  6,  7,  8,
+     9, 10, 11, 12, 13, 14, 15, 16,
+    17, 18, 19, 20,  0,  0,  0,  0,
+     0,  0,  0,  0
+};
+
+static const uint8_t bit_to_pin_plcc28[] =
+{
+     1,  2,  3,  4,  5,  6,  7,  8,
+     9, 10, 11, 12, 13, 14, 15, 16,
+    17, 18, 19, 20, 21, 22, 23, 24,
+    25, 26, 27, 28
+};
+
 static const uint8_t bit_to_pin_g22v10[] =
 {
      0,  1,  2,  3,  4,  5,  6,  0,
@@ -579,9 +595,13 @@ cfg_device_name(char *devname, uint line)
         }
     }
 
-    if ((strncasecmp(devname, "G22V10", 6) == 0) ||
-        (strncasecmp(devname, "GAL22V10", 8) == 0))
-        bit_to_pin = bit_to_pin_g22v10;
+    if (strncasecmp(devname, "PLCC20", 6) == 0)
+         bit_to_pin = bit_to_pin_plcc20;
+    else if (strncasecmp(devname, "PLCC28", 6) == 0)
+         bit_to_pin = bit_to_pin_plcc28;
+    else if ((strncasecmp(devname, "G22V10", 8) == 0) ||
+             (strncasecmp(devname, "GAL22V10", 8) == 0))
+         bit_to_pin = bit_to_pin_g22v10;
 #if BOARD_REV >= 2
     else if (strcasecmp(devname, "DIP28") == 0)
         bit_to_pin = bit_to_pin_dip28;
@@ -925,10 +945,16 @@ walk_find_affected(uint32_t *pins_affected_by)
             /* Verify inputs to PLD were as expected (a single bit flip) */
             wdiff_mask = (pld_in[line] ^ pld_in[oline]);
             if (wdiff_mask != BIT(bit)) {
+                printf("PLD input unexpected (%s bits differ) at %u %u:\n  ",
+                       (wdiff_mask ^ BIT(bit)) ? "multiple" : "no",
+                       line, oline);
                 printf("PLD input unexpected (multiple bits differ):\n  ");
                 print_binary(pld_in[line]);
                 printf(" ^ Pin%u != ", bit + 1);
                 print_binary(pld_in[oline]);
+                printf("\n  ");
+                print_binary(wdiff_mask ^ BIT(bit));
+                printf(" DIFF\n");
             }
         }
     }
@@ -1131,11 +1157,13 @@ static void
 show_counts(void)
 {
     uint bit;
+    printf("Counts:");
     for (bit = 0; bit < 32; bit++) {
         if (pinfo[bit].pi_count > 0) {
-            printf("%s count=%u\n", pin_name(bit, 0), pinfo[bit].pi_count);
+            printf(" %s=%u", pin_name(bit, 0), pinfo[bit].pi_count);
         }
     }
+    printf("\n");
 }
 
 /*
