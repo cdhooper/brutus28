@@ -48,7 +48,10 @@ static volatile uint cons_in_rb_producer; // Console input current writer pos
 static uint          cons_in_rb_consumer; // Console input current reader pos
 static uint8_t       cons_in_rb[1024];    // Console input ring buffer (FIFO)
 static uint8_t       usb_out_buf[2048];   // USB output buffer
+static uint8_t       uart_out_buf[2048];  // UART output
+static uint16_t      uart_out_prod;       // UART output producer
 static uint16_t      usb_out_bufpos = 0;  // USB output buffer position
+static uint8_t       uart_out_wrapped;    // UART output wrapped buffer
 static bool          uart_console_active = false;
 
 uint8_t last_input_source = 0;
@@ -316,6 +319,24 @@ getchar(void)
     usb_poll();
 
     return (cons_rb_get());
+}
+
+/*
+ * uart_replay_output() will re-display recent serial UART output
+ */
+void
+uart_replay_output(void)
+{
+    uint prod = uart_out_prod;
+    uint cons = 0;
+    if (uart_out_wrapped) {
+        cons = (prod + 1) % sizeof (uart_out_buf);
+    }
+    while (cons != prod) {
+        putchar(uart_out_buf[cons]);
+        cons = (cons + 1) % sizeof (uart_out_buf);
+    }
+    uart_out_prod = prod;  // Reset producer
 }
 
 void
