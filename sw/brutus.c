@@ -106,6 +106,14 @@ static const uint8_t bit_to_pin_g22v10[] =
     21, 22, 23, 24,
 };
 
+static const uint8_t bit_to_pin_g16v8[] =
+{
+     1,  2,  3,  4,  5,  6,  7,  8,
+     9, 0,  11, 12, 13, 14, 15, 16,
+    17, 18, 19, 20, 21, 22, 23, 0,
+     0,  0,  0,  0,
+};
+
 #if BOARD_REV == 1
 static const uint8_t bit_to_pin_dip24[] =
 {
@@ -602,6 +610,9 @@ cfg_device_name(char *devname, uint line)
     else if ((strncasecmp(devname, "G22V10", 8) == 0) ||
              (strncasecmp(devname, "GAL22V10", 8) == 0))
          bit_to_pin = bit_to_pin_g22v10;
+    else if ((strncasecmp(devname, "G16V8", 8) == 0) ||
+             (strncasecmp(devname, "GAL16V8", 8) == 0))
+         bit_to_pin = bit_to_pin_g16v8;
 #if BOARD_REV >= 2
     else if (strcasecmp(devname, "DIP28") == 0)
         bit_to_pin = bit_to_pin_dip28;

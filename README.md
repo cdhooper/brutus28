@@ -92,6 +92,11 @@ Capturing and analyzing
 <PRE>
     echo pld walk dip18 -9 -18 raw | term /dev/ttyACM0 > chip.cap
 </PRE>
+Here's another example of capturing a PLCC20 GAL16V8:
+<PRE>
+    echo pld walk plcc20 -10 -20 raw | term /dev/ttyACM2 > chip.cap
+</PRE>
+
 <LI> Once you have a capture file, you can then run the software to analyze it.
 <PRE>
     brutus chip.cap -d dip18

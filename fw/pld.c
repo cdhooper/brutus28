@@ -1030,23 +1030,29 @@ fail:
 
 const char cmd_pld_walk_help[] =
 "pld walk options\n"
-"  <spin>-<epin>  - specify a range of pins to walk; range 1-28\n"
-"  <pin1>,<pin2>  - specify multiple individual pins (-pin removes it)\n"
-"  analyze        - perform a quick analysis\n"
-"  auto           - automatically probe to select device pins\n"
-"  binary         - show binary instead of hex\n"
-"  deep           - perform a deep analysis (takes a lot longer)\n"
-"  dip            - select standard DIP 22V10 pins\n"
-"  invert         - invert ignored pins (make them 1 instead of 0)\n"
-"  plcc           - select standard PLCC 22V10 pins\n"
-"  raw            - dump raw values (not ASCII)\n"
-"  values         - report values (ASCII hex or binary)\n"
-"  zero           - perform walking zeros instead of walking ones\n";
+"  <spin>-<epin>    - specify a range of pins to walk; range 1-28\n"
+"  <pin1>,<pin2>    - specify multiple individual pins (-pin removes it)\n"
+"  analyze          - perform a quick analysis\n"
+"  auto             - automatically probe to select device pins\n"
+"  binary           - show binary instead of hex\n"
+"  deep             - perform a deep analysis (takes a lot longer)\n"
+"  dip24 or dip20   - select standard DIP 22V10 or 16V8 pins\n"
+"  invert           - invert ignored pins (make them 1 instead of 0)\n"
+"  plcc28 or plcc20 - select standard PLCC 22V10 or 16V8 pins\n"
+"  raw              - dump raw values (not ASCII)\n"
+"  values           - report values (ASCII hex or binary)\n"
+"  zero             - perform walking zeros instead of walking ones\n";
 
 #define DIP_22V20_IGNORE_PINS  (((BIT(12) | BIT(24) | BIT(25) | BIT(26) | \
                                   BIT(27) | BIT(28)) >> 1) | 0xf0000000)
 #define PLCC_22V20_IGNORE_PINS (((BIT(1) | BIT(8) | BIT(14) | BIT(15) | \
                                   BIT(22) | BIT(28)) >> 1) | 0xf0000000)
+#define DIP_16V8_IGNORE_PINS   (((BIT(10) | BIT(20) | BIT(21) | BIT(22) | \
+                                  BIT(23) | BIT(24) | BIT(25) | BIT(26) | \
+                                  BIT(27) | BIT(28)) >> 1) | 0xf0000000)
+#define PLCC_16V8_IGNORE_PINS  (((BIT(10) | BIT(20) | BIT(21) | BIT(22) | \
+                                  BIT(23) | BIT(24) | BIT(25) | BIT(26) | \
+                                  BIT(27) | BIT(28)) >> 1) | 0xf0000000)
 
 #define WALK_FLAG_ANALYZE       0x01  // Do analysis
 #define WALK_FLAG_ANALYZE_DEEP  0x02  // Do deep analysis
@@ -1130,8 +1136,11 @@ cmd_pld_get_ignore_mask(int argc, char * const *argv,
             case 'd':
                 if (strncmp("deep", ptr, plen) == 0) {
                     *flags |= WALK_FLAG_ANALYZE_DEEP | WALK_FLAG_ANALYZE;
-                } else if (strcmp("dip", ptr) == 0) {
+                } else if (strcmp("dip24", ptr) == 0) {
                     ignore_mask = DIP_22V20_IGNORE_PINS;
+                    ignore_initialized = 1;
+                } else if (strcmp("dip20", ptr) == 0) {
+                    ignore_mask = DIP_16V8_IGNORE_PINS;
                     ignore_initialized = 1;
                 } else {
                     goto invalid_argument;
@@ -1143,10 +1152,15 @@ cmd_pld_get_ignore_mask(int argc, char * const *argv,
                 *flags |= WALK_FLAG_INVERT_IGNORE;
                 continue;
             case 'p':
-                if (strncmp("plcc", ptr, plen))
+                if (strcmp("plcc28", ptr) == 0) {
+                    ignore_mask = PLCC_22V20_IGNORE_PINS;
+                    ignore_initialized = 1;
+                } else if (strcmp("plcc20", ptr) == 0) {
+                    ignore_mask = PLCC_16V8_IGNORE_PINS;
+                    ignore_initialized = 1;
+                } else {
                     goto invalid_argument;
-                ignore_mask = PLCC_22V20_IGNORE_PINS;
-                ignore_initialized = 1;
+                }
                 continue;
             case 'r':
                 if (strncmp("raw", ptr, plen))

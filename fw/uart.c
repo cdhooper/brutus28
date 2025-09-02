@@ -291,6 +291,10 @@ int
 putchar(int ch)
 {
     static int last_putc = 0;
+
+    uart_out_buf[uart_out_prod] = ch;
+    uart_out_prod = (uart_out_prod + 1) % sizeof (uart_out_buf);
+
     if ((ch == '\n') && (last_putc != '\r') && (last_putc != '\n')) {
         uart_putchar('\r');  // Always do CRLF
         usb_putchar_wait('\r');
