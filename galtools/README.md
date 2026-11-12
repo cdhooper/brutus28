@@ -33,20 +33,43 @@ in the main README:
 - GAL22V10: VCC on socket pin 28, GND on socket pin 12.
 - PLCC28 GAL22V10: use `-s plcc28`.
 
-Set the VCC and GND jumpers to match, then run:
+Set the VCC and GND jumpers to match, and the supply jumper to 5 V, then
+run:
 
     galtools/galre.py board -p /dev/ttyACM0 -d GAL22V10 -o out -t mychip
+
+galre first asks the board which socket pins are jumpered to VCC and GND
+and which supply is selected (`pld capture jumpers`). If that does not
+suit the device and socket, it stops before any capture and says what it
+expected and what it found:
+
+    jumper check: the jumpers do not suit a GAL22V10 in the dip24 socket
+      expected: VCC on socket pin 28, GND on socket pin 12, 5 V
+      detected: VCC on socket pin 24, GND on socket pin 12, 5 V
+
+The firmware checks again before every run it is sent, and drives the VCC
+pin high and the GND pin low in every vector. The detection is the one
+`pld check` uses; like `pld check`, it briefly switches the socket's VCC
+and GND on with the socket pins undriven. It has not yet been tried with a
+GAL in the socket. If it gets the jumpers wrong, `--no-jumper-check` turns
+off both checks.
 
 This writes:
 
 - `out/mychip.pld`: the recovered design.
-- `out/report.txt`: pin roles, states, equations and board work.
-- `out/capture.jsonl`: every capture the board returned.
+- `out/report.txt`: the setup, pin roles, states, equations and board
+  work.
+- `out/capture.jsonl`: the setup, then every capture the board returned.
+  The setup is the device, socket, timing, detected jumpers, firmware
+  version, held pins, survey size, title and date.
 - With a CUPL compiler, also `out/mychip.jed`.
 
 To redo the analysis without the board:
 
-    galtools/galre.py replay out/capture.jsonl -d GAL22V10 -o out2
+    galtools/galre.py replay out/capture.jsonl -o out2
+
+The device, held pins, survey size and title come from the recording.
+Recordings made before the setup was recorded need `-d`.
 
 To try it without hardware, `sim` runs a simulated chip from a JED. It then
 also compares the rebuilt JED with the original under random stimulus:
@@ -62,6 +85,7 @@ Options:
   the full sweeps (default 64).
 - `--settle`, `--off` and `--on` set the firmware timing: µs after each
   write, ms with power off during a power cycle, and ms after power on.
+- `--no-jumper-check` powers the socket without checking the jumpers.
 
 ## How it works
 
@@ -131,12 +155,20 @@ needed about 3 million power cycles.
 
 ## Firmware commands
 
-`pld capture ?` lists the commands. The host first configures a job:
+`pld capture ?` lists the commands. `pld capture jumpers` reports the
+detected jumpers as `jumpers vcc=<pins> gnd=<pins> supply=<mV>`.
 
-- `set pins= base= inv= clk= cand= mask= count= mul= settle= off= on=`
+The host first configures a job:
+
+- `set pins= base= inv= clk= cand= mask= count= mul= settle= off= on=
+  vcc= gnd= supply=`
 - `path`
 - `probe`
 - `ret <crc> <vectors>`
+
+When `vcc=`, `gnd=` or `supply=` is set, each run first checks the
+jumpers against them and is refused if they differ, or if the job
+enumerates, inverts, clocks or probes a VCC or GND pin.
 
 It then runs one of:
 
@@ -155,7 +187,7 @@ chunks. The header comment of `fw/capture.c` describes the format.
 |---|---|
 | `galre.py` | Command line |
 | `analysis.py` | Discovery, exploration, equations, CUPL |
-| `rig.py` | `SimRig` (simulated chip), `BrutusRig` (board), recording and replay, socket pin maps |
+| `rig.py` | `SimRig` (simulated chip), `BrutusRig` (board, jumper check), recording and replay, socket pin maps |
 | `capture.py` | Serial transport and capture format |
 | `galsim.py` | Fuse-level GAL16V8/22V10 simulator |
 | `bitsim.py` | The same, evaluated for all input vectors at once |

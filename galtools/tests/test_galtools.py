@@ -5,22 +5,26 @@ and run the analysis through it; the CUPL round trips need a CUPL compiler
 ($CUPL or cupl on the PATH).  Both are skipped without them.
 """
 
+import contextlib
+import io
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
 sys.path.insert(0, HERE)
 
 import fwharness                                   # noqa: E402
+import galre                                       # noqa: E402
 import verify                                      # noqa: E402
 from analysis import Analysis                      # noqa: E402
 from capture import CaptureError                   # noqa: E402
-from rig import BrutusRig, SimRig                  # noqa: E402
+from rig import BrutusRig, RecordingRig, ReplayRig, SimRig  # noqa: E402
 
 DESIGNS = os.path.join(HERE, "..", "designs")
 CUPL = os.environ.get("CUPL") or shutil.which("cupl")
@@ -139,6 +143,83 @@ class Firmware(unittest.TestCase):
         dev.jumper_gnd = 1 << 11
         t.command("pld capture set pins=6 vcc=0 gnd=0 supply=0")
         self.assertEqual(t.capture("pld capture state").status, 0)
+
+    def test_rig_preflight(self):
+        t = self.transport("fsm22v10", "dip24")
+        rig = BrutusRig(t, "GAL22V10", log=quiet)
+        self.assertEqual(rig.preflight(), (1 << 27, 1 << 11, 5000))
+        self.assertEqual(rig.metadata()["jumpers"], {"vcc": [28], "gnd": [12], "supply_mv": 5000})
+        self.assertEqual(rig.metadata()["firmware"], "Version host harness")
+        t.dev.jumper_vcc, t.dev.supply_mv = 1 << 23, 3300
+        with self.assertRaises(CaptureError) as e:
+            rig.preflight()
+        self.assertEqual(str(e.exception),
+                         "the jumpers do not suit a GAL22V10 in the dip24 socket\n"
+                         "  expected: VCC on socket pin 28, GND on socket pin 12, 5 V\n"
+                         "  detected: VCC on socket pin 24, GND on socket pin 12, 3.3 V")
+        # The firmware checks too, whatever the host did
+        with self.assertRaisesRegex(CaptureError, "preflight"):
+            rig.walk([2, 3], {}, [])
+        rig.jumper_check = False
+        rig.walk([2, 3], {}, [])
+
+    def test_record_and_replay(self):
+        name, (device, nstates, regs, fixed) = "fsm22v10", CASES["fsm22v10"]
+        out = tempfile.mkdtemp(prefix="galre")
+        try:
+            rec = os.path.join(out, "capture.jsonl")
+            brutus = BrutusRig(self.transport(name, "dip24"), device, log=quiet)
+            brutus.preflight()
+            meta = brutus.metadata()
+            meta.update(title=name, fixed={str(p): v for p, v in fixed.items()}, survey=16)
+            recording = RecordingRig(brutus, rec, meta)
+            a = Analysis(recording, device, fixed=fixed, survey=16, log=quiet)
+            eqs = a.run()
+            recording.close()
+            replay = ReplayRig(rec)                    # no device given
+            self.assertEqual(replay.device, device)
+            self.assertEqual(replay.meta["jumpers"]["vcc"], [28])
+            b = Analysis(replay, replay.device, fixed=fixed, survey=16, log=quiet)
+            self.assertEqual(b.run(), eqs)
+        finally:
+            shutil.rmtree(out)
+
+    def test_galre_board_and_replay(self):
+        """galre board through the host-built firmware, then galre replay
+        with nothing but the recording."""
+        dev = fwharness.SocketDevice(jed("comb16v8"), "dip20")
+        out = tempfile.mkdtemp(prefix="galre")
+
+        def galre_main(*argv):
+            with contextlib.redirect_stdout(io.StringIO()):
+                r = galre.main(list(argv) + ["--cupl", ""])
+            with open(os.path.join(argv[argv.index("-o") + 1], "report.txt")) as f:
+                return r, f.read()
+        try:
+            board = os.path.join(out, "board")
+            with mock.patch.object(galre, "SerialTransport",
+                                   lambda port: fwharness.HarnessTransport(self.lib, dev)):
+                dev.jumper_gnd = 1 << 11
+                r, report = galre_main("board", "-p", "-", "-d", "GAL16V8", "-o", board)
+                self.assertEqual(r, 2)
+                self.assertIn("detected: VCC on socket pin 28, GND on socket pin 12", report)
+                self.assertEqual(dev.power_ons, 0)
+                dev.jumper_gnd = dev.gnd_bit
+                r, report = galre_main("board", "-p", "-", "-d", "GAL16V8", "-o", board,
+                                       "-t", "comb", "--fix", "4-9=0,11-16=0", "--survey", "8")
+                self.assertEqual(r, 0)
+                self.assertIn("jumpers: VCC on socket [28], GND on socket [10]", report)
+            replayed = os.path.join(out, "replay")
+            r, report = galre_main("replay", os.path.join(board, "capture.jsonl"), "-o", replayed)
+            self.assertEqual(r, 0)
+            for line in ("title: comb", "device: GAL16V8", "socket: dip20",
+                         "firmware: Version host harness", "held pins: 4=0, 5=0", "survey: 8"):
+                self.assertIn("recorded " + line, report)
+            with open(os.path.join(board, "comb.pld")) as f, \
+                    open(os.path.join(replayed, "comb.pld")) as g:
+                self.assertEqual(f.read(), g.read())
+        finally:
+            shutil.rmtree(out)
 
     def test_commands(self):
         t = self.transport("cnt16v8", "dip20")

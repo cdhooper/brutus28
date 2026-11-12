@@ -24,6 +24,7 @@ the board work in .ops.
 """
 
 import json
+import re
 import struct
 import zlib
 from array import array
@@ -47,6 +48,7 @@ SOCKETS = {
     "plcc28": (24, 24, 12, lambda d: d + 1 + (d >= 7) + (d >= 13) + (d >= 19)),
 }
 DEFAULT_SOCKET = {"GAL16V8": "dip20", "GAL22V10": "dip24"}
+SUPPLY_MV = 5000                    # GAL16V8 and GAL22V10 are 5 V parts
 
 # Firmware limits (fw/capture.c)
 MAX_PATH, MAX_PROBES, MAX_CAND, MAX_RET, MAX_RET_LEN = 48, 8, 12, 32, 16
@@ -195,22 +197,82 @@ class SimRig:
         return out
 
 
+def socket_pins(mask):
+    """'socket pin 28', 'socket pins 12, 28' or 'no socket pin'."""
+    pins = [str(b + 1) for b in range(28) if mask >> b & 1]
+    if not pins:
+        return "no socket pin"
+    return "socket pin%s %s" % ("s" if len(pins) > 1 else "", ", ".join(pins))
+
+
+def supply_text(mv):
+    return {5000: "5 V", 3300: "3.3 V"}.get(mv, "no supply" if not mv else "%d mV" % mv)
+
+
 class BrutusRig:
-    """A GAL in a real Brutus-28, through the "pld capture" commands."""
+    """A GAL in a real Brutus-28, through the "pld capture" commands.
+
+    With jumper_check, every run asks the firmware to check that the VCC,
+    GND and supply jumpers suit the device before it powers the socket;
+    preflight() checks the same from the host, with a readable message.
+    """
 
     def __init__(self, transport, device, socket=None, settle_us=1, off_ms=20,
-                 on_ms=2, log=print):
-        npins, vcc, gnd, smap = SOCKETS[socket or DEFAULT_SOCKET[device]]
+                 on_ms=2, log=print, jumper_check=True):
+        self.socket = socket or DEFAULT_SOCKET[device]
+        npins, vcc, gnd, smap = SOCKETS[self.socket]
         if npins != {"GAL16V8": 20, "GAL22V10": 24}[device]:
             raise ValueError("socket %s does not fit a %s" % (socket, device))
         self.t, self.device, self.log = transport, device, log
         self.settle_us, self.off_ms, self.on_ms = settle_us, off_ms, on_ms
+        self.jumper_check = jumper_check
         self.pins = [p for p in range(1, npins + 1) if p not in (vcc, gnd)]
         self.sbit = {p: 1 << (smap(p) - 1) for p in range(1, npins + 1)}
-        self.vcc_bit = self.sbit[vcc]
+        self.vcc_bit, self.gnd_bit = self.sbit[vcc], self.sbit[gnd]
         self.readmask = self._mask(self.pins)
         self.crcs = {}               # observation -> signature CRCs seen
+        self.detected = None         # (vcc mask, gnd mask, supply mV)
         self.ops = Ops()
+
+    @staticmethod
+    def _parse_jumpers(out):
+        """(VCC pin mask, GND pin mask, supply mV) from "pld capture
+        jumpers"; socket pin n = bit n-1."""
+        m = re.search(r"^jumpers vcc=([0-9a-fA-F]+) gnd=([0-9a-fA-F]+) supply=(\d+)\s*$",
+                      out, re.M)
+        if not m:
+            raise CaptureError("pld capture jumpers: %s" % (
+                out.strip() or "no answer") + "\n(does the firmware have pld capture jumpers?)")
+        return int(m.group(1), 16), int(m.group(2), 16), int(m.group(3))
+
+    def preflight(self):
+        """Check the jumpers before anything powers the chip."""
+        out = self.t.command("pld capture jumpers")
+        self.detected = None
+        self.detected = vcc, gnd, mv = self._parse_jumpers(out)
+        if (vcc, gnd, mv) != (self.vcc_bit, self.gnd_bit, SUPPLY_MV):
+            notes = [l for l in out.strip().splitlines() if not l.startswith("jumpers vcc=")]
+            raise CaptureError(
+                "the jumpers do not suit a %s in the %s socket\n"
+                "  expected: VCC on %s, GND on %s, %s\n"
+                "  detected: VCC on %s, GND on %s, %s%s" % (
+                    self.device, self.socket,
+                    socket_pins(self.vcc_bit), socket_pins(self.gnd_bit), supply_text(SUPPLY_MV),
+                    socket_pins(vcc), socket_pins(gnd), supply_text(mv),
+                    "".join("\n  board: " + l for l in notes)))
+        return self.detected
+
+    def metadata(self):
+        """The setup, for the recording."""
+        meta = {"device": self.device, "socket": self.socket, "settle_us": self.settle_us,
+                "off_ms": self.off_ms, "on_ms": self.on_ms, "jumper_check": self.jumper_check,
+                "firmware": self.t.command("version").strip()}
+        if self.detected:
+            vcc, gnd, mv = self.detected
+            meta["jumpers"] = {"vcc": [b + 1 for b in range(28) if vcc >> b & 1],
+                               "gnd": [b + 1 for b in range(28) if gnd >> b & 1],
+                               "supply_mv": mv}
+        return meta
 
     def _mask(self, pins):
         return reduce(lambda a, p: a | self.sbit[p], pins, 0)
@@ -237,10 +299,12 @@ class BrutusRig:
             raise CaptureError("%d candidate pins, the firmware takes %d" % (len(cand), MAX_CAND))
         self._cmd("pld capture clear")
         self._cmd("pld capture set pins=%x base=%x inv=%x clk=%x cand=%x mask=%x "
-                  "count=%x mul=%x settle=%d off=%d on=%d" % (
+                  "count=%x mul=%x settle=%d off=%d on=%d%s" % (
                       self._mask(V), self._vec(base), inv, self.sbit[CLOCK] if CLOCK not in V else 0,
                       self._mask(cand), self.readmask, count or 0, mul,
-                      self.settle_us, self.off_ms, self.on_ms))
+                      self.settle_us, self.off_ms, self.on_ms,
+                      " vcc=%x gnd=%x supply=%d" % (self.vcc_bit, self.gnd_bit, SUPPLY_MV)
+                      if self.jumper_check else ""))
         self._list("path", [self._vec(d) for d in path], MAX_PATH)
         self._list("probe", [self._vec(d) for d in probes], MAX_PROBES)
         nret = 0
@@ -353,11 +417,19 @@ def _key(op, V, base, path, probes=(), cand=(), count=None, mul=1):
 
 
 class RecordingRig:
-    """Wraps a rig and writes every answer to a JSON-lines file."""
+    """Wraps a rig and writes every answer to a JSON-lines file.  meta
+    (the setup: device, socket, timing, jumpers, analysis options) goes on
+    the first line, {"meta": {...}}."""
 
-    def __init__(self, rig, path):
+    def __init__(self, rig, path, meta=None):
         self.rig, self.f = rig, open(path, "w")
         self.pins, self.device, self.ops = rig.pins, rig.device, rig.ops
+        if meta:
+            self.f.write(json.dumps({"meta": meta}) + "\n")
+            self.f.flush()
+
+    def close(self):
+        self.f.close()
 
     def walk(self, V, base, path):
         la, lb = self.rig.walk(V, base, path)
@@ -374,18 +446,25 @@ class RecordingRig:
 
 
 class ReplayRig:
-    """Answers from a RecordingRig file; for re-running the analysis."""
+    """Answers from a RecordingRig file; for re-running the analysis.
+    device defaults to the one in the recording's setup (.meta)."""
 
-    def __init__(self, path, device):
-        self.device = device
-        self.pins = [p for p in range(1, {"GAL16V8": 20, "GAL22V10": 24}[device] + 1)
-                     if p not in {"GAL16V8": (10, 20), "GAL22V10": (12, 24)}[device]]
-        self.ops = Ops()
+    def __init__(self, path, device=None):
+        self.meta = {}
         self.db = {}
         with open(path) as f:
             for line in f:
                 rec = json.loads(line)
-                self.db[rec["key"]] = rec
+                if "meta" in rec:
+                    self.meta.update(rec["meta"])
+                else:
+                    self.db[rec["key"]] = rec
+        self.device = device or self.meta.get("device")
+        if self.device not in ("GAL16V8", "GAL22V10"):
+            raise CaptureError("%s does not name the device; give it" % path)
+        self.pins = [p for p in range(1, {"GAL16V8": 20, "GAL22V10": 24}[self.device] + 1)
+                     if p not in {"GAL16V8": (10, 20), "GAL22V10": (12, 24)}[self.device]]
+        self.ops = Ops()
 
     def walk(self, V, base, path):
         rec = self.db.get(_key("walk", V, base, path))
