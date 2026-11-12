@@ -1,0 +1,23 @@
+Name     comb16v8;
+Partno   x;
+Date     2026-11-12;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g16v8;
+
+/* Test design: GAL16V8 without registers; pin 1 is an ordinary input */
+
+Pin 1  = A;
+Pin 2  = B;
+Pin 3  = C;
+Pin 17 = W;
+Pin 18 = Z;
+Pin 19 = Y;
+
+Y = A & B # !C;
+Z = A & !C # !A & C;
+W = B & C;
+W.oe = A;

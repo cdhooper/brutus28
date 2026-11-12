@@ -102,6 +102,12 @@ Here's another example of capturing a PLCC20 GAL16V8:
     brutus chip.cap -d dip18
 </PRE>
 The output from the brutus utility includes an analysis followed by logic statements in a format compatible with the WinCUPL language used for programming Lattice parts.
+</UL>
+
+Registered GALs
+<UL>
+<LI> A walk shows only the power-up state of a registered PLD. For the GAL16V8 and GAL22V10, galtools/galre.py also clocks the chip through its reachable states (firmware command "pld capture"), recovers the equations including the registers, writes CUPL source, and checks the compiled JED against everything it captured. See galtools/README.md.
+</UL>
 
 
 

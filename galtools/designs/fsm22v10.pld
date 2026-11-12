@@ -1,0 +1,36 @@
+Name     fsm22v10;
+Partno   x;
+Date     2026-11-12;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g22v10;
+
+/* Test design: GAL22V10, three-state machine with a tri-state register */
+
+Pin 1  = CLK;
+Pin 2  = GO;
+Pin 3  = STOP;
+Pin 4  = A;
+Pin 5  = B;
+Pin 13 = OEN;
+Pin 14 = IN14;
+Pin 19 = X;
+Pin 20 = !DONE;
+Pin 21 = BUSY;
+Pin 22 = !S1;
+Pin 23 = S0;
+
+S0.d = !S1 & !S0 & GO
+     # !S1 & S0 & !STOP;
+S1.d = !S1 & S0 & STOP
+     # S1 & !S0 & GO;
+S0.oe = 'b'1;
+S1.oe = !OEN;
+BUSY = S0 & !S1;
+DONE = S1 & A;
+DONE.oe = B;
+X = A & !B
+  # !A & B & IN14;

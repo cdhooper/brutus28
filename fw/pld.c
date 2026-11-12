@@ -20,6 +20,7 @@
 #include "adc.h"
 #include "led.h"
 #include "pld.h"
+#include "capture.h"
 #include "utils.h"
 #include "cmdline.h"
 #include "cmds.h"
@@ -407,6 +408,45 @@ pld_init(void)
 }
 
 /*
+ * Hardware access for the capture engine ("pld capture", capture.c).
+ */
+void
+cap_hw_power(int on)
+{
+    if (on)
+        pld_enable();
+    else
+        pld_disable();
+}
+
+uint32_t
+cap_hw_io(uint32_t value, uint settle_usec)
+{
+    pldd_output(value);
+    if (settle_usec != 0)
+        timer_delay_usec(settle_usec);
+    return (pld_input());
+}
+
+void
+cap_hw_delay_msec(uint msec)
+{
+    timer_delay_msec(msec);
+}
+
+int
+cap_hw_abort(void)
+{
+    return (is_abort_button_pressed() || input_break_pending());
+}
+
+int
+cap_hw_output(const void *buf, uint len)
+{
+    return (puts_binary(buf, len));
+}
+
+/*
  * bit_count
  * ---------
  * Simply returns the number of '1' bits in a value. A more optimal version
@@ -755,55 +795,77 @@ pld_report_gnd_and_vcc_jumpers(int verbose, uint32_t *vcc_p, uint32_t *gnd_p)
             gnd_pins |= BIT(pin);
     }
 
-    printf("VCC jumpers:");
-    for (pin = 0; pin < 28; pin++)
-        if (vcc_pins & BIT(pin))
-            printf(" Pin%u", pin + 1);
-    if (vcc_pins == 0)
-        printf(" None");
-    printf("\nGND jumpers:");
-    for (pin = 0; pin < 28; pin++)
-        if (gnd_pins & BIT(pin))
-            printf(" Pin%u", pin + 1);
-    if (gnd_pins == 0)
-        printf(" None detected");
-    printf("\n");
+    if (verbose) {
+        printf("VCC jumpers:");
+        for (pin = 0; pin < 28; pin++)
+            if (vcc_pins & BIT(pin))
+                printf(" Pin%u", pin + 1);
+        if (vcc_pins == 0)
+            printf(" None");
+        printf("\nGND jumpers:");
+        for (pin = 0; pin < 28; pin++)
+            if (gnd_pins & BIT(pin))
+                printf(" Pin%u", pin + 1);
+        if (gnd_pins == 0)
+            printf(" None detected");
+        printf("\n");
 
-    if ((vcc_pins == (BIT(28) >> 1)) &&
-        (gnd_pins == (BIT(14) >> 1)) &&
-        (pld_vcc_jumper == PLD_VCC_5V)) {
-        printf("Jumper configuration is standard for a PLCC28 GAL22V10\n");
-    } else if ((vcc_pins == (BIT(24) >> 1)) &&
-               (gnd_pins == (BIT(12) >> 1)) &&
-               (pld_vcc_jumper == PLD_VCC_5V)) {
-        printf("Jumper configuration is standard for a DIP GAL22V10\n");
-    } else if (device_inserted >= 0) {
-        if ((gnd_pins == (installed_types[device_inserted].gnd_pins >> 1)) &&
-            (vcc_pins == (installed_types[device_inserted].vcc_pins >> 1))) {
-            printf("Jumper configuration is standard for %s\n",
-                   installed_types[device_inserted].name);
+        if ((vcc_pins == (BIT(28) >> 1)) &&
+            (gnd_pins == (BIT(14) >> 1)) &&
+            (pld_vcc_jumper == PLD_VCC_5V)) {
+            printf("Jumper configuration is standard for a PLCC28 GAL22V10\n");
+        } else if ((vcc_pins == (BIT(24) >> 1)) &&
+                   (gnd_pins == (BIT(12) >> 1)) &&
+                   (pld_vcc_jumper == PLD_VCC_5V)) {
+            printf("Jumper configuration is standard for a DIP GAL22V10\n");
+        } else if (device_inserted >= 0) {
+            if ((gnd_pins == (installed_types[device_inserted].gnd_pins >> 1)) &&
+                (vcc_pins == (installed_types[device_inserted].vcc_pins >> 1))) {
+                printf("Jumper configuration is standard for %s\n",
+                       installed_types[device_inserted].name);
+            } else {
+                printf("Jumper configuration is not standard for %s\n",
+                       installed_types[device_inserted].name);
+                printf("    Expected GND=");
+                for (pin = 1; pin <= 28; pin++)
+                    if (installed_types[device_inserted].gnd_pins & BIT(pin))
+                        printf("Pin%u ", pin);
+                printf(" VCC=");
+                for (pin = 1; pin <= 28; pin++)
+                    if (installed_types[device_inserted].vcc_pins & BIT(pin))
+                        printf("Pin%u", pin);
+                printf("\n");
+            }
         } else {
-            printf("Jumper configuration is not standard for %s\n",
-                   installed_types[device_inserted].name);
-            printf("    Expected GND=");
-            for (pin = 1; pin <= 28; pin++)
-                if (installed_types[device_inserted].gnd_pins & BIT(pin))
-                    printf("Pin%u ", pin);
-            printf(" VCC=");
-            for (pin = 1; pin <= 28; pin++)
-                if (installed_types[device_inserted].vcc_pins & BIT(pin))
-                    printf("Pin%u", pin);
-            printf("\n");
+            printf("Jumper configuration is not standard\n"
+                   "    For PLCC GAL22V10, need 5V, VCC=Pin28, GND=Pin14\n"
+                   "    For DIP GAL22V10, need 5V, VCC=Pin24, GND=Pin12\n");
         }
-    } else {
-        printf("Jumper configuration is not standard\n"
-               "    For PLCC GAL22V10, need 5V, VCC=Pin28, GND=Pin14\n"
-               "    For DIP GAL22V10, need 5V, VCC=Pin24, GND=Pin12\n");
     }
 
     *vcc_p = vcc_pins;
     *gnd_p = gnd_pins;
     return (RC_SUCCESS);
+}
+
+/*
+ * cap_hw_jumpers
+ * --------------
+ * Capture preflight ("pld capture", capture.c): detect which socket pins
+ * are jumpered to VCC and GND, and the PLD supply (5000 or 3300 mV, 0 if
+ * neither).  Returns 0 when detection worked.
+ */
+int
+cap_hw_jumpers(uint32_t *vcc_pins, uint32_t *gnd_pins, uint *supply_mv)
+{
+    pld_vcc_jumper = PLD_VCC_MISSING;
+    if (pld_report_5v_3p3v_jumper(0) != RC_SUCCESS)
+        return (-1);
+    *supply_mv = (pld_vcc_jumper == PLD_VCC_5V) ? 5000 :
+                 (pld_vcc_jumper == PLD_VCC_3P3V) ? 3300 : 0;
+    if (pld_report_gnd_and_vcc_jumpers(0, vcc_pins, gnd_pins) != RC_SUCCESS)
+        return (-1);
+    return (0);
 }
 
 /*
@@ -1060,7 +1122,7 @@ const char cmd_pld_walk_help[] =
 #define WALK_FLAG_INVERT_IGNORE 0x08  // Make ignored pins 1 instead of 0
 #define WALK_FLAG_RAW_BINARY    0x10  // Show raw binary values
 #define WALK_FLAG_VALUES        0x20  // Show ASCII values
-#define WALK_FLAG_WALK_ZERO     0x48  // Walking zeros
+#define WALK_FLAG_WALK_ZERO     0x40  // Walking zeros
 
 /*
  * cmd_pld_get_ignore_mask
@@ -1093,7 +1155,10 @@ cmd_pld_get_ignore_mask(int argc, char * const *argv,
                 break;
         }
         if (type < ARRAY_SIZE(installed_types)) {
-            ignore_mask = ~installed_types[type].present;
+            /* Socket pins of the part, without its VCC and GND pins */
+            ignore_mask = ~installed_types[type].present |
+                          ((installed_types[type].gnd_pins |
+                            installed_types[type].vcc_pins) >> 1);
             ignore_initialized = 1;
             continue;
         }
@@ -1261,6 +1326,9 @@ invalid_argument:
     }
     if (ignore_mask == 0)
         ignore_mask = ~0x0000013;  // Debug with just 3 bits
+
+    /* Bits 28-31 are not socket pins (a leading "-pin" cleared them) */
+    ignore_mask |= 0xf0000000;
 
     *ignore = ignore_mask;
 
@@ -2175,7 +2243,7 @@ pld_show(int argc, char * const *argv)
 
     printf("Output=");
     for (pin = pin_max - 1; pin >= 0; pin--) {
-        const char *d = pld_get_pin_drive_state_str(pin, output_d, output_dd);
+        const char *d = pld_get_pin_drive_state_str(pin, output_dd, output_d);
 
         if (d[0] == 'i')
             d = "-";
@@ -2307,6 +2375,7 @@ pld_show(int argc, char * const *argv)
 }
 
 const char cmd_pld_help[] =
+"pld capture [?|..] - machine-readable captures (use 'capture ?' for help)\n"
 "pld check          - check GPIOs without PLD attached\n"
 "pld disable        - disable PLD power\n"
 "pld enable         - enable PLD power\n"
@@ -2324,46 +2393,59 @@ const char cmd_pld_help[] =
 rc_t
 cmd_pld(int argc, char * const *argv)
 {
-    uint data;
-    rc_t rc;
+    /*
+     * A subcommand may be abbreviated to any prefix; the first match in
+     * this order wins, so the historical one-letter forms still work.
+     */
+    static const char *const subcmds[] = {
+        "check", "capture", "enable", "disable", "measure", "output",
+        "input", "show", "voltage", "walk",
+    };
+    const char *sub;
+    size_t      len;
+    uint        cmd;
+    uint        data;
+    rc_t        rc;
+
     if (argc <= 1)
         return (RC_USER_HELP);
 
-    switch (*argv[1]) {
-        case 'c':  // check
-            return (pld_check());
-        case 'e':  // enable
-            pld_enable();
+    sub = argv[1];
+    len = strlen(sub);
+    for (cmd = 0; cmd < ARRAY_SIZE(subcmds); cmd++)
+        if ((len != 0) && (strncmp(subcmds[cmd], sub, len) == 0))
             break;
-        case 'd':  // disable
-            pld_disable();
-            break;
-        case 'm':  // measure
-            return (pld_measure(argc, argv));
-        case 'o':  // output value
-            if (argc <= 2) {
-                printf("Value required\n");
-                return (RC_USER_HELP);
-            }
-            if ((rc = parse_uint(argv[2], &data)) != RC_SUCCESS)
-                return (rc);
-            pldd_output(data);
-            pldd_output_enable();
-            break;
-        case 'i':  // input
-        case 's':  // show value
-            argc--;
-            argv++;
-            pld_show(argc, argv);
-            break;
-        case 'v':  // show value
-            adc_show_sensors();
-            break;
-        case 'w':  // show walk
-            return (cmd_pld_walk(argc - 1, argv + 1));
-        default:
-            printf("Unknown argument %s\n", argv[1]);
+    if (cmd == ARRAY_SIZE(subcmds)) {
+        printf("Unknown argument %s\n", sub);
+        return (RC_USER_HELP);
+    }
+    sub = subcmds[cmd];
+
+    if (strcmp(sub, "check") == 0) {
+        return (pld_check());
+    } else if (strcmp(sub, "capture") == 0) {
+        return (cmd_pld_capture(argc - 1, argv + 1));
+    } else if (strcmp(sub, "enable") == 0) {
+        pld_enable();
+    } else if (strcmp(sub, "disable") == 0) {
+        pld_disable();
+    } else if (strcmp(sub, "measure") == 0) {
+        return (pld_measure(argc, argv));
+    } else if (strcmp(sub, "output") == 0) {
+        if (argc <= 2) {
+            printf("Value required\n");
             return (RC_USER_HELP);
+        }
+        if ((rc = parse_uint(argv[2], &data)) != RC_SUCCESS)
+            return (rc);
+        pldd_output(data);
+        pldd_output_enable();
+    } else if ((strcmp(sub, "input") == 0) || (strcmp(sub, "show") == 0)) {
+        pld_show(argc - 1, argv + 1);
+    } else if (strcmp(sub, "voltage") == 0) {
+        adc_show_sensors();
+    } else {
+        return (cmd_pld_walk(argc - 1, argv + 1));
     }
     return (RC_SUCCESS);
 }

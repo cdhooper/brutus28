@@ -732,6 +732,9 @@ parse_uint(const char *arg, uint *value)
     int pos = 0;
     unsigned int x;
 
+    /* Accept an optional 0x prefix; it does not count against the digits */
+    if ((arg[0] == '0') && ((arg[1] == 'x') || (arg[1] == 'X')))
+        arg += 2;
     if ((sscanf(arg, "%x%n", &x, &pos) != 1) ||
         ((arg[pos] != '\0') && (arg[pos] != ' ')) ||
         (pos > (int)(sizeof (x) * 2))) {
