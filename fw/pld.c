@@ -2330,46 +2330,57 @@ const char cmd_pld_help[] =
 rc_t
 cmd_pld(int argc, char * const *argv)
 {
-    uint data;
-    rc_t rc;
+    /*
+     * A subcommand may be abbreviated to any prefix; the first match in
+     * this order wins, so the historical one-letter forms still work.
+     */
+    static const char *const subcmds[] = {
+        "check", "enable", "disable", "measure", "output", "input", "show",
+        "voltage", "walk",
+    };
+    const char *sub;
+    size_t      len;
+    uint        cmd;
+    uint        data;
+    rc_t        rc;
+
     if (argc <= 1)
         return (RC_USER_HELP);
 
-    switch (*argv[1]) {
-        case 'c':  // check
-            return (pld_check());
-        case 'e':  // enable
-            pld_enable();
+    sub = argv[1];
+    len = strlen(sub);
+    for (cmd = 0; cmd < ARRAY_SIZE(subcmds); cmd++)
+        if ((len != 0) && (strncmp(subcmds[cmd], sub, len) == 0))
             break;
-        case 'd':  // disable
-            pld_disable();
-            break;
-        case 'm':  // measure
-            return (pld_measure(argc, argv));
-        case 'o':  // output value
-            if (argc <= 2) {
-                printf("Value required\n");
-                return (RC_USER_HELP);
-            }
-            if ((rc = parse_uint(argv[2], &data)) != RC_SUCCESS)
-                return (rc);
-            pldd_output(data);
-            pldd_output_enable();
-            break;
-        case 'i':  // input
-        case 's':  // show value
-            argc--;
-            argv++;
-            pld_show(argc, argv);
-            break;
-        case 'v':  // show value
-            adc_show_sensors();
-            break;
-        case 'w':  // show walk
-            return (cmd_pld_walk(argc - 1, argv + 1));
-        default:
-            printf("Unknown argument %s\n", argv[1]);
+    if (cmd == ARRAY_SIZE(subcmds)) {
+        printf("Unknown argument %s\n", sub);
+        return (RC_USER_HELP);
+    }
+    sub = subcmds[cmd];
+
+    if (strcmp(sub, "check") == 0) {
+        return (pld_check());
+    } else if (strcmp(sub, "enable") == 0) {
+        pld_enable();
+    } else if (strcmp(sub, "disable") == 0) {
+        pld_disable();
+    } else if (strcmp(sub, "measure") == 0) {
+        return (pld_measure(argc, argv));
+    } else if (strcmp(sub, "output") == 0) {
+        if (argc <= 2) {
+            printf("Value required\n");
             return (RC_USER_HELP);
+        }
+        if ((rc = parse_uint(argv[2], &data)) != RC_SUCCESS)
+            return (rc);
+        pldd_output(data);
+        pldd_output_enable();
+    } else if ((strcmp(sub, "input") == 0) || (strcmp(sub, "show") == 0)) {
+        pld_show(argc - 1, argv + 1);
+    } else if (strcmp(sub, "voltage") == 0) {
+        adc_show_sensors();
+    } else {
+        return (cmd_pld_walk(argc - 1, argv + 1));
     }
     return (RC_SUCCESS);
 }
