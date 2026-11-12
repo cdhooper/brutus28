@@ -38,21 +38,34 @@ run:
 
     galtools/galre.py board -p /dev/ttyACM0 -d GAL22V10 -o out -t mychip
 
-galre first asks the board which socket pins are jumpered to VCC and GND
-and which supply is selected (`pld capture jumpers`). If that does not
-suit the device and socket, it stops before any capture and says what it
-expected and what it found:
+galre first checks the jumpers (`pld capture jumpers`):
+
+1. The board finds the socket pins jumpered to VCC and GND without
+   connecting the PLD supply. With both PLD rails off, it drives each pin
+   high through its 1K resistor and keeps the pins that lift the rails.
+   It then switches on only the GND rail, which connects no supply, and
+   drives those pins again: a pin on the VCC jumper charges the VCC rail,
+   and a pin on the GND jumper stays low. The chip only ever sees the
+   1K-limited drives.
+2. Only if those pins are right does it switch the supply on to measure
+   it: the VCC rail on and the GND rail open for 10 ms, as `pld check`
+   does. It must be within 16% of 5 V.
+
+If the jumpers do not suit the device and socket, galre stops before any
+capture and says what it expected, what it found, and the board's
+readings:
 
     jumper check: the jumpers do not suit a GAL22V10 in the dip24 socket
-      expected: VCC on socket pin 28, GND on socket pin 12, 5 V
-      detected: VCC on socket pin 24, GND on socket pin 12, 5 V
+      expected: VCC on socket pin 28, GND on socket pin 12, supply 5 V
+      detected: VCC on socket pin 24, GND on socket pin 12, supply not measured (only once VCC and GND are right)
+      board: jumpers: rails off, Pin12 high: VCC rail ... mV, GND rail ... mV
+      board: ...
 
-The firmware checks again before every run it is sent, and drives the VCC
-pin high and the GND pin low in every vector. The detection is the one
-`pld check` uses; like `pld check`, it briefly switches the socket's VCC
-and GND on with the socket pins undriven. It has not yet been tried with a
-GAL in the socket. If it gets the jumpers wrong, `--no-jumper-check` turns
-off both checks.
+The firmware checks the same way before every run it is sent, and drives
+the VCC pin high and the GND pin low in every vector. The detection's
+thresholds and timing have not yet been checked on a board, with or
+without a GAL in the socket; its readings go into the report. If it gets
+the jumpers wrong, `--no-jumper-check` turns off both checks.
 
 This writes:
 
@@ -60,8 +73,9 @@ This writes:
 - `out/report.txt`: the setup, pin roles, states, equations and board
   work.
 - `out/capture.jsonl`: the setup, then every capture the board returned.
-  The setup is the device, socket, timing, detected jumpers, firmware
-  version, held pins, survey size, title and date.
+  The setup is the device, socket, timing, detected jumpers and the
+  detection's readings, firmware version, held pins, survey size, title
+  and date.
 - With a CUPL compiler, also `out/mychip.jed`.
 
 To redo the analysis without the board:
@@ -155,8 +169,10 @@ needed about 3 million power cycles.
 
 ## Firmware commands
 
-`pld capture ?` lists the commands. `pld capture jumpers` reports the
-detected jumpers as `jumpers vcc=<pins> gnd=<pins> supply=<mV>`.
+`pld capture ?` lists the commands. `pld capture jumpers` prints the
+detection's readings, then `jumpers vcc=<pins> gnd=<pins> supply=<mV>`.
+The supply is measured only when the pins match the job's `vcc=` and
+`gnd=`, and is `-` otherwise.
 
 The host first configures a job:
 
@@ -166,9 +182,10 @@ The host first configures a job:
 - `probe`
 - `ret <crc> <vectors>`
 
-When `vcc=`, `gnd=` or `supply=` is set, each run first checks the
-jumpers against them and is refused if they differ, or if the job
-enumerates, inverts, clocks or probes a VCC or GND pin.
+When `vcc=` and `gnd=` are set, each run first checks the jumpers against
+them, and against `supply=` if set, in the order above. It is refused if
+they differ, or if the job enumerates, inverts, clocks or probes a VCC or
+GND pin.
 
 It then runs one of:
 

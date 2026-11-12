@@ -11,12 +11,13 @@
 
 typedef uint32_t (*io_cb_t)(uint32_t value);
 typedef void (*power_cb_t)(int on);
-typedef int (*jumpers_cb_t)(uint32_t *vcc_pins, uint32_t *gnd_pins,
-                            uint *supply_mv);
+typedef int (*pins_cb_t)(uint32_t *vcc_pins, uint32_t *gnd_pins);
+typedef int (*supply_cb_t)(uint *rail_mv);
 
 static io_cb_t        io_cb;
 static power_cb_t     power_cb;
-static jumpers_cb_t   jumpers_cb;
+static pins_cb_t      pins_cb;
+static supply_cb_t    supply_cb;
 static unsigned char *out;
 static size_t         out_len;
 static size_t         out_cap;
@@ -84,17 +85,26 @@ cap_hw_output(const void *buf, uint len)
 }
 
 int
-cap_hw_jumpers(uint32_t *vcc_pins, uint32_t *gnd_pins, uint *supply_mv)
+cap_hw_jumper_pins(uint32_t *vcc_pins, uint32_t *gnd_pins, int verbose)
 {
-    return (jumpers_cb(vcc_pins, gnd_pins, supply_mv));
+    if (verbose)
+        harness_printf("jumpers: (host harness, no readings)\n");
+    return (pins_cb(vcc_pins, gnd_pins));
+}
+
+int
+cap_hw_supply(uint *rail_mv)
+{
+    return (supply_cb(rail_mv));
 }
 
 void
-harness_init(io_cb_t io, power_cb_t power, jumpers_cb_t jumpers)
+harness_init(io_cb_t io, power_cb_t power, pins_cb_t pins, supply_cb_t supply)
 {
     io_cb = io;
     power_cb = power;
-    jumpers_cb = jumpers;
+    pins_cb = pins;
+    supply_cb = supply;
 }
 
 /* Run one console line ("pld capture ..." or "version"); returns the

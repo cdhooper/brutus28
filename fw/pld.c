@@ -702,21 +702,19 @@ pld_report_5v_3p3v_jumper(int verbose)
 }
 
 /*
- * pld_report_gnd_and_vcc_jumpers
- * ------------------------------
- * Detect and report where jumpers are installed that provide VCC and GND
- * to the PLD. This is difficult to accomplish without false readings if a
- * PLD is installed.
+ * pld_find_jumpered_pins
+ * ----------------------
+ * With both PLD rails switched off, drive each socket pin high in turn
+ * through its 1K resistor and measure both rails.  Only the 1K limits the
+ * current into an inserted PLD, so this is safe whatever the jumpers are.
+ * On return, voltage_vcc[] and voltage_gnd[] are non-zero only for pins
+ * that lifted a rail to at least 95% of the highest reading: the pins
+ * jumpered to VCC or GND.
  */
-static rc_t
-pld_report_gnd_and_vcc_jumpers(int verbose, uint32_t *vcc_p, uint32_t *gnd_p)
+static void
+pld_find_jumpered_pins(uint *voltage_vcc, uint *voltage_gnd)
 {
-    uint values;
     uint pin;
-    uint vcc_pins = 0;
-    uint gnd_pins = 0;
-    uint voltage_vcc[28];
-    uint voltage_gnd[28];
     uint vcc_peak = 0;
     uint gnd_peak = 0;
 
@@ -777,11 +775,35 @@ pld_report_gnd_and_vcc_jumpers(int verbose, uint32_t *vcc_p, uint32_t *gnd_p)
 
     /* Find interesting VCC and GND pins */
     for (pin = 0; pin < 28; pin++) {
-        if ((voltage_vcc[pin] * 100 / vcc_peak) < 95)
+        if ((vcc_peak == 0) || ((voltage_vcc[pin] * 100 / vcc_peak) < 95))
             voltage_vcc[pin] = 0;
-        if ((voltage_gnd[pin] * 100 / gnd_peak) < 95)
+        if ((gnd_peak == 0) || ((voltage_gnd[pin] * 100 / gnd_peak) < 95))
             voltage_gnd[pin] = 0;
     }
+}
+
+/*
+ * pld_report_gnd_and_vcc_jumpers
+ * ------------------------------
+ * Detect and report where jumpers are installed that provide VCC and GND
+ * to the PLD. This is difficult to accomplish without false readings if a
+ * PLD is installed.
+ */
+static rc_t
+pld_report_gnd_and_vcc_jumpers(int verbose, uint32_t *vcc_p, uint32_t *gnd_p)
+{
+    uint values;
+    uint pin;
+    uint vcc_pins = 0;
+    uint gnd_pins = 0;
+    uint voltage_vcc[28];
+    uint voltage_gnd[28];
+
+    /*
+     * Find the pins jumpered to VCC or GND (pld_find_jumpered_pins), then
+     * tell them apart with both rails switched on.
+     */
+    pld_find_jumpered_pins(voltage_vcc, voltage_gnd);
 
     /* Test the interesting pins when VCC and GND are applied */
     pld_power_enable();
@@ -795,52 +817,50 @@ pld_report_gnd_and_vcc_jumpers(int verbose, uint32_t *vcc_p, uint32_t *gnd_p)
             gnd_pins |= BIT(pin);
     }
 
-    if (verbose) {
-        printf("VCC jumpers:");
-        for (pin = 0; pin < 28; pin++)
-            if (vcc_pins & BIT(pin))
-                printf(" Pin%u", pin + 1);
-        if (vcc_pins == 0)
-            printf(" None");
-        printf("\nGND jumpers:");
-        for (pin = 0; pin < 28; pin++)
-            if (gnd_pins & BIT(pin))
-                printf(" Pin%u", pin + 1);
-        if (gnd_pins == 0)
-            printf(" None detected");
-        printf("\n");
+    printf("VCC jumpers:");
+    for (pin = 0; pin < 28; pin++)
+        if (vcc_pins & BIT(pin))
+            printf(" Pin%u", pin + 1);
+    if (vcc_pins == 0)
+        printf(" None");
+    printf("\nGND jumpers:");
+    for (pin = 0; pin < 28; pin++)
+        if (gnd_pins & BIT(pin))
+            printf(" Pin%u", pin + 1);
+    if (gnd_pins == 0)
+        printf(" None detected");
+    printf("\n");
 
-        if ((vcc_pins == (BIT(28) >> 1)) &&
-            (gnd_pins == (BIT(14) >> 1)) &&
-            (pld_vcc_jumper == PLD_VCC_5V)) {
-            printf("Jumper configuration is standard for a PLCC28 GAL22V10\n");
-        } else if ((vcc_pins == (BIT(24) >> 1)) &&
-                   (gnd_pins == (BIT(12) >> 1)) &&
-                   (pld_vcc_jumper == PLD_VCC_5V)) {
-            printf("Jumper configuration is standard for a DIP GAL22V10\n");
-        } else if (device_inserted >= 0) {
-            if ((gnd_pins == (installed_types[device_inserted].gnd_pins >> 1)) &&
-                (vcc_pins == (installed_types[device_inserted].vcc_pins >> 1))) {
-                printf("Jumper configuration is standard for %s\n",
-                       installed_types[device_inserted].name);
-            } else {
-                printf("Jumper configuration is not standard for %s\n",
-                       installed_types[device_inserted].name);
-                printf("    Expected GND=");
-                for (pin = 1; pin <= 28; pin++)
-                    if (installed_types[device_inserted].gnd_pins & BIT(pin))
-                        printf("Pin%u ", pin);
-                printf(" VCC=");
-                for (pin = 1; pin <= 28; pin++)
-                    if (installed_types[device_inserted].vcc_pins & BIT(pin))
-                        printf("Pin%u", pin);
-                printf("\n");
-            }
+    if ((vcc_pins == (BIT(28) >> 1)) &&
+        (gnd_pins == (BIT(14) >> 1)) &&
+        (pld_vcc_jumper == PLD_VCC_5V)) {
+        printf("Jumper configuration is standard for a PLCC28 GAL22V10\n");
+    } else if ((vcc_pins == (BIT(24) >> 1)) &&
+               (gnd_pins == (BIT(12) >> 1)) &&
+               (pld_vcc_jumper == PLD_VCC_5V)) {
+        printf("Jumper configuration is standard for a DIP GAL22V10\n");
+    } else if (device_inserted >= 0) {
+        if ((gnd_pins == (installed_types[device_inserted].gnd_pins >> 1)) &&
+            (vcc_pins == (installed_types[device_inserted].vcc_pins >> 1))) {
+            printf("Jumper configuration is standard for %s\n",
+                   installed_types[device_inserted].name);
         } else {
-            printf("Jumper configuration is not standard\n"
-                   "    For PLCC GAL22V10, need 5V, VCC=Pin28, GND=Pin14\n"
-                   "    For DIP GAL22V10, need 5V, VCC=Pin24, GND=Pin12\n");
+            printf("Jumper configuration is not standard for %s\n",
+                   installed_types[device_inserted].name);
+            printf("    Expected GND=");
+            for (pin = 1; pin <= 28; pin++)
+                if (installed_types[device_inserted].gnd_pins & BIT(pin))
+                    printf("Pin%u ", pin);
+            printf(" VCC=");
+            for (pin = 1; pin <= 28; pin++)
+                if (installed_types[device_inserted].vcc_pins & BIT(pin))
+                    printf("Pin%u", pin);
+            printf("\n");
         }
+    } else {
+        printf("Jumper configuration is not standard\n"
+               "    For PLCC GAL22V10, need 5V, VCC=Pin28, GND=Pin14\n"
+               "    For DIP GAL22V10, need 5V, VCC=Pin24, GND=Pin12\n");
     }
 
     *vcc_p = vcc_pins;
@@ -849,22 +869,114 @@ pld_report_gnd_and_vcc_jumpers(int verbose, uint32_t *vcc_p, uint32_t *gnd_p)
 }
 
 /*
- * cap_hw_jumpers
- * --------------
- * Capture preflight ("pld capture", capture.c): detect which socket pins
- * are jumpered to VCC and GND, and the PLD supply (5000 or 3300 mV, 0 if
- * neither).  Returns 0 when detection worked.
+ * Hardware access for the "pld capture" jumper check (capture.c).
+ *
+ * cap_hw_jumper_pins() finds the socket pins jumpered to VCC and GND
+ * without ever connecting the PLD supply, so that a PLD in a wrongly
+ * jumpered socket is not powered.  pld_report_gnd_and_vcc_jumpers() tells
+ * VCC from GND by switching both rails on; this switches on only the GND
+ * rail, which connects no supply, and drives each candidate pin high
+ * through its 1K: a pin jumpered to VCC charges the VCC rail (22uF,
+ * through the 1K and the 2K ADC divider, about 15 ms), a pin jumpered to
+ * GND is held low.  The thresholds have not yet been checked on a board;
+ * with verbose set, every reading is printed.
+ *
+ * cap_hw_supply() measures the selected supply.  capture.c calls it only
+ * once the VCC and GND pins are known to suit the PLD.  As in
+ * pld_report_5v_3p3v_jumper(), the VCC rail is switched on with the GND
+ * rail open, so an inserted PLD draws almost nothing and the reading is
+ * the supply rather than the supply less the drop across the current
+ * limit (R13/R14).
  */
+#define JUMPER_MIN_MV       500    /* a jumpered pin lifts the rails this far */
+#define JUMPER_DRAIN_MSEC   100    /* VCC rail drain, about 7 time constants */
+#define JUMPER_CHARGE_MSEC  60     /* VCC rail charge, about 4 time constants */
+#define JUMPER_VCC_MIN_MV   300    /* VCC rail reading for a VCC pin */
+#define JUMPER_GND_MAX_MV   150    /* VCC rail reading for a GND pin */
+
 int
-cap_hw_jumpers(uint32_t *vcc_pins, uint32_t *gnd_pins, uint *supply_mv)
+cap_hw_jumper_pins(uint32_t *vcc_pins, uint32_t *gnd_pins, int verbose)
 {
-    pld_vcc_jumper = PLD_VCC_MISSING;
-    if (pld_report_5v_3p3v_jumper(0) != RC_SUCCESS)
-        return (-1);
-    *supply_mv = (pld_vcc_jumper == PLD_VCC_5V) ? 5000 :
-                 (pld_vcc_jumper == PLD_VCC_3P3V) ? 3300 : 0;
-    if (pld_report_gnd_and_vcc_jumpers(0, vcc_pins, gnd_pins) != RC_SUCCESS)
-        return (-1);
+    uint     voltage_vcc[28];
+    uint     voltage_gnd[28];
+    uint32_t cand = 0;
+    uint     pin;
+    int      rc = 0;
+
+    *vcc_pins = 0;
+    *gnd_pins = 0;
+    pld_find_jumpered_pins(voltage_vcc, voltage_gnd);
+    for (pin = 0; pin < 28; pin++) {
+        if ((voltage_vcc[pin] < JUMPER_MIN_MV) &&
+            (voltage_gnd[pin] < JUMPER_MIN_MV))
+            continue;
+        cand |= BIT(pin);
+        if (verbose) {
+            printf("jumpers: rails off, Pin%u high: VCC rail %u mV, "
+                   "GND rail %u mV\n", pin + 1, voltage_vcc[pin],
+                   voltage_gnd[pin]);
+        }
+    }
+    if (verbose && (cand == 0))
+        printf("jumpers: rails off, no pin lifts a rail %u mV\n",
+               JUMPER_MIN_MV);
+
+    pld_disable();
+    pld_gnd_enable();
+    for (pin = 0; pin < 28; pin++) {
+        uint rail_vcc;
+        uint rail_gnd;
+        uint level;
+
+        if ((cand & BIT(pin)) == 0)
+            continue;
+
+        /* Drain the VCC rail through the candidates' 1K */
+        pldd_output(0);
+        pldd_gpio_setmode(cand, GPIO_SETMODE_OUTPUT_PPULL_2);
+        timer_delay_msec(JUMPER_DRAIN_MSEC);
+        pldd_gpio_setmode(cand & ~BIT(pin), GPIO_SETMODE_INPUT);
+
+        pldd_output(BIT(pin));
+        timer_delay_msec(JUMPER_CHARGE_MSEC);
+        rail_vcc = adc_get_pld_readings(&rail_gnd);
+        level = (pld_input() & BIT(pin)) ? 1 : 0;
+        pldd_output(0);
+        pldd_gpio_setmode(BIT(pin), GPIO_SETMODE_INPUT);
+
+        if (rail_vcc >= JUMPER_VCC_MIN_MV)
+            *vcc_pins |= BIT(pin);
+        else if ((rail_vcc <= JUMPER_GND_MAX_MV) && (level == 0))
+            *gnd_pins |= BIT(pin);
+        else
+            rc = -1;
+        if (verbose) {
+            printf("jumpers: GND rail on, Pin%u high: VCC rail %u mV, "
+                   "pin reads %u: %s\n", pin + 1, rail_vcc, level,
+                   (*vcc_pins & BIT(pin)) ? "VCC" :
+                   (*gnd_pins & BIT(pin)) ? "GND" : "unclear");
+        }
+    }
+    pld_disable();
+    return (rc);
+}
+
+int
+cap_hw_supply(uint *rail_mv)
+{
+    uint rail_gnd;
+
+    pld_disable();
+    pld_gnd_enable();
+    timer_delay_msec(1);
+    pld_gnd_disable();
+    pld_vcc_enable();
+    timer_delay_msec(10);
+    *rail_mv = adc_get_pld_readings(&rail_gnd);
+    pld_vcc_disable();
+    pld_gnd_enable();
+    timer_delay_msec(10);
+    pld_disable();
     return (0);
 }
 

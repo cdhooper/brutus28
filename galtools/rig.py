@@ -49,6 +49,7 @@ SOCKETS = {
 }
 DEFAULT_SOCKET = {"GAL16V8": "dip20", "GAL22V10": "dip24"}
 SUPPLY_MV = 5000                    # GAL16V8 and GAL22V10 are 5 V parts
+SUPPLY_TOLERANCE = 16               # percent, as fw/capture.c
 
 # Firmware limits (fw/capture.c)
 MAX_PATH, MAX_PROBES, MAX_CAND, MAX_RET, MAX_RET_LEN = 48, 8, 12, 32, 16
@@ -205,8 +206,8 @@ def socket_pins(mask):
     return "socket pin%s %s" % ("s" if len(pins) > 1 else "", ", ".join(pins))
 
 
-def supply_text(mv):
-    return {5000: "5 V", 3300: "3.3 V"}.get(mv, "no supply" if not mv else "%d mV" % mv)
+def supply_ok(mv):
+    return mv is not None and abs(mv - SUPPLY_MV) * 100 <= SUPPLY_MV * SUPPLY_TOLERANCE
 
 
 class BrutusRig:
@@ -215,6 +216,9 @@ class BrutusRig:
     With jumper_check, every run asks the firmware to check that the VCC,
     GND and supply jumpers suit the device before it powers the socket;
     preflight() checks the same from the host, with a readable message.
+    The firmware finds the VCC and GND pins without connecting the supply,
+    and switches the supply on to measure it only when those pins are
+    right.
     """
 
     def __init__(self, transport, device, socket=None, settle_us=1, off_ms=20,
@@ -231,35 +235,43 @@ class BrutusRig:
         self.vcc_bit, self.gnd_bit = self.sbit[vcc], self.sbit[gnd]
         self.readmask = self._mask(self.pins)
         self.crcs = {}               # observation -> signature CRCs seen
-        self.detected = None         # (vcc mask, gnd mask, supply mV)
+        self.detected = None         # (vcc mask, gnd mask, supply mV or None)
+        self.jumper_readings = []    # the firmware's detection readings
         self.ops = Ops()
 
     @staticmethod
     def _parse_jumpers(out):
-        """(VCC pin mask, GND pin mask, supply mV) from "pld capture
-        jumpers"; socket pin n = bit n-1."""
-        m = re.search(r"^jumpers vcc=([0-9a-fA-F]+) gnd=([0-9a-fA-F]+) supply=(\d+)\s*$",
+        """(VCC pin mask, GND pin mask, supply mV or None if not measured)
+        from "pld capture jumpers"; socket pin n = bit n-1."""
+        m = re.search(r"^jumpers vcc=([0-9a-fA-F]+) gnd=([0-9a-fA-F]+) supply=(\d+|-)\s*$",
                       out, re.M)
         if not m:
             raise CaptureError("pld capture jumpers: %s" % (
                 out.strip() or "no answer") + "\n(does the firmware have pld capture jumpers?)")
-        return int(m.group(1), 16), int(m.group(2), 16), int(m.group(3))
+        mv = None if m.group(3) == "-" else int(m.group(3))
+        return int(m.group(1), 16), int(m.group(2), 16), mv
 
     def preflight(self):
         """Check the jumpers before anything powers the chip."""
-        out = self.t.command("pld capture jumpers")
         self.detected = None
+        self._cmd("pld capture clear")
+        self._cmd("pld capture set vcc=%x gnd=%x supply=%d" % (
+            self.vcc_bit, self.gnd_bit, SUPPLY_MV))
+        out = self.t.command("pld capture jumpers")
+        self.jumper_readings = [l for l in out.strip().splitlines()
+                                if not l.startswith("jumpers vcc=")]
         self.detected = vcc, gnd, mv = self._parse_jumpers(out)
-        if (vcc, gnd, mv) != (self.vcc_bit, self.gnd_bit, SUPPLY_MV):
-            notes = [l for l in out.strip().splitlines() if not l.startswith("jumpers vcc=")]
+        if (vcc, gnd) != (self.vcc_bit, self.gnd_bit) or not supply_ok(mv):
             raise CaptureError(
                 "the jumpers do not suit a %s in the %s socket\n"
-                "  expected: VCC on %s, GND on %s, %s\n"
+                "  expected: VCC on %s, GND on %s, supply %g V\n"
                 "  detected: VCC on %s, GND on %s, %s%s" % (
                     self.device, self.socket,
-                    socket_pins(self.vcc_bit), socket_pins(self.gnd_bit), supply_text(SUPPLY_MV),
-                    socket_pins(vcc), socket_pins(gnd), supply_text(mv),
-                    "".join("\n  board: " + l for l in notes)))
+                    socket_pins(self.vcc_bit), socket_pins(self.gnd_bit), SUPPLY_MV / 1000,
+                    socket_pins(vcc), socket_pins(gnd),
+                    "supply not measured (only once VCC and GND are right)" if mv is None
+                    else "supply %.2f V" % (mv / 1000),
+                    "".join("\n  board: " + l for l in self.jumper_readings)))
         return self.detected
 
     def metadata(self):
@@ -271,7 +283,7 @@ class BrutusRig:
             vcc, gnd, mv = self.detected
             meta["jumpers"] = {"vcc": [b + 1 for b in range(28) if vcc >> b & 1],
                                "gnd": [b + 1 for b in range(28) if gnd >> b & 1],
-                               "supply_mv": mv}
+                               "supply_mv": mv, "readings": self.jumper_readings}
         return meta
 
     def _mask(self, pins):

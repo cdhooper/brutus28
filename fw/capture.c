@@ -36,10 +36,13 @@
  * state  Report the signature of the path state.
  *
  * Preflight: when the job names the socket pins that must carry VCC and
- * GND (set vcc= gnd=) or the PLD supply voltage (set supply=), every run
- * first detects the jumpers and refuses to power the PLD if they do not
- * match.  The job may then not enumerate, invert, clock or probe those
- * pins, and every write drives the VCC pin high and the GND pin low.
+ * GND (set vcc= gnd=), and optionally the PLD supply (set supply=), every
+ * run first checks the jumpers and refuses to power the PLD if they do not
+ * match.  The VCC and GND pins are found without connecting the supply
+ * (cap_hw_jumper_pins); the supply is switched on to measure it only once
+ * those pins match, so a wrongly jumpered PLD never sees it.  The job may
+ * not enumerate, invert, clock or probe the VCC and GND pins, and every
+ * write drives the VCC pin high and the GND pin low.
  *
  * Output: the line "---- CAPTURE ----", then binary chunks
  * <type:1> <length:2 LE> <payload>: 'H' header, 'P' signature reads,
@@ -90,7 +93,7 @@ static struct {
     uint32_t  mul;          /* trans: x = i * mul */
     uint32_t  vcc;          /* preflight: socket pins jumpered to VCC */
     uint32_t  gnd;          /* preflight: socket pins jumpered to GND */
-    uint      supply_mv;    /* preflight: PLD supply, 5000 or 3300 */
+    uint      supply_mv;    /* preflight: PLD supply (mV), 0 = any */
     uint      settle_usec;  /* after each write */
     uint      off_msec;     /* power off time of a power cycle */
     uint      on_msec;      /* power on time before the first vector */
@@ -125,7 +128,8 @@ const char cmd_pld_capture_help[] =
 "pld capture ret <crc> <v>...   - return path from the state with that\n"
 "                                 signature CRC; 'ret clear' drops them all\n"
 "pld capture show               - show the job\n"
-"pld capture jumpers            - detect the VCC, GND and supply jumpers\n"
+"pld capture jumpers            - detect the VCC and GND jumpers; if they\n"
+"                                 match vcc= gnd=, also measure the supply\n"
 "pld capture walk               - every vector of the enumerated pins\n"
 "pld capture trans              - clock transitions from the path state\n"
 "pld capture state              - signature of the path state\n";
@@ -397,52 +401,97 @@ cap_restore(uint32_t crc, uint nreads)
 
 /* -- preflight ----------------------------------------------------------- */
 
+/*
+ * The measured supply may differ from the job's by this much (percent):
+ * 4.2 to 5.8 V for 5 V, the window "pld check" uses.
+ */
+#define CAP_SUPPLY_TOLERANCE 16
+
+static int
+cap_supply_ok(uint rail_mv)
+{
+    return ((rail_mv * 100 >= cap.supply_mv * (100 - CAP_SUPPLY_TOLERANCE)) &&
+            (rail_mv * 100 <= cap.supply_mv * (100 + CAP_SUPPLY_TOLERANCE)));
+}
+
+/* Whether the detected pins are the job's, so the supply may be switched on */
+static int
+cap_pins_match(uint32_t vcc, uint32_t gnd)
+{
+    return ((cap.vcc != 0) && (cap.gnd != 0) &&
+            (vcc == cap.vcc) && (gnd == cap.gnd));
+}
+
 /* Refuse to power the PLD unless the jumpers match the job */
 static rc_t
 cap_preflight(void)
 {
     uint32_t vcc = 0;
     uint32_t gnd = 0;
-    uint     supply_mv = 0;
+    uint     rail_mv = 0;
 
     if (((cap.vcc | cap.gnd) == 0) && (cap.supply_mv == 0))
         return (RC_SUCCESS);
+    if ((cap.vcc == 0) || (cap.gnd == 0)) {
+        printf("preflight: set both vcc= and gnd=\n");
+        return (RC_BAD_PARAM);
+    }
     if ((cap.pins | cap.inv | cap.clk | cap.cand) & (cap.vcc | cap.gnd)) {
         printf("preflight: the job uses a VCC or GND pin\n");
         return (RC_BAD_PARAM);
     }
-    if (cap_hw_jumpers(&vcc, &gnd, &supply_mv) != 0) {
+    if (cap_hw_jumper_pins(&vcc, &gnd, 0) != 0) {
         printf("preflight: could not detect the VCC and GND jumpers\n");
         return (RC_FAILURE);
     }
-    if (((cap.vcc | cap.gnd) != 0) && ((vcc != cap.vcc) || (gnd != cap.gnd))) {
+    if (!cap_pins_match(vcc, gnd)) {
         printf("preflight: jumpers vcc=%07lx gnd=%07lx, job expects "
                "vcc=%07lx gnd=%07lx\n",
                (unsigned long) vcc, (unsigned long) gnd,
                (unsigned long) cap.vcc, (unsigned long) cap.gnd);
         return (RC_FAILURE);
     }
-    if ((cap.supply_mv != 0) && (supply_mv != cap.supply_mv)) {
-        printf("preflight: supply=%u mV, job expects %u mV\n",
-               supply_mv, cap.supply_mv);
+    if (cap.supply_mv == 0)
+        return (RC_SUCCESS);
+    if (cap_hw_supply(&rail_mv) != 0) {
+        printf("preflight: could not measure the supply\n");
+        return (RC_FAILURE);
+    }
+    if (!cap_supply_ok(rail_mv)) {
+        printf("preflight: supply %u mV, job expects %u mV\n",
+               rail_mv, cap.supply_mv);
         return (RC_FAILURE);
     }
     return (RC_SUCCESS);
 }
 
+/*
+ * Report the jumpers, with every reading.  The supply is measured only
+ * when the VCC and GND pins match the job (vcc= gnd=); otherwise it shows
+ * as supply=-.
+ */
 static rc_t
 cap_jumpers(void)
 {
     uint32_t vcc = 0;
     uint32_t gnd = 0;
-    uint     supply_mv = 0;
+    uint     rail_mv = 0;
 
-    if (cap_hw_jumpers(&vcc, &gnd, &supply_mv) != 0) {
+    if (cap_hw_jumper_pins(&vcc, &gnd, 1) != 0) {
         printf("jumpers: detection failed\n");
         return (RC_FAILURE);
     }
+    if (!cap_pins_match(vcc, gnd)) {
+        printf("jumpers vcc=%07lx gnd=%07lx supply=-\n",
+               (unsigned long) vcc, (unsigned long) gnd);
+        return (RC_SUCCESS);
+    }
+    if (cap_hw_supply(&rail_mv) != 0) {
+        printf("jumpers: could not measure the supply\n");
+        return (RC_FAILURE);
+    }
     printf("jumpers vcc=%07lx gnd=%07lx supply=%u\n",
-           (unsigned long) vcc, (unsigned long) gnd, supply_mv);
+           (unsigned long) vcc, (unsigned long) gnd, rail_mv);
     return (RC_SUCCESS);
 }
 
