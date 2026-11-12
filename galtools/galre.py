@@ -56,6 +56,7 @@ def describe(meta):
     if j:
         lines.append("jumpers: VCC on socket %s, GND on socket %s, supply %s mV" % (
             j["vcc"], j["gnd"], j["supply_mv"]))
+        lines += ["jumper detection: " + r for r in j.get("readings", [])]
     elif "jumper_check" in meta and not meta["jumper_check"]:
         lines.append("jumpers: not checked")
     if meta.get("fixed"):

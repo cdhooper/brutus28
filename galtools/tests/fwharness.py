@@ -47,18 +47,24 @@ class SocketDevice:
         self.sbit = {p: 1 << (smap(p) - 1) for p in range(1, npins + 1)}
         self.vcc_bit = self.sbit[vcc]
         self.gnd_bit = self.sbit[gnd]
-        # What the board's jumper detection reports; tests change these
-        self.jumper_vcc, self.jumper_gnd, self.supply_mv = self.vcc_bit, self.gnd_bit, 5000
+        # What the board's jumper detection reports; tests change these.
+        # supply_mv is the VCC rail reading when the supply is switched on.
+        self.jumper_vcc, self.jumper_gnd, self.supply_mv = self.vcc_bit, self.gnd_bit, 4950
         self.jumpers_ok = True
         self.powered = False
         self.power_ons = 0
+        self.supply_measured = 0     # times the supply was switched on to measure it
         self.io_count = 0
         self.writes = []             # every value written while powered
 
-    def jumpers(self):
+    def jumper_pins(self):
         if not self.jumpers_ok:
             return None
-        return self.jumper_vcc, self.jumper_gnd, self.supply_mv
+        return self.jumper_vcc, self.jumper_gnd
+
+    def supply(self):
+        self.supply_measured += 1
+        return self.supply_mv
 
     def power(self, on):
         self.powered = bool(on)
@@ -87,21 +93,27 @@ class HarnessTransport:
         self.dev = device
         IO = ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.c_uint32)
         PWR = ctypes.CFUNCTYPE(None, ctypes.c_int)
-        JMP = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.POINTER(ctypes.c_uint32),
-                               ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint))
+        PINS = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.POINTER(ctypes.c_uint32),
+                                ctypes.POINTER(ctypes.c_uint32))
+        SUPPLY = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.POINTER(ctypes.c_uint))
         self._io = IO(lambda v: device.io(v))
         self._pwr = PWR(lambda on: device.power(on))
-        self._jmp = JMP(self._jumpers)
-        self.lib.harness_init(self._io, self._pwr, self._jmp)
+        self._pins = PINS(self._jumper_pins)
+        self._supply = SUPPLY(self._measure_supply)
+        self.lib.harness_init(self._io, self._pwr, self._pins, self._supply)
         self.lib.harness_run.restype = ctypes.c_size_t
         self.lib.harness_run.argtypes = [ctypes.c_char_p]
         self.lib.harness_output.restype = ctypes.POINTER(ctypes.c_ubyte)
 
-    def _jumpers(self, vcc, gnd, supply):
-        j = self.dev.jumpers()
+    def _jumper_pins(self, vcc, gnd):
+        j = self.dev.jumper_pins()
         if j is None:
             return -1
-        vcc[0], gnd[0], supply[0] = j
+        vcc[0], gnd[0] = j
+        return 0
+
+    def _measure_supply(self, rail):
+        rail[0] = self.dev.supply()
         return 0
 
     def _run(self, line):

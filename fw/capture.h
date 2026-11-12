@@ -23,8 +23,9 @@ uint32_t cap_hw_io(uint32_t value, uint settle_usec);  /* drive, wait, read */
 void     cap_hw_delay_msec(uint msec);
 int      cap_hw_abort(void);              /* ^C or abort button */
 int      cap_hw_output(const void *buf, uint len);     /* 0 = sent */
-int      cap_hw_jumpers(uint32_t *vcc_pins, uint32_t *gnd_pins,
-                        uint *supply_mv);         /* 0 = detected */
+int      cap_hw_jumper_pins(uint32_t *vcc_pins, uint32_t *gnd_pins,
+                            int verbose);   /* 0 = detected, no supply */
+int      cap_hw_supply(uint *rail_mv);      /* 0 = measured */
 
 rc_t cmd_pld_capture(int argc, char * const *argv);
 extern const char cmd_pld_capture_help[];

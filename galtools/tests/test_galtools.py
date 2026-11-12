@@ -110,53 +110,81 @@ class Firmware(unittest.TestCase):
         t = self.transport("cnt16v8", "dip20")
         dev = t.dev
         vcc, gnd = dev.vcc_bit, dev.gnd_bit          # socket pins 28 and 10
-        self.assertEqual(t.command("pld capture jumpers"),
-                         "jumpers vcc=%07x gnd=%07x supply=5000\n" % (vcc, gnd))
+
+        def jumpers():
+            return t.command("pld capture jumpers").splitlines()[-1]
+        t.command("pld capture clear")               # the library is shared
+        # The supply is switched on to measure it only when the pins match
+        # the job's vcc= gnd=
+        self.assertEqual(jumpers(), "jumpers vcc=%07x gnd=%07x supply=-" % (vcc, gnd))
+        self.assertEqual(dev.supply_measured, 0)
         # base drives GND high and VCC low: the firmware overrides both
         self.assertEqual(t.command("pld capture set pins=6 clk=1 cand=c0000 base=%x "
                                    "vcc=%x gnd=%x supply=5000" % (gnd, vcc, gnd)), "")
+        self.assertEqual(jumpers(), "jumpers vcc=%07x gnd=%07x supply=4950" % (vcc, gnd))
+        self.assertEqual(dev.supply_measured, 1)
         t.command("pld capture probe 400 0")
         self.assertEqual(t.capture("pld capture state").status, 0)
+        self.assertEqual(dev.supply_measured, 2)
         self.assertTrue(dev.writes)
         self.assertTrue(all(w & vcc and not w & gnd for w in dev.writes))
 
-        def refused(msg):
-            ons = dev.power_ons
+        def refused(msg, measured=0):
+            ons, before = dev.power_ons, dev.supply_measured
             with self.assertRaisesRegex(CaptureError, msg):
                 t.capture("pld capture state")
             self.assertEqual(dev.power_ons, ons, "powered despite " + msg)
+            self.assertEqual(dev.supply_measured - before, measured)
 
         dev.jumper_gnd = 1 << 11                      # GND jumper on socket pin 12
         refused("preflight: jumpers vcc=8000000 gnd=0000800, job expects "
                 "vcc=8000000 gnd=0000200")
-        dev.jumper_gnd = gnd
-        dev.supply_mv = 3300
-        refused("preflight: supply=3300 mV, job expects 5000 mV")
-        dev.supply_mv = 5000
+        self.assertEqual(jumpers(), "jumpers vcc=8000000 gnd=0000800 supply=-")
+        dev.jumper_vcc, dev.jumper_gnd = gnd, vcc     # VCC and GND swapped
+        refused("preflight: jumpers vcc=0000200 gnd=8000000")
+        dev.jumper_vcc, dev.jumper_gnd = vcc, gnd
+        for mv, ok in ((3280, False), (4199, False), (4200, True), (5800, True), (5801, False)):
+            dev.supply_mv = mv
+            if ok:
+                self.assertEqual(t.capture("pld capture state").status, 0)
+            else:
+                refused("preflight: supply %d mV, job expects 5000 mV" % mv, 1)
+        dev.supply_mv = 4950
         dev.jumpers_ok = False
         refused("preflight: could not detect")
         self.assertIn("detection failed", t.command("pld capture jumpers"))
         dev.jumpers_ok = True
         t.command("pld capture set pins=206")         # enumerates the GND pin
         refused("preflight: the job uses a VCC or GND pin")
+        t.command("pld capture set pins=6 gnd=0")
+        refused("preflight: set both vcc= and gnd=")
         # vcc=0 gnd=0 supply=0 turns the check off
         dev.jumper_gnd = 1 << 11
-        t.command("pld capture set pins=6 vcc=0 gnd=0 supply=0")
+        t.command("pld capture set vcc=0 supply=0")
         self.assertEqual(t.capture("pld capture state").status, 0)
 
     def test_rig_preflight(self):
         t = self.transport("fsm22v10", "dip24")
         rig = BrutusRig(t, "GAL22V10", log=quiet)
-        self.assertEqual(rig.preflight(), (1 << 27, 1 << 11, 5000))
-        self.assertEqual(rig.metadata()["jumpers"], {"vcc": [28], "gnd": [12], "supply_mv": 5000})
-        self.assertEqual(rig.metadata()["firmware"], "Version host harness")
-        t.dev.jumper_vcc, t.dev.supply_mv = 1 << 23, 3300
+        self.assertEqual(rig.preflight(), (1 << 27, 1 << 11, 4950))
+        meta = rig.metadata()
+        self.assertEqual(meta["jumpers"], {"vcc": [28], "gnd": [12], "supply_mv": 4950,
+                                           "readings": ["jumpers: (host harness, no readings)"]})
+        self.assertEqual(meta["firmware"], "Version host harness")
+        t.dev.jumper_vcc = 1 << 23
         with self.assertRaises(CaptureError) as e:
             rig.preflight()
         self.assertEqual(str(e.exception),
                          "the jumpers do not suit a GAL22V10 in the dip24 socket\n"
-                         "  expected: VCC on socket pin 28, GND on socket pin 12, 5 V\n"
-                         "  detected: VCC on socket pin 24, GND on socket pin 12, 3.3 V")
+                         "  expected: VCC on socket pin 28, GND on socket pin 12, supply 5 V\n"
+                         "  detected: VCC on socket pin 24, GND on socket pin 12, "
+                         "supply not measured (only once VCC and GND are right)\n"
+                         "  board: jumpers: (host harness, no readings)")
+        self.assertEqual(t.dev.supply_measured, 1)    # only for the first preflight
+        t.dev.jumper_vcc, t.dev.supply_mv = 1 << 27, 3300
+        with self.assertRaisesRegex(CaptureError, "detected: VCC on socket pin 28, "
+                                    "GND on socket pin 12, supply 3.30 V"):
+            rig.preflight()
         # The firmware checks too, whatever the host did
         with self.assertRaisesRegex(CaptureError, "preflight"):
             rig.walk([2, 3], {}, [])
@@ -202,13 +230,16 @@ class Firmware(unittest.TestCase):
                 dev.jumper_gnd = 1 << 11
                 r, report = galre_main("board", "-p", "-", "-d", "GAL16V8", "-o", board)
                 self.assertEqual(r, 2)
-                self.assertIn("detected: VCC on socket pin 28, GND on socket pin 12", report)
-                self.assertEqual(dev.power_ons, 0)
+                self.assertIn("detected: VCC on socket pin 28, GND on socket pin 12, "
+                              "supply not measured", report)
+                self.assertEqual((dev.power_ons, dev.supply_measured), (0, 0))
                 dev.jumper_gnd = dev.gnd_bit
                 r, report = galre_main("board", "-p", "-", "-d", "GAL16V8", "-o", board,
                                        "-t", "comb", "--fix", "4-9=0,11-16=0", "--survey", "8")
                 self.assertEqual(r, 0)
-                self.assertIn("jumpers: VCC on socket [28], GND on socket [10]", report)
+                self.assertIn("jumpers: VCC on socket [28], GND on socket [10], "
+                              "supply 4950 mV", report)
+                self.assertIn("jumper detection: jumpers: (host harness", report)
             replayed = os.path.join(out, "replay")
             r, report = galre_main("replay", os.path.join(board, "capture.jsonl"), "-o", replayed)
             self.assertEqual(r, 0)
