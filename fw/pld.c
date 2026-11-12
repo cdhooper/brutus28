@@ -2181,7 +2181,7 @@ pld_show(int argc, char * const *argv)
 
     printf("Output=");
     for (pin = pin_max - 1; pin >= 0; pin--) {
-        const char *d = pld_get_pin_drive_state_str(pin, output_d, output_dd);
+        const char *d = pld_get_pin_drive_state_str(pin, output_dd, output_d);
 
         if (d[0] == 'i')
             d = "-";
