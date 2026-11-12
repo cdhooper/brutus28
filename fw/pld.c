@@ -1060,7 +1060,7 @@ const char cmd_pld_walk_help[] =
 #define WALK_FLAG_INVERT_IGNORE 0x08  // Make ignored pins 1 instead of 0
 #define WALK_FLAG_RAW_BINARY    0x10  // Show raw binary values
 #define WALK_FLAG_VALUES        0x20  // Show ASCII values
-#define WALK_FLAG_WALK_ZERO     0x48  // Walking zeros
+#define WALK_FLAG_WALK_ZERO     0x40  // Walking zeros
 
 /*
  * cmd_pld_get_ignore_mask
@@ -1093,7 +1093,10 @@ cmd_pld_get_ignore_mask(int argc, char * const *argv,
                 break;
         }
         if (type < ARRAY_SIZE(installed_types)) {
-            ignore_mask = ~installed_types[type].present;
+            /* Socket pins of the part, without its VCC and GND pins */
+            ignore_mask = ~installed_types[type].present |
+                          ((installed_types[type].gnd_pins |
+                            installed_types[type].vcc_pins) >> 1);
             ignore_initialized = 1;
             continue;
         }
@@ -1261,6 +1264,9 @@ invalid_argument:
     }
     if (ignore_mask == 0)
         ignore_mask = ~0x0000013;  // Debug with just 3 bits
+
+    /* Bits 28-31 are not socket pins (a leading "-pin" cleared them) */
+    ignore_mask |= 0xf0000000;
 
     *ignore = ignore_mask;
 
