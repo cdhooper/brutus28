@@ -2,7 +2,7 @@ BOARD_REV ?= 2
 
 SRCS   := main.c clock.c gpio.c printf.c timer.c uart.c usb.c version.c \
 	  led.c irq.c mem_access.c readline.c cmdline.c cmds.c pcmds.c \
-	  utils.c adc.c button.c pld.c stm32flash.c scanf.c
+	  utils.c adc.c button.c pld.c capture.c stm32flash.c scanf.c
 
 OBJDIR := objs
 OBJS   := $(SRCS:%.c=$(OBJDIR)/%.o)

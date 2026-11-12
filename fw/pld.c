@@ -20,6 +20,7 @@
 #include "adc.h"
 #include "led.h"
 #include "pld.h"
+#include "capture.h"
 #include "utils.h"
 #include "cmdline.h"
 #include "cmds.h"
@@ -404,6 +405,45 @@ void
 pld_init(void)
 {
     pld_disable();
+}
+
+/*
+ * Hardware access for the capture engine ("pld capture", capture.c).
+ */
+void
+cap_hw_power(int on)
+{
+    if (on)
+        pld_enable();
+    else
+        pld_disable();
+}
+
+uint32_t
+cap_hw_io(uint32_t value, uint settle_usec)
+{
+    pldd_output(value);
+    if (settle_usec != 0)
+        timer_delay_usec(settle_usec);
+    return (pld_input());
+}
+
+void
+cap_hw_delay_msec(uint msec)
+{
+    timer_delay_msec(msec);
+}
+
+int
+cap_hw_abort(void)
+{
+    return (is_abort_button_pressed() || input_break_pending());
+}
+
+int
+cap_hw_output(const void *buf, uint len)
+{
+    return (puts_binary(buf, len));
 }
 
 /*
@@ -2313,6 +2353,7 @@ pld_show(int argc, char * const *argv)
 }
 
 const char cmd_pld_help[] =
+"pld capture [?|..] - machine-readable captures (use 'capture ?' for help)\n"
 "pld check          - check GPIOs without PLD attached\n"
 "pld disable        - disable PLD power\n"
 "pld enable         - enable PLD power\n"
@@ -2335,8 +2376,8 @@ cmd_pld(int argc, char * const *argv)
      * this order wins, so the historical one-letter forms still work.
      */
     static const char *const subcmds[] = {
-        "check", "enable", "disable", "measure", "output", "input", "show",
-        "voltage", "walk",
+        "check", "capture", "enable", "disable", "measure", "output",
+        "input", "show", "voltage", "walk",
     };
     const char *sub;
     size_t      len;
@@ -2360,6 +2401,8 @@ cmd_pld(int argc, char * const *argv)
 
     if (strcmp(sub, "check") == 0) {
         return (pld_check());
+    } else if (strcmp(sub, "capture") == 0) {
+        return (cmd_pld_capture(argc - 1, argv + 1));
     } else if (strcmp(sub, "enable") == 0) {
         pld_enable();
     } else if (strcmp(sub, "disable") == 0) {
