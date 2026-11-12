@@ -1,0 +1,33 @@
+Name     cnt16v8;
+Partno   x;
+Date     2026-11-12;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g16v8;
+
+/* Test design: GAL16V8 registered mode, 2-bit loadable counter */
+
+Pin 1  = CLK;
+Pin 2  = EN;
+Pin 3  = LD;
+Pin 4  = D0;
+Pin 5  = T;
+Pin 11 = !OE;
+Pin 14 = IN14;
+Pin 15 = OUTZ;
+Pin 17 = !CY;
+Pin 18 = Q1;
+Pin 19 = Q0;
+
+Q0.d = LD & D0
+     # !LD & Q0 & !EN
+     # !LD & !Q0 & EN;
+Q1.d = !LD & Q1 & !EN
+     # !LD & Q1 & !Q0
+     # !LD & !Q1 & EN & Q0;
+CY   = Q0 & Q1 & EN;
+OUTZ = Q0 # IN14;
+OUTZ.oe = T;
