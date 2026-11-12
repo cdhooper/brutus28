@@ -11,9 +11,12 @@
 
 typedef uint32_t (*io_cb_t)(uint32_t value);
 typedef void (*power_cb_t)(int on);
+typedef int (*jumpers_cb_t)(uint32_t *vcc_pins, uint32_t *gnd_pins,
+                            uint *supply_mv);
 
 static io_cb_t        io_cb;
 static power_cb_t     power_cb;
+static jumpers_cb_t   jumpers_cb;
 static unsigned char *out;
 static size_t         out_len;
 static size_t         out_cap;
@@ -80,14 +83,22 @@ cap_hw_output(const void *buf, uint len)
     return (0);
 }
 
+int
+cap_hw_jumpers(uint32_t *vcc_pins, uint32_t *gnd_pins, uint *supply_mv)
+{
+    return (jumpers_cb(vcc_pins, gnd_pins, supply_mv));
+}
+
 void
-harness_init(io_cb_t io, power_cb_t power)
+harness_init(io_cb_t io, power_cb_t power, jumpers_cb_t jumpers)
 {
     io_cb = io;
     power_cb = power;
+    jumpers_cb = jumpers;
 }
 
-/* Run one "pld capture ..." line; returns the length of its output */
+/* Run one console line ("pld capture ..." or "version"); returns the
+ * length of its output */
 size_t
 harness_run(const char *line)
 {
@@ -103,6 +114,8 @@ harness_run(const char *line)
     argv[argc] = NULL;
     if ((argc >= 2) && (strcmp(argv[0], "pld") == 0))
         (void) cmd_pld_capture(argc - 1, argv + 1);
+    else if ((argc == 1) && (strcmp(argv[0], "version") == 0))
+        harness_printf("Version host harness\n");
     free(copy);
     return (out_len);
 }

@@ -35,6 +35,12 @@
  *        by its reads.  x runs over (i * mul) mod 2^n for i < count.
  * state  Report the signature of the path state.
  *
+ * Preflight: when the job names the socket pins that must carry VCC and
+ * GND (set vcc= gnd=) or the PLD supply voltage (set supply=), every run
+ * first detects the jumpers and refuses to power the PLD if they do not
+ * match.  The job may then not enumerate, invert, clock or probe those
+ * pins, and every write drives the VCC pin high and the GND pin low.
+ *
  * Output: the line "---- CAPTURE ----", then binary chunks
  * <type:1> <length:2 LE> <payload>: 'H' header, 'P' signature reads,
  * 'D' data, 'E' end.  Reads are 32-bit little endian.  The 'E' payload is
@@ -82,6 +88,9 @@ static struct {
     uint32_t  mask;         /* read mask */
     uint32_t  count;        /* trans: vectors (0 = all) */
     uint32_t  mul;          /* trans: x = i * mul */
+    uint32_t  vcc;          /* preflight: socket pins jumpered to VCC */
+    uint32_t  gnd;          /* preflight: socket pins jumpered to GND */
+    uint      supply_mv;    /* preflight: PLD supply, 5000 or 3300 */
     uint      settle_usec;  /* after each write */
     uint      off_msec;     /* power off time of a power cycle */
     uint      on_msec;      /* power on time before the first vector */
@@ -108,13 +117,15 @@ static uint32_t cap_sigs[CAP_MAX_SIGS];
 
 const char cmd_pld_capture_help[] =
 "pld capture clear              - reset the job to defaults\n"
-"pld capture set <key>=<value>  - pins base inv clk cand mask count mul (hex)\n"
-"                                 settle (usec) off on (msec)\n"
+"pld capture set <key>=<value>  - pins base inv clk cand mask count mul vcc\n"
+"                                 gnd (hex) settle (usec) off on (msec)\n"
+"                                 supply (mV)\n"
 "pld capture path [+] <v>...    - clocked vectors from power-up to the state\n"
 "pld capture probe [+] <v>...   - probe vectors for signatures\n"
 "pld capture ret <crc> <v>...   - return path from the state with that\n"
 "                                 signature CRC; 'ret clear' drops them all\n"
 "pld capture show               - show the job\n"
+"pld capture jumpers            - detect the VCC, GND and supply jumpers\n"
 "pld capture walk               - every vector of the enumerated pins\n"
 "pld capture trans              - clock transitions from the path state\n"
 "pld capture state              - signature of the path state\n";
@@ -297,11 +308,18 @@ cap_end(uint status)
 
 /* -- PLD access ---------------------------------------------------------- */
 
+/* Drive v (supply pins at their rail level), wait, read the masked pins */
+static uint32_t
+cap_io(uint32_t v)
+{
+    return (cap_hw_io((v & ~cap.gnd) | cap.vcc, cap.settle_usec) & cap.mask);
+}
+
 static void
 cap_step(uint32_t v)
 {
-    (void) cap_hw_io(v & ~cap.clk, cap.settle_usec);
-    (void) cap_hw_io(v | cap.clk, cap.settle_usec);
+    (void) cap_io(v & ~cap.clk);
+    (void) cap_io(v | cap.clk);
 }
 
 static void
@@ -327,9 +345,9 @@ cap_signature(uint32_t *r)
         uint32_t w = cap.probe[i] & ~cap.clk;
         uint32_t c;
 
-        r[n++] = cap_hw_io(w, cap.settle_usec) & cap.mask;
+        r[n++] = cap_io(w);
         for (c = cap.cand; c != 0; c &= c - 1)
-            r[n++] = cap_hw_io(w ^ (c & -c), cap.settle_usec) & cap.mask;
+            r[n++] = cap_io(w ^ (c & -c));
     }
     return (n);
 }
@@ -377,6 +395,57 @@ cap_restore(uint32_t crc, uint nreads)
     return (-1);
 }
 
+/* -- preflight ----------------------------------------------------------- */
+
+/* Refuse to power the PLD unless the jumpers match the job */
+static rc_t
+cap_preflight(void)
+{
+    uint32_t vcc = 0;
+    uint32_t gnd = 0;
+    uint     supply_mv = 0;
+
+    if (((cap.vcc | cap.gnd) == 0) && (cap.supply_mv == 0))
+        return (RC_SUCCESS);
+    if ((cap.pins | cap.inv | cap.clk | cap.cand) & (cap.vcc | cap.gnd)) {
+        printf("preflight: the job uses a VCC or GND pin\n");
+        return (RC_BAD_PARAM);
+    }
+    if (cap_hw_jumpers(&vcc, &gnd, &supply_mv) != 0) {
+        printf("preflight: could not detect the VCC and GND jumpers\n");
+        return (RC_FAILURE);
+    }
+    if (((cap.vcc | cap.gnd) != 0) && ((vcc != cap.vcc) || (gnd != cap.gnd))) {
+        printf("preflight: jumpers vcc=%07lx gnd=%07lx, job expects "
+               "vcc=%07lx gnd=%07lx\n",
+               (unsigned long) vcc, (unsigned long) gnd,
+               (unsigned long) cap.vcc, (unsigned long) cap.gnd);
+        return (RC_FAILURE);
+    }
+    if ((cap.supply_mv != 0) && (supply_mv != cap.supply_mv)) {
+        printf("preflight: supply=%u mV, job expects %u mV\n",
+               supply_mv, cap.supply_mv);
+        return (RC_FAILURE);
+    }
+    return (RC_SUCCESS);
+}
+
+static rc_t
+cap_jumpers(void)
+{
+    uint32_t vcc = 0;
+    uint32_t gnd = 0;
+    uint     supply_mv = 0;
+
+    if (cap_hw_jumpers(&vcc, &gnd, &supply_mv) != 0) {
+        printf("jumpers: detection failed\n");
+        return (RC_FAILURE);
+    }
+    printf("jumpers vcc=%07lx gnd=%07lx supply=%u\n",
+           (unsigned long) vcc, (unsigned long) gnd, supply_mv);
+    return (RC_SUCCESS);
+}
+
 /* -- runs ---------------------------------------------------------------- */
 
 static rc_t
@@ -386,11 +455,14 @@ cap_walk(void)
     uint     sig_reads = cap.nprobe * (1 + cap_popcount(cap.cand));
     uint32_t cur = 0;
     uint     status = CAP_STATUS_OK;
+    rc_t     rc;
 
     if (nbits > CAP_MAX_WALK) {
         printf("walk: at most %u enumerated pins\n", CAP_MAX_WALK);
         return (RC_BAD_PARAM);
     }
+    if ((rc = cap_preflight()) != RC_SUCCESS)
+        return (rc);
     cap_begin('W', cap.inv ? 2 : 1, sig_reads, nbits, 1UL << nbits);
     cap_power_up(cap.off_msec);
     if (cap.nprobe != 0) {
@@ -401,9 +473,9 @@ cap_walk(void)
     do {
         uint32_t w = (cur | (cap.base & ~cap.pins)) & ~cap.clk;
 
-        cap_put32('D', cap_hw_io(w, cap.settle_usec) & cap.mask);
+        cap_put32('D', cap_io(w));
         if (cap.inv != 0)
-            cap_put32('D', cap_hw_io(w ^ cap.inv, cap.settle_usec) & cap.mask);
+            cap_put32('D', cap_io(w ^ cap.inv));
         cap_done++;
         if (((cap_done & 0xff) == 0) && (cap_out_err || cap_hw_abort())) {
             status = CAP_STATUS_ABORT;
@@ -429,6 +501,7 @@ cap_trans(void)
     uint     nsigs = 0;
     uint     status = CAP_STATUS_OK;
     uint32_t i;
+    rc_t     rc;
 
     if (cap.nprobe == 0) {
         printf("trans: no probe vectors\n");
@@ -440,6 +513,8 @@ cap_trans(void)
         printf("trans: mul must be odd\n");
         return (RC_BAD_PARAM);
     }
+    if ((rc = cap_preflight()) != RC_SUCCESS)
+        return (rc);
     cap_begin('T', 0, nreads, nbits, count);
     cap_power_up(cap.off_msec);
     cap_signature(cap_ref);
@@ -488,11 +563,14 @@ static rc_t
 cap_state(void)
 {
     uint nreads = cap.nprobe * (1 + cap_popcount(cap.cand));
+    rc_t rc;
 
     if (cap.nprobe == 0) {
         printf("state: no probe vectors\n");
         return (RC_BAD_PARAM);
     }
+    if ((rc = cap_preflight()) != RC_SUCCESS)
+        return (rc);
     cap_begin('S', 0, nreads, cap_popcount(cap.pins), 1);
     cap_power_up(cap.off_msec);
     cap_signature(cap_cur);
@@ -573,9 +651,12 @@ cap_set(int argc, char * const *argv)
         { "mask",   &cap.mask,  NULL },
         { "count",  &cap.count, NULL },
         { "mul",    &cap.mul,   NULL },
+        { "vcc",    &cap.vcc,   NULL },
+        { "gnd",    &cap.gnd,   NULL },
         { "settle", NULL,       &cap.settle_usec },
         { "off",    NULL,       &cap.off_msec },
         { "on",     NULL,       &cap.on_msec },
+        { "supply", NULL,       &cap.supply_mv },
     };
     int arg;
 
@@ -681,12 +762,15 @@ cap_show(void)
     uint k;
 
     printf("pins=%07lx base=%07lx inv=%07lx clk=%07lx cand=%07lx "
-           "mask=%07lx\ncount=%lx mul=%lx settle=%u off=%u on=%u\n",
+           "mask=%07lx\ncount=%lx mul=%lx settle=%u off=%u on=%u\n"
+           "vcc=%07lx gnd=%07lx supply=%u\n",
            (unsigned long) cap.pins, (unsigned long) cap.base,
            (unsigned long) cap.inv, (unsigned long) cap.clk,
            (unsigned long) cap.cand, (unsigned long) cap.mask,
            (unsigned long) cap.count, (unsigned long) cap.mul,
-           cap.settle_usec, cap.off_msec, cap.on_msec);
+           cap.settle_usec, cap.off_msec, cap.on_msec,
+           (unsigned long) cap.vcc, (unsigned long) cap.gnd,
+           cap.supply_mv);
     cap_show_list("path", cap.path, cap.npath);
     cap_show_list("probe", cap.probe, cap.nprobe);
     for (k = 0; k < cap.nret; k++) {
@@ -735,6 +819,8 @@ cmd_pld_capture(int argc, char * const *argv)
         cap_show();
         return (RC_SUCCESS);
     }
+    if (strcmp(sub, "jumpers") == 0)
+        return (cap_jumpers());
     if (strcmp(sub, "walk") == 0)
         return (cap_walk());
     if (strcmp(sub, "trans") == 0)

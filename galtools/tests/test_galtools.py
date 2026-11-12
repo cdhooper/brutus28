@@ -102,6 +102,44 @@ class Firmware(unittest.TestCase):
     def transport(self, name, socket):
         return fwharness.HarnessTransport(self.lib, fwharness.SocketDevice(jed(name), socket))
 
+    def test_jumper_preflight(self):
+        t = self.transport("cnt16v8", "dip20")
+        dev = t.dev
+        vcc, gnd = dev.vcc_bit, dev.gnd_bit          # socket pins 28 and 10
+        self.assertEqual(t.command("pld capture jumpers"),
+                         "jumpers vcc=%07x gnd=%07x supply=5000\n" % (vcc, gnd))
+        # base drives GND high and VCC low: the firmware overrides both
+        self.assertEqual(t.command("pld capture set pins=6 clk=1 cand=c0000 base=%x "
+                                   "vcc=%x gnd=%x supply=5000" % (gnd, vcc, gnd)), "")
+        t.command("pld capture probe 400 0")
+        self.assertEqual(t.capture("pld capture state").status, 0)
+        self.assertTrue(dev.writes)
+        self.assertTrue(all(w & vcc and not w & gnd for w in dev.writes))
+
+        def refused(msg):
+            ons = dev.power_ons
+            with self.assertRaisesRegex(CaptureError, msg):
+                t.capture("pld capture state")
+            self.assertEqual(dev.power_ons, ons, "powered despite " + msg)
+
+        dev.jumper_gnd = 1 << 11                      # GND jumper on socket pin 12
+        refused("preflight: jumpers vcc=8000000 gnd=0000800, job expects "
+                "vcc=8000000 gnd=0000200")
+        dev.jumper_gnd = gnd
+        dev.supply_mv = 3300
+        refused("preflight: supply=3300 mV, job expects 5000 mV")
+        dev.supply_mv = 5000
+        dev.jumpers_ok = False
+        refused("preflight: could not detect")
+        self.assertIn("detection failed", t.command("pld capture jumpers"))
+        dev.jumpers_ok = True
+        t.command("pld capture set pins=206")         # enumerates the GND pin
+        refused("preflight: the job uses a VCC or GND pin")
+        # vcc=0 gnd=0 supply=0 turns the check off
+        dev.jumper_gnd = 1 << 11
+        t.command("pld capture set pins=6 vcc=0 gnd=0 supply=0")
+        self.assertEqual(t.capture("pld capture state").status, 0)
+
     def test_commands(self):
         t = self.transport("cnt16v8", "dip20")
         self.assertEqual(t.command("pld capture set pins=3 base=0x8000000 settle=2"), "")

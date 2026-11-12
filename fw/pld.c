@@ -795,55 +795,77 @@ pld_report_gnd_and_vcc_jumpers(int verbose, uint32_t *vcc_p, uint32_t *gnd_p)
             gnd_pins |= BIT(pin);
     }
 
-    printf("VCC jumpers:");
-    for (pin = 0; pin < 28; pin++)
-        if (vcc_pins & BIT(pin))
-            printf(" Pin%u", pin + 1);
-    if (vcc_pins == 0)
-        printf(" None");
-    printf("\nGND jumpers:");
-    for (pin = 0; pin < 28; pin++)
-        if (gnd_pins & BIT(pin))
-            printf(" Pin%u", pin + 1);
-    if (gnd_pins == 0)
-        printf(" None detected");
-    printf("\n");
+    if (verbose) {
+        printf("VCC jumpers:");
+        for (pin = 0; pin < 28; pin++)
+            if (vcc_pins & BIT(pin))
+                printf(" Pin%u", pin + 1);
+        if (vcc_pins == 0)
+            printf(" None");
+        printf("\nGND jumpers:");
+        for (pin = 0; pin < 28; pin++)
+            if (gnd_pins & BIT(pin))
+                printf(" Pin%u", pin + 1);
+        if (gnd_pins == 0)
+            printf(" None detected");
+        printf("\n");
 
-    if ((vcc_pins == (BIT(28) >> 1)) &&
-        (gnd_pins == (BIT(14) >> 1)) &&
-        (pld_vcc_jumper == PLD_VCC_5V)) {
-        printf("Jumper configuration is standard for a PLCC28 GAL22V10\n");
-    } else if ((vcc_pins == (BIT(24) >> 1)) &&
-               (gnd_pins == (BIT(12) >> 1)) &&
-               (pld_vcc_jumper == PLD_VCC_5V)) {
-        printf("Jumper configuration is standard for a DIP GAL22V10\n");
-    } else if (device_inserted >= 0) {
-        if ((gnd_pins == (installed_types[device_inserted].gnd_pins >> 1)) &&
-            (vcc_pins == (installed_types[device_inserted].vcc_pins >> 1))) {
-            printf("Jumper configuration is standard for %s\n",
-                   installed_types[device_inserted].name);
+        if ((vcc_pins == (BIT(28) >> 1)) &&
+            (gnd_pins == (BIT(14) >> 1)) &&
+            (pld_vcc_jumper == PLD_VCC_5V)) {
+            printf("Jumper configuration is standard for a PLCC28 GAL22V10\n");
+        } else if ((vcc_pins == (BIT(24) >> 1)) &&
+                   (gnd_pins == (BIT(12) >> 1)) &&
+                   (pld_vcc_jumper == PLD_VCC_5V)) {
+            printf("Jumper configuration is standard for a DIP GAL22V10\n");
+        } else if (device_inserted >= 0) {
+            if ((gnd_pins == (installed_types[device_inserted].gnd_pins >> 1)) &&
+                (vcc_pins == (installed_types[device_inserted].vcc_pins >> 1))) {
+                printf("Jumper configuration is standard for %s\n",
+                       installed_types[device_inserted].name);
+            } else {
+                printf("Jumper configuration is not standard for %s\n",
+                       installed_types[device_inserted].name);
+                printf("    Expected GND=");
+                for (pin = 1; pin <= 28; pin++)
+                    if (installed_types[device_inserted].gnd_pins & BIT(pin))
+                        printf("Pin%u ", pin);
+                printf(" VCC=");
+                for (pin = 1; pin <= 28; pin++)
+                    if (installed_types[device_inserted].vcc_pins & BIT(pin))
+                        printf("Pin%u", pin);
+                printf("\n");
+            }
         } else {
-            printf("Jumper configuration is not standard for %s\n",
-                   installed_types[device_inserted].name);
-            printf("    Expected GND=");
-            for (pin = 1; pin <= 28; pin++)
-                if (installed_types[device_inserted].gnd_pins & BIT(pin))
-                    printf("Pin%u ", pin);
-            printf(" VCC=");
-            for (pin = 1; pin <= 28; pin++)
-                if (installed_types[device_inserted].vcc_pins & BIT(pin))
-                    printf("Pin%u", pin);
-            printf("\n");
+            printf("Jumper configuration is not standard\n"
+                   "    For PLCC GAL22V10, need 5V, VCC=Pin28, GND=Pin14\n"
+                   "    For DIP GAL22V10, need 5V, VCC=Pin24, GND=Pin12\n");
         }
-    } else {
-        printf("Jumper configuration is not standard\n"
-               "    For PLCC GAL22V10, need 5V, VCC=Pin28, GND=Pin14\n"
-               "    For DIP GAL22V10, need 5V, VCC=Pin24, GND=Pin12\n");
     }
 
     *vcc_p = vcc_pins;
     *gnd_p = gnd_pins;
     return (RC_SUCCESS);
+}
+
+/*
+ * cap_hw_jumpers
+ * --------------
+ * Capture preflight ("pld capture", capture.c): detect which socket pins
+ * are jumpered to VCC and GND, and the PLD supply (5000 or 3300 mV, 0 if
+ * neither).  Returns 0 when detection worked.
+ */
+int
+cap_hw_jumpers(uint32_t *vcc_pins, uint32_t *gnd_pins, uint *supply_mv)
+{
+    pld_vcc_jumper = PLD_VCC_MISSING;
+    if (pld_report_5v_3p3v_jumper(0) != RC_SUCCESS)
+        return (-1);
+    *supply_mv = (pld_vcc_jumper == PLD_VCC_5V) ? 5000 :
+                 (pld_vcc_jumper == PLD_VCC_3P3V) ? 3300 : 0;
+    if (pld_report_gnd_and_vcc_jumpers(0, vcc_pins, gnd_pins) != RC_SUCCESS)
+        return (-1);
+    return (0);
 }
 
 /*

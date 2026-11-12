@@ -46,12 +46,24 @@ class SocketDevice:
         self.pins = self.g.signal_pins()
         self.sbit = {p: 1 << (smap(p) - 1) for p in range(1, npins + 1)}
         self.vcc_bit = self.sbit[vcc]
+        self.gnd_bit = self.sbit[gnd]
+        # What the board's jumper detection reports; tests change these
+        self.jumper_vcc, self.jumper_gnd, self.supply_mv = self.vcc_bit, self.gnd_bit, 5000
+        self.jumpers_ok = True
         self.powered = False
+        self.power_ons = 0
         self.io_count = 0
+        self.writes = []             # every value written while powered
+
+    def jumpers(self):
+        if not self.jumpers_ok:
+            return None
+        return self.jumper_vcc, self.jumper_gnd, self.supply_mv
 
     def power(self, on):
         self.powered = bool(on)
         if on:
+            self.power_ons += 1
             self.g.power_up()
             self.g.settle({p: 0 for p in self.pins})   # drivers come up low
 
@@ -59,6 +71,7 @@ class SocketDevice:
         self.io_count += 1
         if not self.powered:
             return 0
+        self.writes.append(value)
         ext = {p: 1 if value & self.sbit[p] else 0 for p in self.pins}
         levels, _ = self.g.apply(ext)
         out = self.vcc_bit
@@ -74,12 +87,22 @@ class HarnessTransport:
         self.dev = device
         IO = ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.c_uint32)
         PWR = ctypes.CFUNCTYPE(None, ctypes.c_int)
+        JMP = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.POINTER(ctypes.c_uint32),
+                               ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint))
         self._io = IO(lambda v: device.io(v))
         self._pwr = PWR(lambda on: device.power(on))
-        self.lib.harness_init(self._io, self._pwr)
+        self._jmp = JMP(self._jumpers)
+        self.lib.harness_init(self._io, self._pwr, self._jmp)
         self.lib.harness_run.restype = ctypes.c_size_t
         self.lib.harness_run.argtypes = [ctypes.c_char_p]
         self.lib.harness_output.restype = ctypes.POINTER(ctypes.c_ubyte)
+
+    def _jumpers(self, vcc, gnd, supply):
+        j = self.dev.jumpers()
+        if j is None:
+            return -1
+        vcc[0], gnd[0], supply[0] = j
+        return 0
 
     def _run(self, line):
         n = self.lib.harness_run(line.encode())
