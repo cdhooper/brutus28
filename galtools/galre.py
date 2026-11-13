@@ -25,10 +25,26 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from analysis import Analysis, AsyncDesign                 # noqa: E402
+from analysis import Analysis, AsyncDesign, LatchSuspected  # noqa: E402
 from capture import CaptureError, SerialTransport          # noqa: E402
+from latch import LatchAnalysis                            # noqa: E402
 from rig import BrutusRig, RecordingRig, ReplayRig, SimRig  # noqa: E402
 import verify                                              # noqa: E402
+
+
+def analyse(rig, device, fixed=None, survey=64, log=print):
+    """Run the analysis of a clocked design, or of latches when the chip
+    holds state without a clock; returns the Analysis or LatchAnalysis.
+    Raises AsyncDesign when neither models the chip."""
+    a = Analysis(rig, device, fixed=fixed, survey=survey, log=log)
+    try:
+        a.run()
+    except LatchSuspected as e:
+        log("asynchronous behaviour: %s" % e)
+        log("trying latches built from combinational feedback")
+        a = LatchAnalysis(rig, device, fixed=fixed, log=log, walk0=a.walk0)
+        a.run()
+    return a
 
 
 def parse_fixed(text):
@@ -156,23 +172,24 @@ def main(argv=None):
         args.title = args.title or "galre"
 
         t0 = time.time()
-        a = Analysis(rig, device, fixed=fixed, survey=survey, log=log)
         try:
-            a.run()
+            a = analyse(rig, device, fixed=fixed, survey=survey, log=log)
         except AsyncDesign as e:
             log("asynchronous behaviour: %s" % e)
-            log("galre models clocked designs and the GAL22V10's asynchronous reset term; "
-                "no equations written.")
+            log("galre models clocked designs, the GAL22V10's asynchronous reset term, and "
+                "latches without registers; no equations written.")
             return 3
         finally:
             if isinstance(rig, RecordingRig):
                 rig.close()
+        latches = isinstance(a, LatchAnalysis)
         bad = a.check_equations()
         if bad:
             log("equations disagree with the captures: %s" % bad[:6])
         log("")
-        for s, (path, _) in a.states.items():
-            log("state %s  W=%s  path %s" % ("".join(map(str, s)), a.W.get(s), list(path)))
+        if not latches:
+            for s, (path, _) in a.states.items():
+                log("state %s  W=%s  path %s" % ("".join(map(str, s)), a.W.get(s), list(path)))
         src = a.cupl(args.title)
         pld = os.path.join(args.out, args.title + ".pld")
         with open(pld, "w") as f:
@@ -191,14 +208,21 @@ def main(argv=None):
         jed = compile_cupl(args.cupl, pld, log)
         if not jed:
             return 1
-        diff = verify.check_captures(a, jed)
-        log("%s against the captures (%d states x %d input vectors): %s" % (
-            os.path.basename(jed), len(a.states), 1 << len(a.V),
-            "identical" if not diff else diff[:6]))
+        notes = []
+        diff = verify.check_captures(a, jed, notes)
+        log("%s against the captures (%s x %d input vectors): %s" % (
+            os.path.basename(jed),
+            "%d walks" % len(a.walks) if latches else "%d states" % len(a.states),
+            1 << len(a.V), "identical" if not diff else diff[:6]))
+        if notes:
+            log("  %d walks start differently (galre does not model the latches' state at "
+                "power-up), the first %s" % (len(notes), notes[0]))
         if args.mode == "sim":
-            d, first, osc = verify.compare_jeds(args.source, jed, args.steps, fixed=a.fixed)
-            log("random %d-step run, original vs rebuilt: %s" % (
-                args.steps, "no difference" if not d else "%s, first %s" % (d, first)))
+            d, first, osc = verify.compare_jeds(args.source, jed, args.steps, fixed=a.fixed,
+                                                sic=latches)
+            log("random %d-step run%s, original vs rebuilt: %s" % (
+                args.steps, " (one input changing at a time)" if latches else "",
+                "no difference" if not d else "%s, first %s" % (d, first)))
             diff = diff or d
         return 0 if not (bad or diff) else 1
 

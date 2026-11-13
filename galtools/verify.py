@@ -3,16 +3,23 @@
 import random
 
 from analysis import Table
+from latch import _to_bytes
 from galsim import GAL
 from rig import SimRig
 
 
-def check_captures(a, jed):
+def check_captures(a, jed, notes=None):
     """Simulate jed through the same walks and transition sweeps as the
     analysis: every reachable state, every input vector.  With an
     asynchronous reset term, the jobs go around it as the analysis did,
-    and it must fire in the same states.  Returns a list of differences
-    (empty when the rebuilt JED matches the captures)."""
+    and it must fire in the same states.  A latch design (LatchAnalysis)
+    goes through the same walks, compared from the first read where both
+    agree (the latches' state at power-up is a race the rebuilt chip may
+    settle differently), and a walk that starts differently is added to
+    notes.  Returns a list of differences (empty when the rebuilt JED
+    matches the captures)."""
+    if hasattr(a, "walks"):
+        return _check_walks(a, jed, notes)
     rig = SimRig(jed, careful=True)
     bad = []
     for s, (path, t) in a.states.items():
@@ -43,20 +50,54 @@ def check_captures(a, jed):
     return bad
 
 
-def compare_jeds(a, b, steps=30000, seed=1, fixed=None):
+def _check_walks(a, jed, notes=None):
+    """A latch design: jed through the analysis's walks, from the first
+    read where all outputs agree."""
+    rig = SimRig(jed)
+    bad = []
+    for w in a.walks:
+        rot, rev, start = w.cfg
+        la, _, _ = rig.walk(a.V, a.wbase, [], gray=1, rot=rot, rev=rev, start=start)
+        got = {p: _to_bytes(la[p], a.n) for p in a.outputs}
+        name = "walk rot=%d rev=%d start=%x" % w.cfg
+        same = [all(got[p][x] == w.levels[p][x] for p in a.outputs) for x in w.xs]
+        if True not in same:
+            bad.append((name, "never agrees"))
+            continue
+        k = same.index(True)
+        if k and notes is not None:
+            notes.append("%s: the rebuilt chip powers up with %s, agrees from read %d" % (
+                name, ", ".join("pin %d at %d" % (p, got[p][w.xs[0]]) for p in a.outputs
+                                if got[p][w.xs[0]] != w.levels[p][w.xs[0]]), k))
+        for p in a.outputs:
+            if any(got[p][x] != w.levels[p][x] for x in w.xs[k:]):
+                bad.append((name, "pin %d" % p))
+    return bad
+
+
+def compare_jeds(a, b, steps=30000, seed=1, fixed=None, sic=False):
     """Random stimulus on every signal pin (weakly driven, clock edges on
     pin 1); per step, compare pin levels and which pins each chip drives.
-    Returns ({pin: differing steps}, first difference or None, oscillating
-    steps of a and b)."""
+    With sic, each step changes one pin, as latches need, and the chips
+    are compared from the first step where they agree (latches may power
+    up differently).  Returns ({pin: differing steps}, first difference or
+    None, oscillating steps of a and b)."""
     ga, gb = GAL(a), GAL(b)
     pins = ga.signal_pins()
+    free = [p for p in pins if p not in (fixed or {})]
     rnd = random.Random(seed)
     ext = {p: 0 for p in pins}
+    ext.update(fixed or {})
     ga.settle(ext)
     gb.settle(ext)
     diffs, first, osc = {}, None, [0, 0]
+    synced = not sic
     for i in range(steps):
-        if rnd.random() < 0.5:
+        if sic:
+            ext = dict(ext)
+            p = rnd.choice(free)
+            ext[p] = 1 - ext[p]
+        elif rnd.random() < 0.5:
             ext = dict(ext)
             ext[1] = 1 - ext[1]
         else:
@@ -67,11 +108,17 @@ def compare_jeds(a, b, steps=30000, seed=1, fixed=None):
         lb, db = gb.apply(ext)
         osc[0] += bool(ga.unstable)
         osc[1] += bool(gb.unstable)
+        step = {}
         for p in pins:
             va = "X" if p in ga.unstable else ("Z" if p not in da else la[p])
             vb = "X" if p in gb.unstable else ("Z" if p not in db else lb[p])
             if va != vb:
-                diffs[p] = diffs.get(p, 0) + 1
-                if first is None:
-                    first = (i, p, va, vb)
+                step[p] = (va, vb)
+        if not synced and not step:
+            synced = True
+            diffs, first = {}, None
+        for p, (va, vb) in step.items():
+            diffs[p] = diffs.get(p, 0) + 1
+            if first is None:
+                first = (i, p, va, vb)
     return diffs, first, osc

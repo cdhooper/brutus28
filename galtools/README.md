@@ -1,10 +1,10 @@
 # galtools: black-box GAL reverse engineering with Brutus-28
 
-`galre.py` recovers the logic of a GAL16V8 or GAL22V10, registered designs
-and the GAL22V10's asynchronous reset included, from what Brutus-28 can
-observe at the socket. It writes CUPL
-source and, when a CUPL compiler is available, builds a JED and checks it
-against every captured state and input vector.
+`galre.py` recovers the logic of a GAL16V8 or GAL22V10 from what Brutus-28
+can observe at the socket: combinational and registered designs, the
+GAL22V10's asynchronous reset, and latches built from combinational
+feedback. It writes CUPL source and, when a CUPL compiler is available,
+builds a JED and checks it against every captured state and input vector.
 
 `pld walk` sees only the power-up state, so it cannot recover registered
 logic. galre also clocks the chip from state to state and walks each
@@ -105,7 +105,7 @@ galre exits with:
 - 1 when the equations or the JED disagree with the captures;
 - 2 when the jumper check failed;
 - 3 when the chip changes state without a clock in a way galre does not
-  model, such as a latch (see Limits).
+  model, such as registers and latches in one design (see Limits).
 
 Options:
 
@@ -134,7 +134,8 @@ Options:
    It then walks the power-up state three more times: in descending order,
    with the order of the pins reversed (the pin that changed fastest
    changes slowest), and both. A clocked chip reads the same in every
-   order; see Limits for what galre does when it does not.
+   order. One that does not holds state without a clock, and galre models
+   it as latches (see Latches).
 2. **States.** A state is the value or Z of each candidate. It is read
    through probe vectors: for each candidate, one input vector that enables
    it, taken from the walks. Each probe is read once as driven, then once
@@ -214,6 +215,57 @@ The term's register literals come from the states in which it fires and
 those in which it does not. galre writes the term as `.ar` on every
 register.
 
+### Latches
+
+A combinational output fed back into the array can hold a value: a
+set/reset or transparent latch, or a bit that sets and stays set until
+power-down. Its level then depends on the order in which the inputs
+changed, not only on their present values. When the power-up walk reads
+differently in another order, galre models the design as latches without
+registers (`latch.py`):
+
+- The pin roles come from the power-up walk. The dedicated inputs (pin 1
+  too) and the I/O pins that read their own drive in every vector are
+  inputs, the other I/O pins outputs.
+- The inputs are walked in Gray code order from power-up, so one pin
+  changes per write and no mix of old and new pin values (see Limits)
+  reaches the chip. The walks go in every rotation of the bit order
+  (`rot`), both ways (`rev`), so that every pin changes often and in many
+  latch states.
+- The latch pins are the outputs that read differently at the same input
+  vector in two walks. Of those, an output that reads as a function of the
+  inputs and the other latch pins is a plain output of the latches, such
+  as `Y & !Z`, or the second output of a cross-coupled pair.
+- Every output is a function of the inputs and the latch pins. For a
+  latch pin it is the excitation: the chip rests where it equals the latch
+  pins' levels and moves otherwise. Each step of a walk says that the
+  vector before rested, and where the latches settled from the new one.
+- When several latch pins change in one step, galre fires them in rounds:
+  those of a round together (latches with a shared enable), the rounds one
+  after the other (a latch that reads another flips after it). Of the
+  splits that contradict nothing seen, it takes the one that best agrees
+  with the steps that change a single latch.
+- Each output is minimised, on both polarities, over the variables the
+  steps show it depending on; where the walks did not go, it does not
+  depend on the others either. A latch also gets, for every step that
+  holds it, a product term that holds through the step, so the rebuilt
+  latch cannot glitch there.
+- galre then walks from other start vectors until the learned circuit
+  predicts two walks in a row, learning again from those it gets wrong.
+  Last, it checks that every output is always driven.
+
+The equations read the latch pins, as the original's do:
+
+    P17 = P4 & P5
+        # !P5 & P17
+        # P4 & P17;
+
+The rebuilt JED is checked against the walks from the first read where it
+agrees, and in `sim` against the original under random stimulus that
+changes one input at a time. galre does not model the latches' state at
+power-up, which in a cross-coupled pair is a race the rebuilt chip may
+settle differently. It reports the walks that start differently.
+
 Estimated board time is based on the simulator's count of operations
 (about 2.5 µs per write and read, 22 ms per power cycle, and USB transfer):
 
@@ -222,12 +274,17 @@ Estimated board time is based on the simulator's count of operations
 | `designs/cnt16v8` (counter) | 14 | 4 | about 12 s |
 | `designs/fsm22v10` (state machine) | 17 | 3 | about 110 s |
 | A 22V10 ROM-board controller from the field | 19 | 6 | about 6 min, 377 power cycles |
+| `designs/latch22v10` (three latches), pins 13-19 held | 11 | 24 walks | about 2 s |
 
 The three extra power-up walks take up to a minute of that on a GAL22V10,
 mostly USB transfer. Reading the clocked vector twice in the transition
 sweeps adds about 5 µs per vector. An asynchronous reset term takes up to
 two walks per enumerated pin to learn (about a second each with 19 pins),
 and the states in which it fires are walked twice.
+
+A latch design takes one Gray code walk per bit order and a few more to
+check, each of every input vector, and learning grows with the number of
+vectors: half a second for latch22v10 with 11 inputs.
 
 Return paths replace almost all power cycles. Without them, the last design
 needed about 3 million power cycles.
@@ -241,21 +298,26 @@ needed about 3 million power cycles.
 - Pin 1 stays low except for clock edges, so a combinational use of pin 1
   in a registered 22V10 is not captured.
 - Registers that never reach a pin are not seen.
-- Latches built from combinational feedback are not modelled. galre
-  detects state that changes without a clock other than the GAL22V10's
-  asynchronous reset, and stops with exit code 3 before writing equations:
-  - The power-up walk must read the same in all four orders. Tried in
-    simulation on set/reset and transparent latches with their inputs on
-    every pair of pins, and on set-only bits, the three extra orders
-    together show every latch that can leave its power-up value. No two of
-    them do.
-  - Every other state's walk must leave the state as it found it, or
-    return it to the power-up state where the asynchronous reset term
-    fires.
-  - Reading a new state in a transition sweep must not change it.
+- Of state that changes without a clock, galre models the GAL22V10's
+  asynchronous reset term and latches built from combinational feedback.
+  It takes a design for latches when the power-up walk reads differently
+  in another order. Tried in simulation on set/reset and transparent
+  latches with their inputs on every pair of pins, and on set-only bits,
+  the three extra orders together show every latch that can leave its
+  power-up value. No two of them do. A latch that acts only in states
+  other than power-up, in a registered design, is not seen.
 
-  A latch that acts only in states other than power-up, on pins that are
-  not state candidates, is not seen.
+  galre stops with exit code 3 before writing equations when:
+  - a design has both registers and latches (the same inputs and latch
+    levels then lead to different places);
+  - a latch reacts only to several inputs changing at once;
+  - a latch output is not always driven;
+  - in a registered design, a state's walk does not leave it as it found
+    it (other than by returning to the power-up state where the
+    asynchronous reset term fires), or reading a new state in a
+    transition sweep changes it.
+- For latches, the result holds for inputs that change one at a time, and
+  the latches' state at power-up is not modelled.
 - The asynchronous reset term must be one product term of the enumerated
   inputs and the registers. A term that reads a combinational output
   stops galre.
@@ -264,7 +326,8 @@ needed about 3 million power cycles.
   the new values on the pins written so far and the old ones on the rest.
   Clocked logic does not care, because a clock edge is a write of its own,
   but a latch or an asynchronous reset term can react to the mix. Once
-  galre knows the reset term, every write goes around it.
+  galre knows the reset term, every write goes around it. The walks that
+  learn latches change one pin per write.
 
 ## Firmware commands
 
@@ -275,8 +338,9 @@ The supply is measured only when the pins match the job's `vcc=` and
 
 The host first configures a job:
 
-- `set pins= base= inv= clk= cand= mask= count= mul= rev= gray= start=
-  skm= skv= avm= avv= quiet= chk= settle= off= on= vcc= gnd= supply=`
+- `set pins= base= inv= clk= cand= mask= count= mul= rev= gray= rot=
+  start= skm= skv= avm= avv= quiet= chk= settle= off= on= vcc= gnd=
+  supply=`
 - `path`
 - `probe`
 - `ret <crc> <vectors>`
@@ -289,9 +353,10 @@ GND pin.
 It then runs one of:
 
 - `walk`: every vector of the enumerated pins. The i-th vector is
-  x = (i * `mul`) mod 2^n, or the i-th Gray code with `gray=1`, with bit b
-  of x driving the b-th enumerated pin from the lowest socket pin up, or
-  from the highest down with `rev=1`. Every vector is XORed with `start`.
+  x = (i * `mul`) mod 2^n, or the i-th Gray code with `gray=1`, rotated
+  left by `rot` bits within its n bits. Bit b of x drives the b-th
+  enumerated pin from the lowest socket pin up, or from the highest down
+  with `rev=1`. Every vector is XORed with `start`.
   Vectors v with v & `skm` = `skv` are skipped (read as 0). With probe
   vectors set, the signature of the state is reported before and after the
   walk; with `quiet=1`, only the signatures are.
@@ -315,6 +380,7 @@ chunks. The header comment of `fw/capture.c` describes the format.
 |---|---|
 | `galre.py` | Command line |
 | `analysis.py` | Discovery, exploration, equations, CUPL |
+| `latch.py` | Latches built from combinational feedback |
 | `rig.py` | `SimRig` (simulated chip), `BrutusRig` (board, jumper check), recording and replay, socket pin maps |
 | `fwsim.py`, `fwstub/` | `fw/capture.c` built for the host, with a simulated GAL in the socket |
 | `capture.py` | Serial transport and capture format |

@@ -24,6 +24,7 @@ import galre                                       # noqa: E402
 import verify                                      # noqa: E402
 from analysis import Analysis                      # noqa: E402
 from capture import CaptureError                   # noqa: E402
+from latch import LatchAnalysis                    # noqa: E402
 from galsim import GAL                             # noqa: E402
 from rig import BrutusRig, RecordingRig, ReplayRig, SimRig  # noqa: E402
 
@@ -43,9 +44,37 @@ CASES = {
 # designs with state that changes without a clock that galre does not
 # model -> (device, pins held, what galre must say when it stops)
 ASYNC_CASES = {
-    "latch16v8": ("GAL16V8", "7-9=0,11-15=0,19=0",
-                  "pins 17, 18 read differently when the inputs are walked in descending "
-                  "order"),
+    "reglatch16v8": ("GAL16V8", "5-9=0,11=0,12-16=0,19=0",
+                     "the excitation of pin 18 at P1=1 P2=0 P3=1 P4=1 with latch pins "
+                     "[17, 18] at 00 is 1 once and 0 once: not a circuit of latches"),
+}
+
+# designs of latches built from combinational feedback -> (device, pins
+# held, latch pins, other outputs, the equations galre must find).
+# latch22v10's latches feed each other, so one input change can flip all
+# three in turn, and pin 20 is a function of two of them; dlat22v10's two
+# latches flip together; srnor16v8's cross-coupled pair leaves one latch,
+# and its state at power-up is a race (the only design whose rebuilt chip
+# starts differently).
+LATCH_CASES = {
+    "latch16v8": ("GAL16V8", "7-9=0,11-15=0,19=0", [17, 18], [16], {
+        16: "!P4 & P6",
+        17: "P4 & P5\n    # !P5 & P17\n    # P4 & P17",
+        18: "P2 & !P3\n    # !P3 & P18"}),
+    "latch22v10": ("GAL22V10", "7-11=0,13-19=0", [21, 22, 23], [20], {
+        20: "!P22 & P23",
+        21: "!P6 & P21\n    # P6 & P22\n    # P21 & P22",
+        22: "!P5 & P22\n    # P4 & P23",
+        23: "P2 & P3\n    # P2 & P23\n    # P3 & P23"}),
+    "dlat22v10": ("GAL22V10", "5-11=0,13=0,17-23=0", [14, 15], [16], {
+        14: "!P2 & P4\n    # !P4 & P14\n    # !P2 & P14",
+        15: "P3 & P4\n    # !P4 & P15\n    # P3 & P15",
+        16: "!P14 & P15"}),
+    "srnor16v8": ("GAL16V8", "6-9=0,11-14=0,19=0", [17, 18], [15, 16], {
+        15: "P4 & !P17\n    # !P4 & P17",
+        16: "!P2 & !P17",
+        17: "P2 & !P3\n    # !P3 & P17",
+        18: "P4 & P5\n    # P18"}),
 }
 
 # GAL22V10 designs with an asynchronous reset term -> (pins held, the term
@@ -102,11 +131,32 @@ class SimulatedChip(unittest.TestCase):
 
     def test_async_parts(self):
         found = {name: GAL(jed(name)).async_parts()
-                 for name in list(CASES) + list(ASYNC_CASES) + list(AR_CASES)}
+                 for name in list(CASES) + list(ASYNC_CASES) + list(AR_CASES) +
+                 list(LATCH_CASES)}
         ar = ["an asynchronous reset term"]
-        self.assertEqual(found, {"cnt16v8": [], "fsm22v10": [], "comb16v8": [],
-                                 "ar22v10": ar, "arlow22v10": ar, "arw22v10": ar,
-                                 "latch16v8": ["combinational feedback through pins 17, 18"]})
+        self.assertEqual(found, {
+            "cnt16v8": [], "fsm22v10": [], "comb16v8": [],
+            "ar22v10": ar, "arlow22v10": ar, "arw22v10": ar,
+            "latch16v8": ["combinational feedback through pins 17, 18"],
+            "latch22v10": ["combinational feedback through pins 21, 22, 23"],
+            "dlat22v10": ["combinational feedback through pins 14, 15"],
+            "srnor16v8": ["combinational feedback through pins 16, 17, 18"],
+            "reglatch16v8": ["combinational feedback through pin 17"]})
+
+    def test_latches(self):
+        """Latches built from combinational feedback: the latch pins, the
+        other outputs and their equations; the original JED matches every
+        walk."""
+        for name, (device, fix, latches, comb, eqs) in LATCH_CASES.items():
+            with self.subTest(design=name):
+                a = galre.analyse(SimRig(jed(name)), device, fixed=galre.parse_fixed(fix),
+                                  log=quiet)
+                self.assertIsInstance(a, LatchAnalysis)
+                self.assertEqual(a.L, latches)
+                self.assertEqual([p for p in a.outputs if p not in a.L], comb)
+                self.assertEqual({p: "!" * inv + expr for p, _, inv, expr, _ in a.eqs}, eqs)
+                self.assertEqual(a.check_equations(), [])
+                self.assertEqual(verify.check_captures(a, jed(name)), [])
 
     def test_async_reset(self):
         """The asynchronous reset term is found and written; the original
@@ -153,19 +203,23 @@ class SimulatedChip(unittest.TestCase):
         cases = [(name, device, None) for name, (device, _, _, _) in CASES.items()]
         cases += [(name, "GAL22V10", galre.parse_fixed(fix))
                   for name, (fix, _, _) in AR_CASES.items()]
+        cases += [(name, device, galre.parse_fixed(fix))
+                  for name, (device, fix, _, _, _) in LATCH_CASES.items()]
         try:
             for name, device, fixed in cases:
                 with self.subTest(design=name):
-                    a = Analysis(SimRig(jed(name)), device, fixed=fixed, log=quiet)
-                    a.run()
+                    a = galre.analyse(SimRig(jed(name)), device, fixed=fixed, log=quiet)
                     pld = os.path.join(out, name + ".pld")
                     with open(pld, "w") as f:
                         f.write(a.cupl(name))
                     subprocess.run([CUPL, "-jaxm4", name + ".pld"], cwd=out,
                                    capture_output=True, check=True)
                     rebuilt = os.path.join(out, name + ".jed")
-                    self.assertEqual(verify.check_captures(a, rebuilt), [])
-                    d, first, _ = verify.compare_jeds(jed(name), rebuilt, 5000, fixed=fixed)
+                    notes = []
+                    self.assertEqual(verify.check_captures(a, rebuilt, notes), [])
+                    self.assertEqual(bool(notes), name == "srnor16v8")
+                    d, first, _ = verify.compare_jeds(jed(name), rebuilt, 5000, fixed=fixed,
+                                                      sic=name in LATCH_CASES)
                     self.assertEqual(d, {}, first)
         finally:
             shutil.rmtree(out)
@@ -362,6 +416,44 @@ class Firmware(unittest.TestCase):
         finally:
             shutil.rmtree(out)
 
+    def test_latches_board_and_replay(self):
+        """galre board learns latches through the host-built firmware (Gray
+        code walks in rotated bit orders), as sim does, and replay from the
+        recording."""
+        out = tempfile.mkdtemp(prefix="galre")
+
+        def galre_main(*argv):
+            with contextlib.redirect_stdout(io.StringIO()):
+                r = galre.main(list(argv) + ["--cupl", ""])
+            with open(os.path.join(argv[argv.index("-o") + 1], "report.txt")) as f:
+                return r, f.read()
+        try:
+            for name, (device, fix, latches, _, _) in LATCH_CASES.items():
+                with self.subTest(design=name):
+                    pld = {}
+                    r, report = galre_main("sim", jed(name), "-o", os.path.join(out, "sim"),
+                                           "--fix", fix, "-t", name)
+                    self.assertEqual(r, 0)
+                    dev = fwsim.SocketDevice(jed(name),
+                                             "dip24" if device == "GAL22V10" else "dip20")
+                    board = os.path.join(out, "board")
+                    with mock.patch.object(galre, "SerialTransport",
+                                           lambda port: fwsim.HarnessTransport(self.lib, dev)):
+                        r, report = galre_main("board", "-p", "-", "-d", device, "-o",
+                                               board, "--fix", fix, "-t", name)
+                    self.assertEqual(r, 0)
+                    self.assertIn("latch model: latch pins %s" % latches, report)
+                    r, report = galre_main("replay", os.path.join(board, "capture.jsonl"),
+                                           "-o", os.path.join(out, "replay"))
+                    self.assertEqual(r, 0)
+                    for d in ("sim", "board", "replay"):
+                        with open(os.path.join(out, d, name + ".pld")) as f:
+                            pld[d] = f.read()
+                    self.assertEqual(pld["board"], pld["sim"])
+                    self.assertEqual(pld["replay"], pld["sim"])
+        finally:
+            shutil.rmtree(out)
+
     def test_transition_check(self):
         """trans with chk flags the vectors whose new state the probes
         change: in arlow22v10 a probe with every input low resets it."""
@@ -388,6 +480,7 @@ class Firmware(unittest.TestCase):
         path = [{2: 1}, {3: 1}]
         probes, cand = [{4: 1}, {}], [21, 22, 23]
         for opts in ({"gray": 1}, {"gray": 1, "start": 0x55}, {"start": 0x0f, "rev": 1},
+                     {"gray": 1, "rot": 3}, {"gray": 1, "rot": 6, "rev": 1, "start": 0x2a},
                      {"gray": 1, "start": 3, "skip": {3: 1, 13: 0}, "avoid": {3: 1, 13: 0}}):
             with self.subTest(**{k: str(v) for k, v in opts.items()}):
                 self.assertEqual(rig.walk(V, base, path, probes=probes, cand=cand, **opts),

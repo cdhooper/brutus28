@@ -53,6 +53,11 @@ class AsyncDesign(Exception):
     does not model."""
 
 
+class LatchSuspected(AsyncDesign):
+    """The power-up walk depends on its order, as latches built from
+    combinational feedback make it (latch.LatchAnalysis takes over)."""
+
+
 class _Restart(Exception):
     """Explore again from scratch (the asynchronous reset term is known now)."""
 
@@ -189,6 +194,7 @@ class Analysis:
         full, v1 = litmasks(len(V0))
         if self.clock_in_v not in self._power_up:
             la, lb, _ = self.rig.walk(V0, self.base, [])
+            self.walk0 = V0, la
             self._check_order(V0, la, lb)
             self._power_up[self.clock_in_v] = Table(V0, la, lb, full, v1)
         t = self._power_up[self.clock_in_v]
@@ -255,7 +261,7 @@ class Analysis:
                               "a floating pin or an oscillating output" % _pins(unsteady))
         xs = reduce(lambda a, b: a | b, diff.values())
         x = lowest(xs)
-        raise AsyncDesign(
+        raise LatchSuspected(
             "%s read differently when the inputs are walked in %s order (%d of %d "
             "input vectors, the first %s): the chip holds state without a clock, like a "
             "latch built from combinational feedback" % (

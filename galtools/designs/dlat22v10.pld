@@ -1,0 +1,24 @@
+Name     dlat22v10;
+Partno   x;
+Date     2026-11-12;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g22v10;
+
+/* Test design: GAL22V10, two transparent latches with one enable, so
+   that both flip in the same step; L0 has no consensus term and an
+   active-low output */
+
+Pin 2  = D0;
+Pin 3  = D1;
+Pin 4  = G;
+Pin 14 = !L0;
+Pin 15 = L1;
+Pin 16 = P;
+
+L0 = D0 & G # L0 & !G;
+L1 = D1 & G # L1 & !G # D1 & L1;
+P  = L0 & L1;

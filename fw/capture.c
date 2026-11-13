@@ -29,10 +29,12 @@
  *        the lowest socket pin, or with rev set from the highest, so the
  *        pin that changes fastest becomes the one that changes slowest.
  *        With gray set, x runs in Gray code order instead (one pin changes
- *        per vector).  Every vector is XORed with start, so a Gray walk
- *        from the path's last vector changes one pin at a time from where
- *        the path left the chip.  Vectors v with (v & skm) == skv (skm not
- *        0) are skipped: nothing is written and their reads are 0.
+ *        per vector).  With rot set, x is rotated left by rot bits first,
+ *        so bit 0 of the order drives the rot-th enumerated pin.  Every
+ *        vector is XORed with start, so a Gray walk from the path's last
+ *        vector changes one pin at a time from where the path left the
+ *        chip.  Vectors v with (v & skm) == skv (skm not 0) are skipped:
+ *        nothing is written and their reads are 0.
  *        With quiet set, only the signatures are reported.
  *        A result that depends on the order means the chip has state
  *        that changes without a clock (latches, the 22V10's AR).  With
@@ -120,6 +122,7 @@ static struct {
     uint32_t  mul;          /* trans, walk: x = i * mul (odd) */
     uint32_t  rev;          /* walk: bit 0 of x is the highest pin */
     uint32_t  gray;         /* walk: Gray code order */
+    uint32_t  rot;          /* walk: x rotated left by this many bits */
     uint32_t  start;        /* walk: vectors XORed with this */
     uint32_t  skm;          /* walk: skip vectors with (v & skm) == skv */
     uint32_t  skv;
@@ -158,7 +161,7 @@ static uint32_t cap_last;            /* the vector last written */
 const char cmd_pld_capture_help[] =
 "pld capture clear              - reset the job to defaults\n"
 "pld capture set <key>=<value>  - pins base inv clk cand mask count mul rev\n"
-"                                 gray start skm skv avm avv quiet chk\n"
+"                                 gray rot start skm skv avm avv quiet chk\n"
 "                                 vcc gnd (hex)\n"
 "                                 settle (usec) off on (msec) supply (mV)\n"
 "pld capture path [+] <v>...    - clocked vectors from power-up to the state\n"
@@ -596,6 +599,7 @@ cap_walk(void)
     uint     sig_reads = cap.nprobe * (1 + cap_popcount(cap.cand));
     uint32_t i = 0;
     uint32_t x = 0;
+    uint32_t r;
     uint32_t cur = 0;
     uint     status = CAP_STATUS_OK;
     rc_t     rc;
@@ -606,6 +610,10 @@ cap_walk(void)
     }
     if ((cap.mul & 1) == 0) {
         printf("walk: mul must be odd\n");
+        return (RC_BAD_PARAM);
+    }
+    if ((cap.rot != 0) && (cap.rot >= nbits)) {
+        printf("walk: rot must be below the number of enumerated pins\n");
         return (RC_BAD_PARAM);
     }
     if ((rc = cap_preflight()) != RC_SUCCESS)
@@ -629,14 +637,14 @@ cap_walk(void)
                     cap_put32('D', 0);
             }
         } else {
-            uint32_t r = cap_io(w);
+            uint32_t rd = cap_io(w);
 
             if (!cap.quiet)
-                cap_put32('D', r);
+                cap_put32('D', rd);
             if (cap.inv != 0) {
-                r = cap_io(w ^ cap.inv);
+                rd = cap_io(w ^ cap.inv);
                 if (!cap.quiet)
-                    cap_put32('D', r);
+                    cap_put32('D', rd);
             }
         }
         cap_done++;
@@ -646,12 +654,15 @@ cap_walk(void)
         }
         i = (i + 1) & xmask;
         x = cap.gray ? (i ^ (i >> 1)) : ((x + cap.mul) & xmask);
+        r = x;
+        if (cap.rot != 0)
+            r = ((x << cap.rot) | (x >> (nbits - cap.rot))) & xmask;
         if (cap.rev)
-            cur = cap_expand_rev(x);
-        else if ((cap.mul == 1) && !cap.gray)
+            cur = cap_expand_rev(r);
+        else if ((cap.mul == 1) && !cap.gray && (cap.rot == 0))
             cur = ((cur | ~cap.pins) + 1) & cap.pins;
         else
-            cur = cap_expand(x);
+            cur = cap_expand(r);
     } while (i != 0);
     if ((cap.nprobe != 0) && (status == CAP_STATUS_OK)) {
         cap_flush();
@@ -831,6 +842,7 @@ cap_set(int argc, char * const *argv)
         { "mul",    &cap.mul,   NULL },
         { "rev",    &cap.rev,   NULL },
         { "gray",   &cap.gray,  NULL },
+        { "rot",    &cap.rot,   NULL },
         { "start",  &cap.start, NULL },
         { "skm",    &cap.skm,   NULL },
         { "skv",    &cap.skv,   NULL },
@@ -949,7 +961,8 @@ cap_show(void)
     uint k;
 
     printf("pins=%07lx base=%07lx inv=%07lx clk=%07lx cand=%07lx "
-           "mask=%07lx\ncount=%lx mul=%lx rev=%lx gray=%lx start=%07lx\n"
+           "mask=%07lx\ncount=%lx mul=%lx rev=%lx gray=%lx rot=%lx "
+           "start=%07lx\n"
            "skm=%07lx skv=%07lx avm=%07lx avv=%07lx quiet=%lx chk=%lx\n"
            "settle=%u off=%u on=%u vcc=%07lx gnd=%07lx supply=%u\n",
            (unsigned long) cap.pins, (unsigned long) cap.base,
@@ -957,6 +970,7 @@ cap_show(void)
            (unsigned long) cap.cand, (unsigned long) cap.mask,
            (unsigned long) cap.count, (unsigned long) cap.mul,
            (unsigned long) cap.rev, (unsigned long) cap.gray,
+           (unsigned long) cap.rot,
            (unsigned long) cap.start, (unsigned long) cap.skm,
            (unsigned long) cap.skv, (unsigned long) cap.avm,
            (unsigned long) cap.avv, (unsigned long) cap.quiet,

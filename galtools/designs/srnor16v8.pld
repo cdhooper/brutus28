@@ -1,0 +1,28 @@
+Name     srnor16v8;
+Partno   x;
+Date     2026-11-12;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g16v8;
+
+/* Test design: GAL16V8, a set-reset latch of two cross-coupled NOR
+   gates with both outputs on pins (QN reads as a function of Q, and
+   their state at power-up is a race), an output of the latch, and a
+   latch that sets once and holds until power-down */
+
+Pin 2  = S;
+Pin 3  = R;
+Pin 4  = A;
+Pin 5  = B;
+Pin 15 = X;
+Pin 16 = QN;
+Pin 17 = Q;
+Pin 18 = M;
+
+Q  = !R & !QN;
+QN = !S & !Q;
+X  = A $ Q;
+M  = A & B & !M # A & M # B & M # !A & !B & M;
