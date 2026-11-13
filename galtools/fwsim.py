@@ -28,7 +28,7 @@ FW = os.path.join(HERE, "..", "fw")
 # the rest, for a few tens of ns: long enough for a GAL.  Clocked logic
 # does not care (clock edges are writes of their own), but a latch or the
 # 22V10's asynchronous reset can.
-PORT_GROUPS = (0x000ffff, 0x0ff0000, 0xf000000)
+PORT_GROUPS = (0x000ffff, 0x0ff0000, 0xf000000)      # CAP_PORT_GROUPS in fw/capture.h
 
 
 def build(cc=None):

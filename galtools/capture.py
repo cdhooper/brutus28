@@ -2,8 +2,8 @@
 
 The firmware answers a run ("pld capture walk / trans / state") with the
 line "---- CAPTURE ----" and binary chunks <type:1> <length:2 LE> <payload>:
-'H' header, 'P' signature reads, 'D' data, 'E' end with status, counters and
-a CRC-32 over all chunk bytes before it.  Configuration commands ("pld
+'H' header, 'P' signature reads, 'D' data, 'F' flagged vectors, 'E' end with
+status, counters and a CRC-32 over all chunk bytes before it.  Configuration commands ("pld
 capture set / path / probe / ret") print nothing unless they fail.
 """
 
@@ -28,8 +28,9 @@ class Capture:
     """One decoded run."""
 
     def __init__(self):
-        self.sigs = []          # 'P' sections, each a list of reads
+        self.sigs = []          # signatures, each a list of sig_reads reads
         self.data = bytearray()  # all 'D' payloads
+        self.flags = []          # 'F' vectors
         self.status = None
 
     def _header(self, p):
@@ -48,7 +49,7 @@ def read_capture(read_exact):
     """Decode chunks from read_exact(n) up to and including the 'E' chunk."""
     cap = Capture()
     crc = 0
-    last = None
+    reads = []
     while True:
         head = read_exact(3)
         kind, n = chr(head[0]), head[1] | head[2] << 8
@@ -56,21 +57,22 @@ def read_capture(read_exact):
         if kind == "E":
             if cap._end(payload) != crc:
                 raise CaptureError("capture CRC mismatch")
+            k = cap.sig_reads
+            if k == 0 and reads or k and len(reads) % k:
+                raise CaptureError("%d signature reads, not a multiple of %d" % (len(reads), k))
+            cap.sigs = [reads[i:i + k] for i in range(0, len(reads), k)] if k else []
             return cap
         crc = zlib.crc32(head + payload, crc)
         if kind == "H":
             cap._header(payload)
         elif kind == "P":
-            reads = list(struct.unpack("<%dI" % (n // 4), payload))
-            if last == "P":
-                cap.sigs[-1].extend(reads)
-            else:
-                cap.sigs.append(reads)
+            reads.extend(struct.unpack("<%dI" % (n // 4), payload))
         elif kind == "D":
             cap.data += payload
+        elif kind == "F":
+            cap.flags.extend(struct.unpack("<%dI" % (n // 4), payload))
         else:
             raise CaptureError("unknown chunk type %r" % kind)
-        last = kind
 
 
 class SerialTransport:

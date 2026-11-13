@@ -1,7 +1,8 @@
 # galtools: black-box GAL reverse engineering with Brutus-28
 
 `galre.py` recovers the logic of a GAL16V8 or GAL22V10, registered designs
-included, from what Brutus-28 can observe at the socket. It writes CUPL
+and the GAL22V10's asynchronous reset included, from what Brutus-28 can
+observe at the socket. It writes CUPL
 source and, when a CUPL compiler is available, builds a JED and checks it
 against every captured state and input vector.
 
@@ -94,7 +95,8 @@ A design with an asynchronous reset term or combinational feedback loops
 behaves differently depending on the exact order of the firmware's writes,
 so `sim` runs it through the firmware built for the host (`fwsim.py`,
 needs a C compiler). That model includes the three port writes per vector
-(see Limits).
+(see Limits). It simulates the chip one write at a time, so it is slow
+with many enumerated pins; hold the unused ones with `--fix`.
 
 galre exits with:
 
@@ -102,7 +104,8 @@ galre exits with:
   every capture);
 - 1 when the equations or the JED disagree with the captures;
 - 2 when the jumper check failed;
-- 3 when the chip changes state without a clock (see Limits).
+- 3 when the chip changes state without a clock in a way galre does not
+  model, such as a latch (see Limits).
 
 Options:
 
@@ -165,6 +168,52 @@ Options:
    a greedy two-level minimiser, on both polarities. The minimiser is the
    one from the MACH111 tester's mtest. galre then writes CUPL.
 
+   A GAL22V10 register shows its output polarity on the pin whenever it is
+   cleared, at power-up and by the asynchronous reset. galre writes a
+   register that is high at power-up with a negated `.d`, which CUPL makes
+   active low, so the rebuilt chip powers up the same way.
+
+### Asynchronous reset (GAL22V10)
+
+The GAL22V10's asynchronous reset is one product term, shared by every
+register, that clears them all while it is true, without a clock. The
+power-up state is all registers cleared, so the term never shows there. In
+other states it shows in two ways:
+
+- The walk of a state ends in the power-up state.
+- In a transition sweep, reading the new state resets it. The firmware
+  reads the clocked vector right after the clock edge and again after the
+  probes, and reports the vectors where the two reads differ (`chk`). A
+  reset input that is active low is low in most probe vectors, so this is
+  usually the first sign.
+
+galre then finds the term's inputs from that state:
+
+1. It walks the state in Gray code order from the vector clocked in last,
+   so one pin changes per write and no mix of old and new pin values (see
+   Limits) can fire the term. The reads differ from the power-up walk up
+   to the reset and agree after it. The last vector that reads differently
+   on an output, d, tells the state from the power-up state.
+2. For every enumerated pin and value, it walks the state again, skipping
+   the vectors with that pin at that value and writing around them, then
+   reads d. The state survives exactly when the term needs the pin at that
+   value. These walks read back only the probe of d.
+
+Then it explores again, around the term:
+
+- Every write goes around the term's inputs: the pins that leave it are
+  written first, then the others, then those that enter it, each port
+  group on its own (`avm`, `avv`).
+- Probe vectors lie outside it.
+- A state whose walk still ends in the power-up state is one in which the
+  term fires. It is walked again without the term's inputs. Its outputs
+  and register inputs there are not seen, and are don't-cares: the
+  rebuilt chip resets there too.
+
+The term's register literals come from the states in which it fires and
+those in which it does not. galre writes the term as `.ar` on every
+register.
+
 Estimated board time is based on the simulator's count of operations
 (about 2.5 µs per write and read, 22 ms per power cycle, and USB transfer):
 
@@ -175,7 +224,10 @@ Estimated board time is based on the simulator's count of operations
 | A 22V10 ROM-board controller from the field | 19 | 6 | about 6 min, 377 power cycles |
 
 The three extra power-up walks take up to a minute of that on a GAL22V10,
-mostly USB transfer.
+mostly USB transfer. Reading the clocked vector twice in the transition
+sweeps adds about 5 µs per vector. An asynchronous reset term takes up to
+two walks per enumerated pin to learn (about a second each with 19 pins),
+and the states in which it fires are walked twice.
 
 Return paths replace almost all power cycles. Without them, the last design
 needed about 3 million power cycles.
@@ -189,24 +241,30 @@ needed about 3 million power cycles.
 - Pin 1 stays low except for clock edges, so a combinational use of pin 1
   in a registered 22V10 is not captured.
 - Registers that never reach a pin are not seen.
-- State that changes without a clock is not modelled: the GAL22V10's
-  asynchronous reset term, and latches built from combinational feedback.
-  galre detects it and stops with exit code 3 before writing equations:
+- Latches built from combinational feedback are not modelled. galre
+  detects state that changes without a clock other than the GAL22V10's
+  asynchronous reset, and stops with exit code 3 before writing equations:
   - The power-up walk must read the same in all four orders. Tried in
     simulation on set/reset and transparent latches with their inputs on
     every pair of pins, and on set-only bits, the three extra orders
     together show every latch that can leave its power-up value. No two of
     them do.
-  - Every other state's walk must leave the state as it found it. The
-    asynchronous reset shows here, as a return to the power-up state.
+  - Every other state's walk must leave the state as it found it, or
+    return it to the power-up state where the asynchronous reset term
+    fires.
+  - Reading a new state in a transition sweep must not change it.
 
   A latch that acts only in states other than power-up, on pins that are
   not state candidates, is not seen.
+- The asynchronous reset term must be one product term of the enumerated
+  inputs and the registers. A term that reads a combinational output
+  stops galre.
 - The firmware drives the socket with three port writes: socket pins 1-16,
   then 17-24, then 25-28. For a few tens of ns between them, the chip sees
   the new values on the pins written so far and the old ones on the rest.
   Clocked logic does not care, because a clock edge is a write of its own,
-  but a latch or an asynchronous reset term can react to the mix.
+  but a latch or an asynchronous reset term can react to the mix. Once
+  galre knows the reset term, every write goes around it.
 
 ## Firmware commands
 
@@ -217,8 +275,8 @@ The supply is measured only when the pins match the job's `vcc=` and
 
 The host first configures a job:
 
-- `set pins= base= inv= clk= cand= mask= count= mul= rev= settle= off=
-  on= vcc= gnd= supply=`
+- `set pins= base= inv= clk= cand= mask= count= mul= rev= gray= start=
+  skm= skv= avm= avv= quiet= chk= settle= off= on= vcc= gnd= supply=`
 - `path`
 - `probe`
 - `ret <crc> <vectors>`
@@ -231,12 +289,20 @@ GND pin.
 It then runs one of:
 
 - `walk`: every vector of the enumerated pins. The i-th vector is
-  x = (i * `mul`) mod 2^n, with bit b of x driving the b-th enumerated pin
-  from the lowest socket pin up, or from the highest down with `rev=1`.
-  With probe vectors set, the signature of the state is reported before
-  and after the walk.
-- `trans`: the clock transitions from the path state.
+  x = (i * `mul`) mod 2^n, or the i-th Gray code with `gray=1`, with bit b
+  of x driving the b-th enumerated pin from the lowest socket pin up, or
+  from the highest down with `rev=1`. Every vector is XORed with `start`.
+  Vectors v with v & `skm` = `skv` are skipped (read as 0). With probe
+  vectors set, the signature of the state is reported before and after the
+  walk; with `quiet=1`, only the signatures are.
+- `trans`: the clock transitions from the path state. With `chk=1`, the
+  clocked vector is also read right after the edge and again after the
+  probes, and the first 16 vectors where the reads differ are reported.
 - `state`: the signature of the path state.
+
+With `avm` set, no write passes through a vector v with v & `avm` = `avv`
+on its way to the next vector, in any of the three port writes; a target
+vector inside is still written.
 
 Pin masks and vectors are 28-bit socket values in hex, bit n-1 for socket
 pin n. A run answers with `---- CAPTURE ----` followed by CRC-checked binary

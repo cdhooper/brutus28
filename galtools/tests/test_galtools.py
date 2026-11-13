@@ -40,15 +40,23 @@ CASES = {
                                     12: 0, 13: 0, 14: 0, 15: 0, 16: 0}),
 }
 
-# designs with state that changes without a clock -> (device, pins held,
-# what galre must say when it stops)
+# designs with state that changes without a clock that galre does not
+# model -> (device, pins held, what galre must say when it stops)
 ASYNC_CASES = {
-    "ar22v10": ("GAL22V10", "6-11=0,13-20=0",
-                "changed it to 000, the power-up state, as the GAL22V10's asynchronous "
-                "reset term does"),
     "latch16v8": ("GAL16V8", "7-9=0,11-15=0,19=0",
                   "pins 17, 18 read differently when the inputs are walked in descending "
                   "order"),
+}
+
+# GAL22V10 designs with an asynchronous reset term -> (pins held, the term
+# galre must find, states in which it fires).  arlow22v10's reset input is
+# active low, so it is true in the probe vectors galre would pick, and its
+# register outputs are active low (high at power-up and after the reset);
+# arw22v10's term also reads a register.
+AR_CASES = {
+    "ar22v10": ("6-11=0,13-20=0", "P3 & !P4", 3),
+    "arlow22v10": ("4=0,6-11=0,13-20=0", "!P3", 3),
+    "arw22v10": ("4=0,6-11=0,13-20=0", "P3 & P22", 2),
 }
 
 
@@ -94,10 +102,39 @@ class SimulatedChip(unittest.TestCase):
 
     def test_async_parts(self):
         found = {name: GAL(jed(name)).async_parts()
-                 for name in list(CASES) + list(ASYNC_CASES)}
+                 for name in list(CASES) + list(ASYNC_CASES) + list(AR_CASES)}
+        ar = ["an asynchronous reset term"]
         self.assertEqual(found, {"cnt16v8": [], "fsm22v10": [], "comb16v8": [],
-                                 "ar22v10": ["an asynchronous reset term"],
+                                 "ar22v10": ar, "arlow22v10": ar, "arw22v10": ar,
                                  "latch16v8": ["combinational feedback through pins 17, 18"]})
+
+    def test_async_reset(self):
+        """The asynchronous reset term is found and written; the original
+        JED matches the captures, taken around the term (the careful
+        SimRig), and fires in the same states."""
+        for name, (fix, term, active) in AR_CASES.items():
+            with self.subTest(design=name):
+                a = Analysis(SimRig(jed(name)), "GAL22V10", fixed=galre.parse_fixed(fix),
+                             log=quiet)
+                a.run()
+                self.assertEqual(a.ar_expr(), term)
+                self.assertEqual(len(a.ar_on), active)
+                self.assertEqual(len(a.states), 4)
+                self.assertEqual(a.check_equations(), [])
+                src = a.cupl(name)
+                for r in a.reg:
+                    self.assertIn("P%d.ar = %s;" % (r, term), src)
+                self.assertEqual(verify.check_captures(a, jed(name)), [])
+
+    def test_register_polarity(self):
+        """A GAL22V10 register output that is high at power-up (active low)
+        gets a negated .d, which CUPL makes active low."""
+        a = Analysis(SimRig(jed("arlow22v10")), "GAL22V10",
+                     fixed=galre.parse_fixed(AR_CASES["arlow22v10"][0]), log=quiet)
+        a.run()
+        self.assertEqual(a.W[a.power_up_state], (1, 1))
+        d = {p: inv for p, kind, inv, _, _ in a.eqs if kind == "d"}
+        self.assertEqual(d, {22: True, 23: True})
 
     def test_held_pin_driven_by_the_gal(self):
         with self.assertRaisesRegex(RuntimeError, "pin 19 is held"):
@@ -113,10 +150,13 @@ class SimulatedChip(unittest.TestCase):
     @unittest.skipUnless(CUPL, "no CUPL compiler")
     def test_cupl_round_trip(self):
         out = tempfile.mkdtemp(prefix="galre")
+        cases = [(name, device, None) for name, (device, _, _, _) in CASES.items()]
+        cases += [(name, "GAL22V10", galre.parse_fixed(fix))
+                  for name, (fix, _, _) in AR_CASES.items()]
         try:
-            for name, (device, _, _, _) in CASES.items():
+            for name, device, fixed in cases:
                 with self.subTest(design=name):
-                    a = Analysis(SimRig(jed(name)), device, log=quiet)
+                    a = Analysis(SimRig(jed(name)), device, fixed=fixed, log=quiet)
                     a.run()
                     pld = os.path.join(out, name + ".pld")
                     with open(pld, "w") as f:
@@ -125,7 +165,7 @@ class SimulatedChip(unittest.TestCase):
                                    capture_output=True, check=True)
                     rebuilt = os.path.join(out, name + ".jed")
                     self.assertEqual(verify.check_captures(a, rebuilt), [])
-                    d, first, _ = verify.compare_jeds(jed(name), rebuilt, 5000)
+                    d, first, _ = verify.compare_jeds(jed(name), rebuilt, 5000, fixed=fixed)
                     self.assertEqual(d, {}, first)
         finally:
             shutil.rmtree(out)
@@ -284,6 +324,99 @@ class Firmware(unittest.TestCase):
                     self.assertIn(says, report)
         finally:
             shutil.rmtree(out)
+
+    def test_async_reset_board_and_replay(self):
+        """galre board finds the asynchronous reset term through the
+        host-built firmware, as sim does, and replay from the recording."""
+        out = tempfile.mkdtemp(prefix="galre")
+
+        def galre_main(*argv):
+            with contextlib.redirect_stdout(io.StringIO()):
+                r = galre.main(list(argv) + ["--cupl", ""])
+            with open(os.path.join(argv[argv.index("-o") + 1], "report.txt")) as f:
+                return r, f.read()
+        try:
+            for name, (fix, term, _) in AR_CASES.items():
+                with self.subTest(design=name):
+                    pld = {}
+                    r, report = galre_main("sim", jed(name), "-o", os.path.join(out, "sim"),
+                                           "--fix", fix, "-t", name)
+                    self.assertEqual(r, 0)
+                    dev = fwsim.SocketDevice(jed(name), "dip24")
+                    board = os.path.join(out, "board")
+                    with mock.patch.object(galre, "SerialTransport",
+                                           lambda port: fwsim.HarnessTransport(self.lib, dev)):
+                        r, report = galre_main("board", "-p", "-", "-d", "GAL22V10", "-o",
+                                               board, "--fix", fix, "-t", name)
+                    self.assertEqual(r, 0)
+                    self.assertIn("asynchronous reset: ", report)
+                    r, report = galre_main("replay", os.path.join(board, "capture.jsonl"),
+                                           "-o", os.path.join(out, "replay"))
+                    self.assertEqual(r, 0)
+                    for d in ("sim", "board", "replay"):
+                        with open(os.path.join(out, d, name + ".pld")) as f:
+                            pld[d] = f.read()
+                    self.assertIn(".ar = %s;" % term, pld["sim"])
+                    self.assertEqual(pld["board"], pld["sim"])
+                    self.assertEqual(pld["replay"], pld["sim"])
+        finally:
+            shutil.rmtree(out)
+
+    def test_transition_check(self):
+        """trans with chk flags the vectors whose new state the probes
+        change: in arlow22v10 a probe with every input low resets it."""
+        rig = BrutusRig(self.transport("arlow22v10", "dip24"), "GAL22V10", log=quiet)
+        V = [2, 3, 5]
+        base = {p: 0 for p in rig.pins if p not in V and p != 1}
+        _, flags = rig.transitions(V, base, [], [{}], [22, 23], chk=True)
+        self.assertEqual(sorted(flags), [3, 7])             # P2 (EN) and P3 (!RST) high
+        _, flags = rig.transitions(V, base, [], [{3: 1}], [22, 23], chk=True)
+        self.assertEqual(flags, [])
+        rig = BrutusRig(self.transport("fsm22v10", "dip24"), "GAL22V10", log=quiet)
+        _, flags = rig.transitions([2, 3, 4], {}, [{2: 1}], [{}], [21, 22, 23], chk=True)
+        self.assertEqual(flags, [])
+
+    def test_gray_skip_quiet_walks(self):
+        """Gray code walks from a start vector, with skipped vectors, decode
+        to the counting walk (skipped vectors read 0); a quiet walk
+        returns only the signatures."""
+        t = self.transport("fsm22v10", "dip24")
+        rig = BrutusRig(t, "GAL22V10", log=quiet)
+        sim = SimRig(jed("fsm22v10"))
+        V = [2, 3, 4, 5, 13, 14, 20]
+        base = {6: 1, 9: 1, 15: 1}
+        path = [{2: 1}, {3: 1}]
+        probes, cand = [{4: 1}, {}], [21, 22, 23]
+        for opts in ({"gray": 1}, {"gray": 1, "start": 0x55}, {"start": 0x0f, "rev": 1},
+                     {"gray": 1, "start": 3, "skip": {3: 1, 13: 0}, "avoid": {3: 1, 13: 0}}):
+            with self.subTest(**{k: str(v) for k, v in opts.items()}):
+                self.assertEqual(rig.walk(V, base, path, probes=probes, cand=cand, **opts),
+                                 sim.walk(V, base, path, probes=probes, cand=cand, **opts))
+        la, lb, sigs = rig.walk(V, base, path, probes=probes, cand=cand, data=False)
+        self.assertEqual((la, lb), (None, None))
+        self.assertEqual(sigs, sim.walk(V, base, path, probes=probes, cand=cand)[2])
+
+    def test_avoid_writes(self):
+        """A walk that skips a cube spanning two port groups still passes
+        through it in the momentary mixes of old and new pin values (when a
+        write raises P3 and P13 together); with avoid it never does."""
+        dev = fwsim.SocketDevice(jed("ar22v10"), "dip24")
+        rig = BrutusRig(fwsim.HarnessTransport(self.lib, dev), "GAL22V10", log=quiet)
+        V = [2, 3, 4, 5, 13]                  # socket pins 2-5, then 17
+        cube = {3: 1, 13: 0}
+        m, v = rig._mask(cube), rig._mask([3])
+        seen = []
+        apply = dev._apply
+
+        def record(value):
+            seen.append(value)
+            return apply(value)
+        dev._apply = record
+        for avoid in (None, cube):
+            with self.subTest(avoid=avoid):
+                seen.clear()
+                rig.walk(V, {}, [{2: 1}], mul=0x13, skip=cube, avoid=avoid)
+                self.assertEqual(any(w & m == v for w in seen), avoid is None)
 
     def test_walk_orders(self):
         """Every walk order, with and without numpy, decodes to the counting

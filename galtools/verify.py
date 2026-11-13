@@ -9,13 +9,23 @@ from rig import SimRig
 
 def check_captures(a, jed):
     """Simulate jed through the same walks and transition sweeps as the
-    analysis: every reachable state, every input vector.  Returns a list
-    of differences (empty when the rebuilt JED matches the captures)."""
-    rig = SimRig(jed)
+    analysis: every reachable state, every input vector.  With an
+    asynchronous reset term, the jobs go around it as the analysis did,
+    and it must fire in the same states.  Returns a list of differences
+    (empty when the rebuilt JED matches the captures)."""
+    rig = SimRig(jed, careful=True)
     bad = []
     for s, (path, t) in a.states.items():
-        la, lb, _ = rig.walk(a.V, a.base, a.drives(path))
-        t2 = Table(a.V, la, lb, a.full, a.v1)
+        drives = a.drives(path)
+        active = s in a.ar_on
+        if a.ar and path and a.probe_x:
+            _, _, sigs = rig.walk(a.V, a.base, drives, probes=a.probes(), cand=a.cand,
+                                  avoid=a.ar, data=False)
+            if (sigs[0] != sigs[1]) != active:
+                bad.append(("asynchronous reset", s))
+        la, lb, _ = rig.walk(a.V, a.base, drives, skip=a.ar if active else None,
+                             avoid=a.ar if path else None)
+        t2 = Table(a.V, la, lb, a.full, a.v1, a.full ^ a.ar_set if active else None)
         for p in a.pins:
             if p == 1 and not a.clock_in_v:
                 continue
@@ -23,7 +33,7 @@ def check_captures(a, jed):
                     or (t.value[p] & t.driven[p]) != (t2.value[p] & t2.driven[p])):
                 bad.append(("pin %d" % p, s))
         if s in a.trans and not a.clock_in_v and a.probe_x:
-            obs = rig.transitions(a.V, a.base, a.drives(path), a.probes(), a.cand)
+            obs, _ = rig.transitions(a.V, a.base, drives, a.probes(), a.cand, avoid=a.ar)
             m = {}
             for o, xs in obs.items():
                 s2 = a._sig_obs(o)

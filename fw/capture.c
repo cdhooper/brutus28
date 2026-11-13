@@ -28,6 +28,12 @@
  *        mul.  Bit b of x drives the b-th enumerated pin, counted from
  *        the lowest socket pin, or with rev set from the highest, so the
  *        pin that changes fastest becomes the one that changes slowest.
+ *        With gray set, x runs in Gray code order instead (one pin changes
+ *        per vector).  Every vector is XORed with start, so a Gray walk
+ *        from the path's last vector changes one pin at a time from where
+ *        the path left the chip.  Vectors v with (v & skm) == skv (skm not
+ *        0) are skipped: nothing is written and their reads are 0.
+ *        With quiet set, only the signatures are reported.
  *        A result that depends on the order means the chip has state
  *        that changes without a clock (latches, the 22V10's AR).  With
  *        probes set,
@@ -40,7 +46,19 @@
  *        power-cycle and replay the path.  One byte per x: the index of
  *        its signature.  The first occurrence of a signature is followed
  *        by its reads.  x runs over (i * mul) mod 2^n for i < count.
+ *        With chk set, x is also read right after the clock edge (clock
+ *        pins low) and again after the signature; if the two reads
+ *        differ, reading the signature changed the state, and x goes into
+ *        an 'F' chunk (the first CAP_MAX_FLAGS of them).
  * state  Report the signature of the path state.
+ * Avoid: with avm set, every write takes care never to pass through a
+ *        vector v with (v & avm) == avv on the way, although the socket
+ *        pins are written in three port writes (CAP_PORT_GROUPS): the
+ *        pins that leave the avm/avv cube are written first, then the
+ *        others, then those that enter it, each port group on its own.
+ *        A target vector in the cube is still reached.  This keeps the
+ *        writes from firing an asynchronous reset term through a
+ *        momentary mix of old and new values.
  *
  * Preflight: when the job names the socket pins that must carry VCC and
  * GND (set vcc= gnd=), and optionally the PLD supply (set supply=), every
@@ -53,10 +71,11 @@
  *
  * Output: the line "---- CAPTURE ----", then binary chunks
  * <type:1> <length:2 LE> <payload>: 'H' header, 'P' signature reads,
- * 'D' data, 'E' end.  Reads are 32-bit little endian.  The 'E' payload is
- * status, 3 pad bytes, then 32-bit counts of vectors done, power-cycle
- * restores, return-path restores, failed return paths, and the CRC-32
- * (as zlib) of every chunk byte before the 'E' chunk.
+ * 'D' data, 'F' flagged vectors (trans with chk), 'E' end.  Reads and
+ * vectors are 32-bit little endian.  The 'E' payload is status, 3 pad
+ * bytes, then 32-bit counts of vectors done, power-cycle restores,
+ * return-path restores, failed return paths, and the CRC-32 (as zlib) of
+ * every chunk byte before the 'E' chunk.
  */
 
 #include "main.h"
@@ -74,6 +93,7 @@
 #define CAP_MAX_RET_LEN  16
 #define CAP_MAX_SIGS     255
 #define CAP_MAX_WALK     24      /* enumerated pins for a walk */
+#define CAP_MAX_FLAGS    16
 #define CAP_SOCKET_PINS  0x0fffffff
 #define CAP_CHUNK        512
 #define CAP_NELEM(x)     (sizeof (x) / sizeof ((x)[0]))
@@ -99,6 +119,14 @@ static struct {
     uint32_t  count;        /* trans: vectors (0 = all) */
     uint32_t  mul;          /* trans, walk: x = i * mul (odd) */
     uint32_t  rev;          /* walk: bit 0 of x is the highest pin */
+    uint32_t  gray;         /* walk: Gray code order */
+    uint32_t  start;        /* walk: vectors XORed with this */
+    uint32_t  skm;          /* walk: skip vectors with (v & skm) == skv */
+    uint32_t  skv;
+    uint32_t  avm;          /* writes: never pass through (v & avm) == avv */
+    uint32_t  avv;
+    uint32_t  quiet;        /* walk: report the signatures only */
+    uint32_t  chk;          /* trans: flag x whose state the signature changed */
     uint32_t  vcc;          /* preflight: socket pins jumpered to VCC */
     uint32_t  gnd;          /* preflight: socket pins jumpered to GND */
     uint      supply_mv;    /* preflight: PLD supply (mV), 0 = any */
@@ -125,12 +153,14 @@ static uint32_t cap_ret_fail;
 static uint32_t cap_ref[CAP_MAX_READS];
 static uint32_t cap_cur[CAP_MAX_READS];
 static uint32_t cap_sigs[CAP_MAX_SIGS];
+static uint32_t cap_last;            /* the vector last written */
 
 const char cmd_pld_capture_help[] =
 "pld capture clear              - reset the job to defaults\n"
 "pld capture set <key>=<value>  - pins base inv clk cand mask count mul rev\n"
-"                                 vcc gnd (hex) settle (usec) off on (msec)\n"
-"                                 supply (mV)\n"
+"                                 gray start skm skv avm avv quiet chk\n"
+"                                 vcc gnd (hex)\n"
+"                                 settle (usec) off on (msec) supply (mV)\n"
 "pld capture path [+] <v>...    - clocked vectors from power-up to the state\n"
 "pld capture probe [+] <v>...   - probe vectors for signatures\n"
 "pld capture ret <crc> <v>...   - return path from the state with that\n"
@@ -320,11 +350,46 @@ cap_end(uint status)
 
 /* -- PLD access ---------------------------------------------------------- */
 
+/*
+ * Move from the last vector written towards v without passing through the
+ * avm/avv cube: pins leaving the cube first, then the others, then pins
+ * entering it, one port group at a time.  Writes every step but v itself.
+ */
+static void
+cap_avoid(uint32_t v)
+{
+    static const uint32_t groups[] = CAP_PORT_GROUPS;
+    uint32_t ch = cap_last ^ v;
+    uint32_t cls[3];
+    uint32_t cur = cap_last;
+    uint     c;
+    uint     g;
+
+    cls[0] = ch & cap.avm & (v ^ cap.avv);      /* leave the cube */
+    cls[1] = ch & ~cap.avm;
+    cls[2] = ch & cap.avm & ~(v ^ cap.avv);     /* enter the cube */
+    for (c = 0; c < 3; c++) {
+        for (g = 0; g < CAP_NELEM(groups); g++) {
+            uint32_t m = cls[c] & groups[g];
+
+            if (m == 0)
+                continue;
+            cur ^= m;
+            if (cur != v)
+                (void) cap_hw_io(cur, cap.settle_usec);
+        }
+    }
+}
+
 /* Drive v (supply pins at their rail level), wait, read the masked pins */
 static uint32_t
 cap_io(uint32_t v)
 {
-    return (cap_hw_io((v & ~cap.gnd) | cap.vcc, cap.settle_usec) & cap.mask);
+    v = (v & ~cap.gnd) | cap.vcc;
+    if (cap.avm != 0)
+        cap_avoid(v);
+    cap_last = v;
+    return (cap_hw_io(v, cap.settle_usec) & cap.mask);
 }
 
 static void
@@ -341,7 +406,8 @@ cap_power_up(uint off_msec)
 
     cap_hw_power(0);
     cap_hw_delay_msec(off_msec);
-    cap_hw_power(1);
+    cap_hw_power(1);                     /* drives every pin low */
+    cap_last = 0;
     cap_hw_delay_msec(cap.on_msec);
     for (i = 0; i < cap.npath; i++)
         cap_step(cap.path[i]);
@@ -528,6 +594,7 @@ cap_walk(void)
     uint     nbits = cap_popcount(cap.pins);
     uint32_t xmask = (1UL << nbits) - 1;
     uint     sig_reads = cap.nprobe * (1 + cap_popcount(cap.cand));
+    uint32_t i = 0;
     uint32_t x = 0;
     uint32_t cur = 0;
     uint     status = CAP_STATUS_OK;
@@ -543,7 +610,8 @@ cap_walk(void)
     }
     if ((rc = cap_preflight()) != RC_SUCCESS)
         return (rc);
-    cap_begin('W', cap.inv ? 2 : 1, sig_reads, nbits, 1UL << nbits);
+    cap_begin('W', cap.quiet ? 0 : cap.inv ? 2 : 1, sig_reads, nbits,
+              1UL << nbits);
     cap_power_up(cap.off_msec);
     if (cap.nprobe != 0) {
         cap_signature(cap_ref);
@@ -551,24 +619,40 @@ cap_walk(void)
         cap_flush();
     }
     do {
-        uint32_t w = (cur | (cap.base & ~cap.pins)) & ~cap.clk;
+        uint32_t w = ((cur ^ cap.start) & cap.pins) | (cap.base & ~cap.pins);
 
-        cap_put32('D', cap_io(w));
-        if (cap.inv != 0)
-            cap_put32('D', cap_io(w ^ cap.inv));
+        w &= ~cap.clk;
+        if ((cap.skm != 0) && ((w & cap.skm) == cap.skv)) {
+            if (!cap.quiet) {
+                cap_put32('D', 0);
+                if (cap.inv != 0)
+                    cap_put32('D', 0);
+            }
+        } else {
+            uint32_t r = cap_io(w);
+
+            if (!cap.quiet)
+                cap_put32('D', r);
+            if (cap.inv != 0) {
+                r = cap_io(w ^ cap.inv);
+                if (!cap.quiet)
+                    cap_put32('D', r);
+            }
+        }
         cap_done++;
         if (((cap_done & 0xff) == 0) && (cap_out_err || cap_hw_abort())) {
             status = CAP_STATUS_ABORT;
             break;
         }
-        x = (x + cap.mul) & xmask;
+        i = (i + 1) & xmask;
+        x = cap.gray ? (i ^ (i >> 1)) : ((x + cap.mul) & xmask);
         if (cap.rev)
             cur = cap_expand_rev(x);
-        else if (cap.mul == 1)
+        else if ((cap.mul == 1) && !cap.gray)
             cur = ((cur | ~cap.pins) + 1) & cap.pins;
         else
             cur = cap_expand(x);
-    } while (x != 0);
+    } while (i != 0);
     if ((cap.nprobe != 0) && (status == CAP_STATUS_OK)) {
         cap_flush();
         cap_signature(cap_cur);
@@ -585,6 +669,7 @@ cap_trans(void)
     uint32_t count = cap.count;
     uint     nreads = cap.nprobe * (1 + cap_popcount(cap.cand));
     uint     nsigs = 0;
+    uint     nflags = 0;
     uint     status = CAP_STATUS_OK;
     uint32_t i;
     rc_t     rc;
@@ -609,12 +694,19 @@ cap_trans(void)
 
     for (i = 0; i < count; i++) {
         uint32_t x = (i * cap.mul) & xmask;
+        uint32_t w = cap_expand(x) | (cap.base & ~cap.pins);
+        uint32_t r1 = 0;
         uint32_t crc;
         uint     k;
         uint8_t  idx;
 
-        cap_step(cap_expand(x) | (cap.base & ~cap.pins));
+        cap_step(w);
+        if (cap.chk)
+            r1 = cap_io(w & ~cap.clk);
         cap_signature(cap_cur);
+        if (cap.chk && (cap_io(w & ~cap.clk) != r1) &&
+            (nflags++ < CAP_MAX_FLAGS))
+            cap_put32('F', x);
         crc = cap_crc32_words(cap_cur, nreads);
         for (k = 0; k < nsigs; k++)
             if (cap_sigs[k] == crc)
@@ -738,6 +830,14 @@ cap_set(int argc, char * const *argv)
         { "count",  &cap.count, NULL },
         { "mul",    &cap.mul,   NULL },
         { "rev",    &cap.rev,   NULL },
+        { "gray",   &cap.gray,  NULL },
+        { "start",  &cap.start, NULL },
+        { "skm",    &cap.skm,   NULL },
+        { "skv",    &cap.skv,   NULL },
+        { "avm",    &cap.avm,   NULL },
+        { "avv",    &cap.avv,   NULL },
+        { "quiet",  &cap.quiet, NULL },
+        { "chk",    &cap.chk,   NULL },
         { "vcc",    &cap.vcc,   NULL },
         { "gnd",    &cap.gnd,   NULL },
         { "settle", NULL,       &cap.settle_usec },
@@ -849,14 +949,19 @@ cap_show(void)
     uint k;
 
     printf("pins=%07lx base=%07lx inv=%07lx clk=%07lx cand=%07lx "
-           "mask=%07lx\ncount=%lx mul=%lx rev=%lx settle=%u off=%u on=%u\n"
-           "vcc=%07lx gnd=%07lx supply=%u\n",
+           "mask=%07lx\ncount=%lx mul=%lx rev=%lx gray=%lx start=%07lx\n"
+           "skm=%07lx skv=%07lx avm=%07lx avv=%07lx quiet=%lx chk=%lx\n"
+           "settle=%u off=%u on=%u vcc=%07lx gnd=%07lx supply=%u\n",
            (unsigned long) cap.pins, (unsigned long) cap.base,
            (unsigned long) cap.inv, (unsigned long) cap.clk,
            (unsigned long) cap.cand, (unsigned long) cap.mask,
            (unsigned long) cap.count, (unsigned long) cap.mul,
-           (unsigned long) cap.rev, cap.settle_usec, cap.off_msec, cap.on_msec,
-           (unsigned long) cap.vcc, (unsigned long) cap.gnd,
+           (unsigned long) cap.rev, (unsigned long) cap.gray,
+           (unsigned long) cap.start, (unsigned long) cap.skm,
+           (unsigned long) cap.skv, (unsigned long) cap.avm,
+           (unsigned long) cap.avv, (unsigned long) cap.quiet,
+           (unsigned long) cap.chk, cap.settle_usec, cap.off_msec,
+           cap.on_msec, (unsigned long) cap.vcc, (unsigned long) cap.gnd,
            cap.supply_mv);
     cap_show_list("path", cap.path, cap.npath);
     cap_show_list("probe", cap.probe, cap.nprobe);

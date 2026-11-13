@@ -161,7 +161,8 @@ def main(argv=None):
             a.run()
         except AsyncDesign as e:
             log("asynchronous behaviour: %s" % e)
-            log("galre models clocked designs only; no equations written.")
+            log("galre models clocked designs and the GAL22V10's asynchronous reset term; "
+                "no equations written.")
             return 3
         finally:
             if isinstance(rig, RecordingRig):
