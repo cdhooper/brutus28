@@ -1,0 +1,27 @@
+Name     latch16v8;
+Partno   x;
+Date     2026-11-12;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g16v8;
+
+/* Test design: GAL16V8, latches built from combinational feedback */
+
+Pin 2  = S;
+Pin 3  = R;
+Pin 4  = D;
+Pin 5  = G;
+Pin 6  = A;
+Pin 16 = Y;
+Pin 17 = L;    /* transparent latch, open while G is high */
+Pin 18 = Q;    /* set-reset latch, reset wins */
+
+Q = S & !R
+  # Q & !R;
+L = D & G
+  # L & !G
+  # D & L;
+Y = A & !D;

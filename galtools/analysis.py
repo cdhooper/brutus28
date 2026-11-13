@@ -24,12 +24,27 @@
 Pin 1 is held low except for clock edges.  If clocking never changes the
 state, the design is taken as combinational and pin 1 is enumerated too.
 Limits: a combinational dependence on pin 1 of a registered 22V10 is not
-captured; registers that never reach a pin are not seen; asynchronous
-reset terms and latches built from feedback disturb the walks.
+captured; registers that never reach a pin are not seen.
+
+A chip that changes state without a clock (the 22V10's asynchronous reset
+term, latches built from combinational feedback) is detected and stops the
+analysis with AsyncDesign: the power-up walk is repeated in other orders
+(Analysis.ORDERS), and must read the same; every other state's walk must
+leave the state as it found it.  A latch that only acts in states other
+than power-up is not seen by the first check, and the second sees only
+the state candidates.
 """
+
+from functools import reduce
 
 from bitsim import litmasks
 from rig import CLOCK, MAX_PATH, MAX_PROBES, MAX_RET, MAX_RET_LEN, popcount, survey_mul
+
+
+class AsyncDesign(Exception):
+    """The chip changes state without a clock edge, which the analysis
+    does not model."""
+
 
 DEV = {
     "GAL16V8": {"ded": [1, 2, 3, 4, 5, 6, 7, 8, 9, 11], "io": list(range(12, 20)),
@@ -105,6 +120,14 @@ def lowest(xs):
     return (xs & -xs).bit_length() - 1
 
 
+def _pins(ps):
+    return "pin%s %s" % ("s" if len(ps) > 1 else "", ", ".join(map(str, ps)))
+
+
+def _state(s):
+    return "".join(map(str, s))
+
+
 class Table:
     """One state's exhaustive walk: per pin, driven and value bitsets."""
 
@@ -138,7 +161,9 @@ class Analysis:
               if (p != CLOCK or self.clock_in_v) and p not in self.fixed]
         full, v1 = litmasks(len(V0))
         if self.clock_in_v not in self._power_up:
-            self._power_up[self.clock_in_v] = Table(V0, *self.rig.walk(V0, self.base, []), full, v1)
+            la, lb, _ = self.rig.walk(V0, self.base, [])
+            self._check_order(V0, la, lb)
+            self._power_up[self.clock_in_v] = Table(V0, la, lb, full, v1)
         t = self._power_up[self.clock_in_v]
         for p in sorted(self.fixed):
             if t.value[p] != (full if self.fixed[p] else 0):
@@ -166,6 +191,55 @@ class Analysis:
             len(self.V), self.V,
             ", fixed %s" % self.fixed if self.fixed else ""))
         self.probe_x = []
+
+    # Walk orders that make a latch see its inputs change in another order
+    # than counting does: descending, bit-reversed (the pin that changed
+    # fastest changes slowest) and both.  Tried on set/reset and transparent
+    # latches with their inputs on every pair of pins, and on set-only bits,
+    # together they show every latch that can leave its power-up value;
+    # no two of them do.
+    ORDERS = (("descending", -1, 0), ("bit-reversed", 1, 1), ("bit-reversed descending", -1, 1))
+
+    def _check_order(self, V, la, lb):
+        """Walk the power-up state again in other orders.  A clocked chip
+        reads the same, whatever the order.  If it does not, another walk
+        in counting order tells state that changes without a clock from
+        readings that do not repeat."""
+        n = len(V)
+        if n < 2:
+            return
+        for name, mul, rev in self.ORDERS:
+            la2, lb2, _ = self.rig.walk(V, self.base, [], mul=mul & ((1 << n) - 1), rev=rev)
+            diff = {p: (la[p] ^ la2[p]) | (lb[p] ^ lb2[p]) for p in la}
+            diff = {p: d for p, d in diff.items() if d}
+            if diff:
+                break
+        else:
+            return
+        la3, lb3, _ = self.rig.walk(V, self.base, [])
+        unsteady = sorted(p for p in la if (la[p] ^ la3[p]) | (lb[p] ^ lb3[p]))
+        if unsteady:
+            raise AsyncDesign("the same walk read differently twice on %s: a bad contact, "
+                              "a floating pin or an oscillating output" % _pins(unsteady))
+        xs = reduce(lambda a, b: a | b, diff.values())
+        x = lowest(xs)
+        raise AsyncDesign(
+            "%s read differently when the inputs are walked in %s order (%d of %d "
+            "input vectors, the first %s): the chip holds state without a clock, like a "
+            "latch built from combinational feedback" % (
+                _pins(sorted(diff)), name, popcount(xs), 1 << n,
+                " ".join("P%d=%d" % (p, x >> i & 1) for i, p in enumerate(V))))
+
+    def _disturbed(self, path, sigs):
+        before, after = (self._sig_obs(o) for o in sigs)
+        msg = ("walking the inputs in state %s (%d clocks from power-up) changed it to %s" % (
+            _state(before), len(path), _state(after)))
+        if after == self.power_up_state and self.device == "GAL22V10":
+            msg += (", the power-up state, as the GAL22V10's asynchronous reset term does "
+                    "when it is true")
+        else:
+            msg += ": the chip changes state without a clock"
+        raise AsyncDesign(msg)
 
     def _drive(self, x):
         d = dict(self.base)
@@ -219,7 +293,13 @@ class Analysis:
         if path not in self._walks:
             if len(path) > MAX_PATH:
                 raise RuntimeError("state needs a path of %d clocks" % len(path))
-            la, lb = self.rig.walk(self.V, self.base, self.drives(path))
+            if path and self.probe_x:
+                la, lb, sigs = self.rig.walk(self.V, self.base, self.drives(path),
+                                             probes=self.probes(), cand=self.cand)
+                if sigs[0] != sigs[1]:
+                    self._disturbed(path, sigs)
+            else:
+                la, lb, _ = self.rig.walk(self.V, self.base, self.drives(path))
             self._walks[path] = Table(self.V, la, lb, self.full, self.v1)
         return self._walks[path]
 

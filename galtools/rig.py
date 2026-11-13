@@ -6,12 +6,17 @@ A path is a list of drives; each is clocked in with one rising edge on
 pin 1, starting from power-up.  Every signal pin is driven weakly (1K), so
 a pin the GAL does not drive reads back its drive.
 
-    walk(V, base, path)
+    walk(V, base, path, mul=1, rev=0, probes=(), cand=())
         From the path state, for every assignment x of the enumerated pins V
         (bit b of x = pin V[b]; the other pins at base, pin 1 low) read every
         pin, and again with every pin outside V inverted, except pin 1 and
-        the pins given in base (held inputs keep their value).
-        Returns (la, lb): pin -> bitset over x.
+        the pins given in base (held inputs keep their value).  The i-th
+        vector is x = (i * mul) mod 2^n (mul odd), bit-reversed with rev
+        (V[-1] then changes fastest).  Returns (la, lb, sigs):
+        la, lb pin -> bitset over x; with probes, sigs is (observation
+        before the walk, observation after it), as transitions() observes
+        a state, else None.  For a clocked design the order and sigs make
+        no difference; a chip with asynchronous state shows them.
     transitions(V, base, path, probes, cand, count=None, mul=1, returns=())
         For each x (all, or (i * mul) mod 2^n for i < count): from the path
         state, clock x in and observe the new state: for each probe drive
@@ -77,6 +82,10 @@ def survey_mul(n):
     return (0x9E3779B1 & ((1 << n) - 1)) | 1
 
 
+def bitrev(x, n):
+    return int(format(x, "0%db" % n)[::-1], 2) if n else 0
+
+
 class Ops(dict):
     KEYS = ("io", "power_cycles", "clocks", "ret_ok", "ret_fail", "bytes", "runs")
 
@@ -89,9 +98,17 @@ class Ops(dict):
 
 
 class SimRig:
-    """A GAL simulated from its JED, with the firmware's semantics."""
+    """A GAL simulated from its JED, with the firmware's semantics.
 
-    def __init__(self, jed, off_ms=20, on_ms=2):
+    A clocked design is evaluated for all input vectors at once (bitsim).
+    A design with asynchronous parts (the 22V10's asynchronous reset term,
+    or combinational outputs fed back in a loop, which can latch) depends
+    on the exact order of the firmware's writes, so it runs through the
+    real firmware built for the host (fwsim; needs a C compiler), with the
+    scalar simulator in the socket.
+    """
+
+    def __init__(self, jed, off_ms=20, on_ms=2, socket=None):
         self.g = GAL(jed)
         self.device = self.g.kind
         self.bits = Bits(self.g)
@@ -99,6 +116,20 @@ class SimRig:
         self.off_ms, self.on_ms = off_ms, on_ms
         self.ops = Ops()
         self.q = None
+        self.async_parts = self.g.async_parts()
+        self.fw = None
+        if self.async_parts:
+            import fwsim
+            lib = fwsim.library()
+            if not lib:
+                raise RuntimeError("%s has %s: simulating it needs a C compiler" % (
+                    jed, " and ".join(self.async_parts)))
+            socket = socket or DEFAULT_SOCKET[self.device]
+            self.socket_device = fwsim.SocketDevice(jed, socket)
+            self.fw = BrutusRig(fwsim.HarnessTransport(lib, self.socket_device), self.device,
+                                socket, off_ms=off_ms, on_ms=on_ms, log=lambda *a: None,
+                                jumper_check=False)
+            self.ops = self.fw.ops
 
     def _replay(self, path):
         self.q = {o.pin: 0 for o in self.g.olmcs if o.registered}
@@ -135,23 +166,36 @@ class SimRig:
             ext[CLOCK] = 0
         return ext
 
-    def walk(self, V, base, path):
+    def walk(self, V, base, path, mul=1, rev=0, probes=(), cand=()):
+        if self.fw:
+            return self.fw.walk(V, base, path, mul, rev, probes, cand)
         self._replay(path)
         n = len(V)
         full, v1 = litmasks(n)
         ext = self._ext(V, base, full, v1)
         la, _, _, _ = self.bits.settle(self.q, ext, full)
-        ext_b = {p: (e if p in V or p == CLOCK or p in base else full ^ e)
-                 for p, e in ext.items()}
-        lb, _, _, _ = self.bits.settle(self.q, ext_b, full)
+        inv = [p for p in self.pins if p not in V and p != CLOCK and p not in base]
+        if inv:
+            ext_b = {p: (full ^ e if p in inv else e) for p, e in ext.items()}
+            lb, _, _, _ = self.bits.settle(self.q, ext_b, full)
+        else:
+            lb = dict(la)
+        sigs = None
+        nsig = len(probes) * (1 + len(cand))
+        if probes:
+            o = self._observe(self.q, probes, cand)
+            sigs = (o, o)              # clocked: walking leaves the state alone
+        reads = 2 if inv else 1
         self.ops["runs"] += 1
         self.ops["power_cycles"] += 1
         self.ops["clocks"] += len(path)
-        self.ops["io"] += 2 * len(path) + (2 << n)
-        self.ops["bytes"] += 8 << n
-        return la, lb
+        self.ops["io"] += 2 * len(path) + (reads << n) + 2 * nsig
+        self.ops["bytes"] += (4 * reads << n) + 8 * nsig
+        return la, lb, sigs
 
     def transitions(self, V, base, path, probes, cand, count=None, mul=1, returns=()):
+        if self.fw:
+            return self.fw.transitions(V, base, path, probes, cand, count, mul, returns)
         self._replay(path)
         q0 = dict(self.q)
         n = len(V)
@@ -306,16 +350,16 @@ class BrutusRig:
         for i in range(0, len(vecs), 32):
             self._cmd("pld capture %s + %s" % (name, " ".join("%x" % v for v in vecs[i:i + 32])))
 
-    def _job(self, V, base, path, probes, cand, inv=0, count=None, mul=1, returns=()):
+    def _job(self, V, base, path, probes, cand, inv=0, count=None, mul=1, returns=(), rev=0):
         if list(V) != sorted(V):
             raise ValueError("enumerated pins must be in ascending order")
         if len(cand) > MAX_CAND:
             raise CaptureError("%d candidate pins, the firmware takes %d" % (len(cand), MAX_CAND))
         self._cmd("pld capture clear")
         self._cmd("pld capture set pins=%x base=%x inv=%x clk=%x cand=%x mask=%x "
-                  "count=%x mul=%x settle=%d off=%d on=%d%s" % (
+                  "count=%x mul=%x rev=%x settle=%d off=%d on=%d%s" % (
                       self._mask(V), self._vec(base), inv, self.sbit[CLOCK] if CLOCK not in V else 0,
-                      self._mask(cand), self.readmask, count or 0, mul,
+                      self._mask(cand), self.readmask, count or 0, mul, rev,
                       self.settle_us, self.off_ms, self.on_ms,
                       " vcc=%x gnd=%x supply=%d" % (self.vcc_bit, self.gnd_bit, SUPPLY_MV)
                       if self.jumper_check else ""))
@@ -344,12 +388,26 @@ class BrutusRig:
             raise CaptureError("pld capture %s: %d of %d vectors" % (what, cap.done, cap.count))
         return cap
 
-    def _bitsets(self, data, step, offset, n):
-        """pin -> bitset over x of the reads data[offset::step]."""
+    def _bitsets(self, data, step, offset, n, mul=1, rev=0):
+        """pin -> bitset over x of the reads data[offset::step], where the
+        i-th read is of vector x = (i * mul) mod 2^n, bit-reversed with
+        rev (as walk() orders them)."""
         out = {}
+        N = 1 << n
         try:
             import numpy as np
             a = np.frombuffer(bytes(data), dtype="<u4")[offset::step]
+            if mul != 1 or rev:
+                u = np.uint64
+                idx = (np.arange(N, dtype=u) * u(mul)) & u(N - 1)
+                if rev:
+                    r = np.zeros_like(idx)
+                    for b in range(n):
+                        r |= ((idx >> u(b)) & u(1)) << u(n - 1 - b)
+                    idx = r
+                ordered = np.empty_like(a)
+                ordered[idx] = a
+                a = ordered
             for p in self.pins:
                 b = ((a & self.sbit[p]) != 0).astype(np.uint8)
                 out[p] = int.from_bytes(np.packbits(b, bitorder="little").tobytes(), "little")
@@ -357,6 +415,12 @@ class BrutusRig:
             reads = array("I")
             reads.frombytes(bytes(data))
             reads = reads[offset::step]
+            if mul != 1 or rev:
+                ordered = array("I", bytes(4 * N))
+                for i, r in enumerate(reads):
+                    x = (i * mul) & (N - 1)
+                    ordered[bitrev(x, n) if rev else x] = r
+                reads = ordered
             table = bytes.maketrans(b"\x00\x01", b"01")
             for p in self.pins:
                 m = self.sbit[p]
@@ -374,18 +438,24 @@ class BrutusRig:
         self.crcs.setdefault(o, set()).add(zlib.crc32(struct.pack("<%dI" % len(reads), *reads)))
         return o
 
-    def walk(self, V, base, path):
+    def walk(self, V, base, path, mul=1, rev=0, probes=(), cand=()):
         inv = self._mask([p for p in self.pins if p not in V and p != CLOCK and p not in base])
-        self._job(V, base, path, (), (), inv=inv)
+        self._job(V, base, path, probes, cand, inv=inv, mul=mul, rev=rev)
         cap = self._run("walk")
         n = len(V)
         reads = 2 if inv else 1             # no second read when nothing is inverted
         if cap.count != 1 << n or len(cap.data) != (4 * reads) << n:
             raise CaptureError("walk returned %d bytes for %d vectors" % (len(cap.data), cap.count))
-        self.ops["io"] += 2 * len(path) + (reads << n)
+        sigs = None
+        if probes:
+            if len(cap.sigs) != 2:
+                raise CaptureError("walk returned %d signatures, not 2" % len(cap.sigs))
+            sigs = tuple(self._obs(list(r), probes, cand) for r in cap.sigs)
+        self.ops["io"] += 2 * len(path) + (reads << n) + 2 * cap.sig_reads
         self.ops["clocks"] += len(path)
-        la = self._bitsets(cap.data, reads, 0, n)
-        return la, (self._bitsets(cap.data, 2, 1, n) if inv else dict(la))
+        la = self._bitsets(cap.data, reads, 0, n, mul, rev)
+        lb = self._bitsets(cap.data, 2, 1, n, mul, rev) if inv else dict(la)
+        return la, lb, sigs
 
     def transitions(self, V, base, path, probes, cand, count=None, mul=1, returns=()):
         n = len(V)
@@ -427,9 +497,16 @@ def _enc(v):
     return v
 
 
-def _key(op, V, base, path, probes=(), cand=(), count=None, mul=1):
-    return json.dumps([op, list(V), sorted(base.items()), [sorted(d.items()) for d in path],
-                       [sorted(d.items()) for d in probes], list(cand), count, mul])
+def _dec_obs(o):
+    return tuple(tuple((int(a, 16), int(b, 16)) for a, b in pr) for pr in o)
+
+
+def _key(op, V, base, path, probes=(), cand=(), count=None, mul=1, rev=0):
+    k = [op, list(V), sorted(base.items()), [sorted(d.items()) for d in path],
+         [sorted(d.items()) for d in probes], list(cand), count, mul]
+    if rev:
+        k.append({"rev": rev})
+    return json.dumps(k)
 
 
 class RecordingRig:
@@ -447,11 +524,15 @@ class RecordingRig:
     def close(self):
         self.f.close()
 
-    def walk(self, V, base, path):
-        la, lb = self.rig.walk(V, base, path)
-        self.f.write(json.dumps({"key": _key("walk", V, base, path), "la": _enc(la), "lb": _enc(lb)}) + "\n")
+    def walk(self, V, base, path, mul=1, rev=0, probes=(), cand=()):
+        la, lb, sigs = self.rig.walk(V, base, path, mul, rev, probes, cand)
+        rec = {"key": _key("walk", V, base, path, probes, cand, None, mul, rev),
+               "la": _enc(la), "lb": _enc(lb)}
+        if sigs is not None:
+            rec["sigs"] = _enc(sigs)
+        self.f.write(json.dumps(rec) + "\n")
         self.f.flush()
-        return la, lb
+        return la, lb, sigs
 
     def transitions(self, V, base, path, probes, cand, count=None, mul=1, returns=()):
         out = self.rig.transitions(V, base, path, probes, cand, count, mul, returns)
@@ -482,16 +563,16 @@ class ReplayRig:
                      if p not in {"GAL16V8": (10, 20), "GAL22V10": (12, 24)}[self.device]]
         self.ops = Ops()
 
-    def walk(self, V, base, path):
-        rec = self.db.get(_key("walk", V, base, path))
+    def walk(self, V, base, path, mul=1, rev=0, probes=(), cand=()):
+        rec = self.db.get(_key("walk", V, base, path, probes, cand, None, mul, rev))
         if rec is None:
             raise CaptureError("walk not in the recording; rerun on the board")
+        sigs = tuple(_dec_obs(o) for o in rec["sigs"]) if "sigs" in rec else None
         return ({int(p): int(v, 16) for p, v in rec["la"].items()},
-                {int(p): int(v, 16) for p, v in rec["lb"].items()})
+                {int(p): int(v, 16) for p, v in rec["lb"].items()}, sigs)
 
     def transitions(self, V, base, path, probes, cand, count=None, mul=1, returns=()):
         rec = self.db.get(_key("trans", V, base, path, probes, cand, count, mul))
         if rec is None:
             raise CaptureError("transitions not in the recording; rerun on the board")
-        return {tuple(tuple((int(a, 16), int(b, 16)) for a, b in pr) for pr in o): int(xs, 16)
-                for o, xs in rec["out"]}
+        return {_dec_obs(o): int(xs, 16) for o, xs in rec["out"]}

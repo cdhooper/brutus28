@@ -21,9 +21,16 @@
  * pin the PLD drives reads the same both times; a pin it does not drive
  * follows the 1K drive.  Every read is masked with the job's read mask.
  *
- * walk   For every assignment of the enumerated pins (counting order, the
- *        other pins at base, clock pins low): drive and read; with inv
- *        set, read again with the inv pins inverted.  With probes set,
+ * walk   For every assignment x of the enumerated pins (the other pins at
+ *        base, clock pins low): drive and read; with inv set, read again
+ *        with the inv pins inverted.  The i-th vector is x = (i * mul)
+ *        mod 2^n: counting order for mul 1, scattered for other (odd)
+ *        mul.  Bit b of x drives the b-th enumerated pin, counted from
+ *        the lowest socket pin, or with rev set from the highest, so the
+ *        pin that changes fastest becomes the one that changes slowest.
+ *        A result that depends on the order means the chip has state
+ *        that changes without a clock (latches, the 22V10's AR).  With
+ *        probes set,
  *        the signature is reported before and after the walk, so the host
  *        can tell whether the walk disturbed the register state.
  * trans  Read the signature of the path state S.  Then for each x: step
@@ -90,7 +97,8 @@ static struct {
     uint32_t  cand;         /* signature: pins read with inverted drive */
     uint32_t  mask;         /* read mask */
     uint32_t  count;        /* trans: vectors (0 = all) */
-    uint32_t  mul;          /* trans: x = i * mul */
+    uint32_t  mul;          /* trans, walk: x = i * mul (odd) */
+    uint32_t  rev;          /* walk: bit 0 of x is the highest pin */
     uint32_t  vcc;          /* preflight: socket pins jumpered to VCC */
     uint32_t  gnd;          /* preflight: socket pins jumpered to GND */
     uint      supply_mv;    /* preflight: PLD supply (mV), 0 = any */
@@ -120,8 +128,8 @@ static uint32_t cap_sigs[CAP_MAX_SIGS];
 
 const char cmd_pld_capture_help[] =
 "pld capture clear              - reset the job to defaults\n"
-"pld capture set <key>=<value>  - pins base inv clk cand mask count mul vcc\n"
-"                                 gnd (hex) settle (usec) off on (msec)\n"
+"pld capture set <key>=<value>  - pins base inv clk cand mask count mul rev\n"
+"                                 vcc gnd (hex) settle (usec) off on (msec)\n"
 "                                 supply (mV)\n"
 "pld capture path [+] <v>...    - clocked vectors from power-up to the state\n"
 "pld capture probe [+] <v>...   - probe vectors for signatures\n"
@@ -368,6 +376,23 @@ cap_expand(uint32_t x)
     return (w);
 }
 
+/* x spread over the enumerated pins from the highest down */
+static uint32_t
+cap_expand_rev(uint32_t x)
+{
+    uint32_t w = 0;
+    uint32_t p;
+
+    for (p = cap.pins; p != 0; x >>= 1) {
+        uint32_t top = 1UL << (31 - __builtin_clz(p));
+
+        if (x & 1)
+            w |= top;
+        p &= ~top;
+    }
+    return (w);
+}
+
 /* Get back to the path state after a transition; 0 on success */
 static int
 cap_restore(uint32_t crc, uint nreads)
@@ -501,13 +526,19 @@ static rc_t
 cap_walk(void)
 {
     uint     nbits = cap_popcount(cap.pins);
+    uint32_t xmask = (1UL << nbits) - 1;
     uint     sig_reads = cap.nprobe * (1 + cap_popcount(cap.cand));
+    uint32_t x = 0;
     uint32_t cur = 0;
     uint     status = CAP_STATUS_OK;
     rc_t     rc;
 
     if (nbits > CAP_MAX_WALK) {
         printf("walk: at most %u enumerated pins\n", CAP_MAX_WALK);
+        return (RC_BAD_PARAM);
+    }
+    if ((cap.mul & 1) == 0) {
+        printf("walk: mul must be odd\n");
         return (RC_BAD_PARAM);
     }
     if ((rc = cap_preflight()) != RC_SUCCESS)
@@ -530,8 +561,14 @@ cap_walk(void)
             status = CAP_STATUS_ABORT;
             break;
         }
-        cur = ((cur | ~cap.pins) + 1) & cap.pins;
-    } while (cur != 0);
+        x = (x + cap.mul) & xmask;
+        if (cap.rev)
+            cur = cap_expand_rev(x);
+        else if (cap.mul == 1)
+            cur = ((cur | ~cap.pins) + 1) & cap.pins;
+        else
+            cur = cap_expand(x);
+    } while (x != 0);
     if ((cap.nprobe != 0) && (status == CAP_STATUS_OK)) {
         cap_flush();
         cap_signature(cap_cur);
@@ -700,6 +737,7 @@ cap_set(int argc, char * const *argv)
         { "mask",   &cap.mask,  NULL },
         { "count",  &cap.count, NULL },
         { "mul",    &cap.mul,   NULL },
+        { "rev",    &cap.rev,   NULL },
         { "vcc",    &cap.vcc,   NULL },
         { "gnd",    &cap.gnd,   NULL },
         { "settle", NULL,       &cap.settle_usec },
@@ -811,13 +849,13 @@ cap_show(void)
     uint k;
 
     printf("pins=%07lx base=%07lx inv=%07lx clk=%07lx cand=%07lx "
-           "mask=%07lx\ncount=%lx mul=%lx settle=%u off=%u on=%u\n"
+           "mask=%07lx\ncount=%lx mul=%lx rev=%lx settle=%u off=%u on=%u\n"
            "vcc=%07lx gnd=%07lx supply=%u\n",
            (unsigned long) cap.pins, (unsigned long) cap.base,
            (unsigned long) cap.inv, (unsigned long) cap.clk,
            (unsigned long) cap.cand, (unsigned long) cap.mask,
            (unsigned long) cap.count, (unsigned long) cap.mul,
-           cap.settle_usec, cap.off_msec, cap.on_msec,
+           (unsigned long) cap.rev, cap.settle_usec, cap.off_msec, cap.on_msec,
            (unsigned long) cap.vcc, (unsigned long) cap.gnd,
            cap.supply_mv);
     cap_show_list("path", cap.path, cap.npath);

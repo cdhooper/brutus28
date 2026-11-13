@@ -11,7 +11,7 @@ reachable state. The firmware side is the `pld capture` command
 (`fw/capture.c`).
 
 > **Status:** the firmware commands have run only on the host, against the
-> GAL simulator (`tests/fwharness.py` compiles `fw/capture.c` for the test
+> GAL simulator (`fwsim.py` compiles `fw/capture.c` for the test
 > suite). They have not yet been run on a Brutus-28 board.
 
 ## Requirements
@@ -90,6 +90,20 @@ also compares the rebuilt JED with the original under random stimulus:
 
     galtools/galre.py sim galtools/designs/fsm22v10.jed -o /tmp/fsm
 
+A design with an asynchronous reset term or combinational feedback loops
+behaves differently depending on the exact order of the firmware's writes,
+so `sim` runs it through the firmware built for the host (`fwsim.py`,
+needs a C compiler). That model includes the three port writes per vector
+(see Limits).
+
+galre exits with:
+
+- 0 when it wrote the design (and, with a CUPL compiler, the JED matches
+  every capture);
+- 1 when the equations or the JED disagree with the captures;
+- 2 when the jumper check failed;
+- 3 when the chip changes state without a clock (see Limits).
+
 Options:
 
 - `--fix 6-11=0,13=1` holds pins at fixed values and does not enumerate
@@ -106,20 +120,27 @@ Options:
 ## How it works
 
 1. **Power-up walk.** galre walks every signal pin except pin 1 (the clock,
-   held low). Every pin is driven weakly through Brutus's 1K resistors.
-   Each vector is read twice, once as driven and once with the pins outside
-   the enumeration inverted, so galre can tell which pins the GAL drives.
+   held low) and the held pins. Every pin is driven weakly through Brutus's
+   1K resistors, so a pin the GAL drives reads the same whatever its drive:
+   that tells galre which pins the GAL drives.
    - An I/O pin whose driven value changes with the inputs is
      combinational.
    - Every other I/O pin is a state candidate: an input, a register or a
      constant.
+
+   It then walks the power-up state three more times: in descending order,
+   with the order of the pins reversed (the pin that changed fastest
+   changes slowest), and both. A clocked chip reads the same in every
+   order; see Limits for what galre does when it does not.
 2. **States.** A state is the value or Z of each candidate. It is read
    through probe vectors: for each candidate, one input vector that enables
    it, taken from the walks. Each probe is read once as driven, then once
    per candidate with only that candidate's drive inverted.
 
    Starting from power-up, each new state gets:
-   - an exhaustive walk;
+   - an exhaustive walk. Each vector is read twice, the second time with
+     the drive of the pins outside the enumeration inverted. The probes
+     are read before and after the walk, and must show the same state;
    - a survey: a spread sample of inputs, each clocked in once;
    - then a full sweep: every input vector clocked in once.
 
@@ -149,9 +170,12 @@ Estimated board time is based on the simulator's count of operations
 
 | Design | Inputs enumerated | States | Board time |
 |---|---|---|---|
-| `designs/cnt16v8` (counter) | 14 | 4 | about 10 s |
-| `designs/fsm22v10` (state machine) | 17 | 3 | about 70 s |
-| A 22V10 ROM-board controller from the field | 19 | 6 | about 5 min, 374 power cycles |
+| `designs/cnt16v8` (counter) | 14 | 4 | about 12 s |
+| `designs/fsm22v10` (state machine) | 17 | 3 | about 110 s |
+| A 22V10 ROM-board controller from the field | 19 | 6 | about 6 min, 377 power cycles |
+
+The three extra power-up walks take up to a minute of that on a GAL22V10,
+mostly USB transfer.
 
 Return paths replace almost all power cycles. Without them, the last design
 needed about 3 million power cycles.
@@ -165,9 +189,24 @@ needed about 3 million power cycles.
 - Pin 1 stays low except for clock edges, so a combinational use of pin 1
   in a registered 22V10 is not captured.
 - Registers that never reach a pin are not seen.
-- Asynchronous reset (22V10 AR) and latches built from feedback change state
-  during a walk. The firmware can report signatures before and after a walk
-  to detect this, but galre does not handle such designs.
+- State that changes without a clock is not modelled: the GAL22V10's
+  asynchronous reset term, and latches built from combinational feedback.
+  galre detects it and stops with exit code 3 before writing equations:
+  - The power-up walk must read the same in all four orders. Tried in
+    simulation on set/reset and transparent latches with their inputs on
+    every pair of pins, and on set-only bits, the three extra orders
+    together show every latch that can leave its power-up value. No two of
+    them do.
+  - Every other state's walk must leave the state as it found it. The
+    asynchronous reset shows here, as a return to the power-up state.
+
+  A latch that acts only in states other than power-up, on pins that are
+  not state candidates, is not seen.
+- The firmware drives the socket with three port writes: socket pins 1-16,
+  then 17-24, then 25-28. For a few tens of ns between them, the chip sees
+  the new values on the pins written so far and the old ones on the rest.
+  Clocked logic does not care, because a clock edge is a write of its own,
+  but a latch or an asynchronous reset term can react to the mix.
 
 ## Firmware commands
 
@@ -178,8 +217,8 @@ The supply is measured only when the pins match the job's `vcc=` and
 
 The host first configures a job:
 
-- `set pins= base= inv= clk= cand= mask= count= mul= settle= off= on=
-  vcc= gnd= supply=`
+- `set pins= base= inv= clk= cand= mask= count= mul= rev= settle= off=
+  on= vcc= gnd= supply=`
 - `path`
 - `probe`
 - `ret <crc> <vectors>`
@@ -191,7 +230,11 @@ GND pin.
 
 It then runs one of:
 
-- `walk`: every vector of the enumerated pins.
+- `walk`: every vector of the enumerated pins. The i-th vector is
+  x = (i * `mul`) mod 2^n, with bit b of x driving the b-th enumerated pin
+  from the lowest socket pin up, or from the highest down with `rev=1`.
+  With probe vectors set, the signature of the state is reported before
+  and after the walk.
 - `trans`: the clock transitions from the path state.
 - `state`: the signature of the path state.
 
@@ -207,12 +250,13 @@ chunks. The header comment of `fw/capture.c` describes the format.
 | `galre.py` | Command line |
 | `analysis.py` | Discovery, exploration, equations, CUPL |
 | `rig.py` | `SimRig` (simulated chip), `BrutusRig` (board, jumper check), recording and replay, socket pin maps |
+| `fwsim.py`, `fwstub/` | `fw/capture.c` built for the host, with a simulated GAL in the socket |
 | `capture.py` | Serial transport and capture format |
 | `galsim.py` | Fuse-level GAL16V8/22V10 simulator |
 | `bitsim.py` | The same, evaluated for all input vectors at once |
 | `verify.py` | Rebuilt JED against the captures, and JED against JED |
 | `designs/` | Test designs (CUPL source and compiled JEDs) |
-| `tests/` | Test suite, including the host build of `fw/capture.c` |
+| `tests/` | Test suite |
 
 Run the tests from the repository root:
 

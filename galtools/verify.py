@@ -14,7 +14,8 @@ def check_captures(a, jed):
     rig = SimRig(jed)
     bad = []
     for s, (path, t) in a.states.items():
-        t2 = Table(a.V, *rig.walk(a.V, a.base, a.drives(path)), a.full, a.v1)
+        la, lb, _ = rig.walk(a.V, a.base, a.drives(path))
+        t2 = Table(a.V, la, lb, a.full, a.v1)
         for p in a.pins:
             if p == 1 and not a.clock_in_v:
                 continue

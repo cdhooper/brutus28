@@ -25,7 +25,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from analysis import Analysis                              # noqa: E402
+from analysis import Analysis, AsyncDesign                 # noqa: E402
 from capture import CaptureError, SerialTransport          # noqa: E402
 from rig import BrutusRig, RecordingRig, ReplayRig, SimRig  # noqa: E402
 import verify                                              # noqa: E402
@@ -159,6 +159,10 @@ def main(argv=None):
         a = Analysis(rig, device, fixed=fixed, survey=survey, log=log)
         try:
             a.run()
+        except AsyncDesign as e:
+            log("asynchronous behaviour: %s" % e)
+            log("galre models clocked designs only; no equations written.")
+            return 3
         finally:
             if isinstance(rig, RecordingRig):
                 rig.close()

@@ -19,11 +19,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
 sys.path.insert(0, HERE)
 
-import fwharness                                   # noqa: E402
+import fwsim                                       # noqa: E402
 import galre                                       # noqa: E402
 import verify                                      # noqa: E402
 from analysis import Analysis                      # noqa: E402
 from capture import CaptureError                   # noqa: E402
+from galsim import GAL                             # noqa: E402
 from rig import BrutusRig, RecordingRig, ReplayRig, SimRig  # noqa: E402
 
 DESIGNS = os.path.join(HERE, "..", "designs")
@@ -37,6 +38,17 @@ CASES = {
                  {6: 0, 7: 0, 8: 0, 9: 0, 10: 0, 11: 0, 15: 0, 16: 0, 17: 0, 18: 0}),
     "comb16v8": ("GAL16V8", 1, [], {4: 0, 5: 0, 6: 0, 7: 0, 8: 0, 9: 0, 11: 0,
                                     12: 0, 13: 0, 14: 0, 15: 0, 16: 0}),
+}
+
+# designs with state that changes without a clock -> (device, pins held,
+# what galre must say when it stops)
+ASYNC_CASES = {
+    "ar22v10": ("GAL22V10", "6-11=0,13-20=0",
+                "changed it to 000, the power-up state, as the GAL22V10's asynchronous "
+                "reset term does"),
+    "latch16v8": ("GAL16V8", "7-9=0,11-15=0,19=0",
+                  "pins 17, 18 read differently when the inputs are walked in descending "
+                  "order"),
 }
 
 
@@ -80,6 +92,13 @@ class SimulatedChip(unittest.TestCase):
                         self.assertEqual(t.value[p] & driven[p], level[p] & driven[p],
                                          "pin %d value" % p)
 
+    def test_async_parts(self):
+        found = {name: GAL(jed(name)).async_parts()
+                 for name in list(CASES) + list(ASYNC_CASES)}
+        self.assertEqual(found, {"cnt16v8": [], "fsm22v10": [], "comb16v8": [],
+                                 "ar22v10": ["an asynchronous reset term"],
+                                 "latch16v8": ["combinational feedback through pins 17, 18"]})
+
     def test_held_pin_driven_by_the_gal(self):
         with self.assertRaisesRegex(RuntimeError, "pin 19 is held"):
             Analysis(SimRig(jed("comb16v8")), "GAL16V8", fixed={19: 0}, log=quiet).run()
@@ -118,18 +137,14 @@ class Firmware(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         try:
-            cls.lib = fwharness.build()
+            cls.lib = fwsim.library()
         except subprocess.CalledProcessError as e:
             raise AssertionError("fw/capture.c does not build for the host: %s" % e)
         if not cls.lib:
             raise unittest.SkipTest("no C compiler")
 
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(os.path.dirname(cls.lib), ignore_errors=True)
-
     def transport(self, name, socket):
-        return fwharness.HarnessTransport(self.lib, fwharness.SocketDevice(jed(name), socket))
+        return fwsim.HarnessTransport(self.lib, fwsim.SocketDevice(jed(name), socket))
 
     def test_jumper_preflight(self):
         t = self.transport("cnt16v8", "dip20")
@@ -237,10 +252,94 @@ class Firmware(unittest.TestCase):
         finally:
             shutil.rmtree(out)
 
+    def test_async_designs_stop(self):
+        """galre sim and board stop with exit code 3 on a chip with state
+        that changes without a clock, and replay says the same."""
+        out = tempfile.mkdtemp(prefix="galre")
+
+        def galre_main(*argv):
+            with contextlib.redirect_stdout(io.StringIO()):
+                r = galre.main(list(argv) + ["--cupl", ""])
+            with open(os.path.join(argv[argv.index("-o") + 1], "report.txt")) as f:
+                return r, f.read()
+        try:
+            for name, (device, fix, says) in ASYNC_CASES.items():
+                with self.subTest(design=name):
+                    r, report = galre_main("sim", jed(name), "-o", os.path.join(out, "sim"),
+                                           "--fix", fix)
+                    self.assertEqual(r, 3)
+                    self.assertIn(says, report)
+                    self.assertIn("no equations written", report)
+                    dev = fwsim.SocketDevice(jed(name), "dip24" if device == "GAL22V10" else "dip20")
+                    board = os.path.join(out, "board")
+                    with mock.patch.object(galre, "SerialTransport",
+                                           lambda port: fwsim.HarnessTransport(self.lib, dev)):
+                        r, report = galre_main("board", "-p", "-", "-d", device, "-o", board,
+                                               "--fix", fix)
+                    self.assertEqual(r, 3)
+                    self.assertIn(says, report)
+                    r, report = galre_main("replay", os.path.join(board, "capture.jsonl"),
+                                           "-o", os.path.join(out, "replay"))
+                    self.assertEqual(r, 3)
+                    self.assertIn(says, report)
+        finally:
+            shutil.rmtree(out)
+
+    def test_walk_orders(self):
+        """Every walk order, with and without numpy, decodes to the counting
+        walk of a clocked design, and its signatures before and after
+        agree with the simulator's."""
+        t = self.transport("fsm22v10", "dip24")
+        rig = BrutusRig(t, "GAL22V10", log=quiet)
+        sim = SimRig(jed("fsm22v10"))
+        V = [2, 3, 4, 5, 13, 14, 20]
+        base = {6: 1, 9: 1, 15: 1}
+        path = [{2: 1}, {3: 1}]
+        probes, cand = [{4: 1}, {}], [21, 22, 23]
+        ref = sim.walk(V, base, path, probes=probes, cand=cand)
+        self.assertEqual(ref[2][0], ref[2][1])
+        for name, mul, rev in Analysis.ORDERS + (("scattered", 0x35, 0),):
+            for numpy in (True, False):
+                with self.subTest(order=name, numpy=numpy):
+                    with mock.patch.dict(sys.modules, {} if numpy else {"numpy": None}):
+                        got = rig.walk(V, base, path, mul=mul & 0x7f, rev=rev,
+                                       probes=probes, cand=cand)
+                    self.assertEqual(got, ref)
+
+    def test_walk_without_second_read(self):
+        """With every pin outside the enumeration held (as in the power-up
+        walk without --fix), there is nothing to invert and the firmware
+        reads each vector once."""
+        rig = BrutusRig(self.transport("fsm22v10", "dip24"), "GAL22V10", log=quiet)
+        sim = SimRig(jed("fsm22v10"))
+        V = [2, 3, 4, 13]
+        base = {p: 0 for p in rig.pins if p not in V and p != 1}
+        got = rig.walk(V, base, [])
+        self.assertEqual(got, sim.walk(V, base, []))
+        self.assertEqual(got[0], got[1])
+
+    def test_port_write_transients(self):
+        """A write that changes pins in more than one port group passes
+        through the value with only the first groups written."""
+        dev = fwsim.SocketDevice(jed("latch16v8"), "dip20")
+        seen = []
+        apply = dev._apply
+
+        def record(value):
+            seen.append(value)
+            return apply(value)
+        dev._apply = record
+        dev.power(1)
+        dev.io(0x1000001)               # socket pins 1 and 25
+        dev.io(0x1000001)
+        dev.io(0x0010000)               # pins 1 and 25 off, 17 on
+        self.assertEqual(seen, [0x0000001, 0x1000001, 0x1000001,
+                                0x1000000, 0x1010000, 0x0010000])
+
     def test_galre_board_and_replay(self):
         """galre board through the host-built firmware, then galre replay
         with nothing but the recording."""
-        dev = fwharness.SocketDevice(jed("comb16v8"), "dip20")
+        dev = fwsim.SocketDevice(jed("comb16v8"), "dip20")
         out = tempfile.mkdtemp(prefix="galre")
 
         def galre_main(*argv):
@@ -251,7 +350,7 @@ class Firmware(unittest.TestCase):
         try:
             board = os.path.join(out, "board")
             with mock.patch.object(galre, "SerialTransport",
-                                   lambda port: fwharness.HarnessTransport(self.lib, dev)):
+                                   lambda port: fwsim.HarnessTransport(self.lib, dev)):
                 dev.jumper_gnd = 1 << 11
                 r, report = galre_main("board", "-p", "-", "-d", "GAL16V8", "-o", board)
                 self.assertEqual(r, 2)

@@ -145,6 +145,56 @@ class GAL:
         assert r == 131
         self.clock_pin, self.oe_pin = 1, None
 
+    # -- structure ---------------------------------------------------------
+
+    def satisfiable(self, row):
+        """Whether product term `row` can be true (it has no column with
+        both its true and complement fuse connected)."""
+        m = self.rows[row]
+        if m is None:
+            return False
+        return all((m >> (2 * k)) & 3 != 3 for k in range(self.ncols // 2))
+
+    def _row_pins(self, row):
+        """Pins whose level product term `row` reads (not register feedback)."""
+        m = self.rows[row]
+        return {n for k, (kind, n) in enumerate(self.cols)
+                if (m >> (2 * k)) & 3 and not (kind == "fb" and self._olmc(n).registered)}
+
+    def async_parts(self):
+        """What can change the chip's state without a clock edge, as a list
+        of descriptions ([] for a purely clocked design): the 22V10's
+        asynchronous reset term, and combinational outputs fed back into
+        the array in a loop, which can hold a value (latches)."""
+        parts = []
+        if (self.ar_row is not None and self.satisfiable(self.ar_row)
+                and any(o.registered and any(self.satisfiable(r) for r in o.rows)
+                        for o in self.olmcs)):
+            parts.append("an asynchronous reset term")
+        comb = {o.pin: o for o in self.olmcs if o.mode == "comb"}
+        uses = {}
+        for p, o in comb.items():
+            rows = list(o.rows) + ([o.oe_row] if isinstance(o.oe_row, int) else [])
+            uses[p] = set()
+            for r in rows:
+                if self.satisfiable(r):
+                    uses[p] |= self._row_pins(r) & set(comb)
+        # pins on a loop: those that reach themselves through `uses`
+        loop = []
+        for p in sorted(comb):
+            seen, todo = set(), list(uses[p])
+            while todo:
+                q = todo.pop()
+                if q not in seen:
+                    seen.add(q)
+                    todo.extend(uses[q])
+            if p in seen:
+                loop.append(p)
+        if loop:
+            parts.append("combinational feedback through pin%s %s" % (
+                "s" if len(loop) > 1 else "", ", ".join(map(str, loop))))
+        return parts
+
     # -- simulation --------------------------------------------------------
 
     def power_up(self):
