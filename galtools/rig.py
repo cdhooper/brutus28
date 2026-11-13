@@ -9,7 +9,8 @@ a pin the GAL does not drive reads back its drive.
     walk(V, base, path)
         From the path state, for every assignment x of the enumerated pins V
         (bit b of x = pin V[b]; the other pins at base, pin 1 low) read every
-        pin, and again with every pin outside V except pin 1 inverted.
+        pin, and again with every pin outside V inverted, except pin 1 and
+        the pins given in base (held inputs keep their value).
         Returns (la, lb): pin -> bitset over x.
     transitions(V, base, path, probes, cand, count=None, mul=1, returns=())
         For each x (all, or (i * mul) mod 2^n for i < count): from the path
@@ -140,7 +141,8 @@ class SimRig:
         full, v1 = litmasks(n)
         ext = self._ext(V, base, full, v1)
         la, _, _, _ = self.bits.settle(self.q, ext, full)
-        ext_b = {p: (e if p in V or p == CLOCK else full ^ e) for p, e in ext.items()}
+        ext_b = {p: (e if p in V or p == CLOCK or p in base else full ^ e)
+                 for p, e in ext.items()}
         lb, _, _, _ = self.bits.settle(self.q, ext_b, full)
         self.ops["runs"] += 1
         self.ops["power_cycles"] += 1
@@ -373,15 +375,17 @@ class BrutusRig:
         return o
 
     def walk(self, V, base, path):
-        inv = self._mask([p for p in self.pins if p not in V and p != CLOCK])
+        inv = self._mask([p for p in self.pins if p not in V and p != CLOCK and p not in base])
         self._job(V, base, path, (), (), inv=inv)
         cap = self._run("walk")
         n = len(V)
-        if cap.count != 1 << n or len(cap.data) != 8 << n:
+        reads = 2 if inv else 1             # no second read when nothing is inverted
+        if cap.count != 1 << n or len(cap.data) != (4 * reads) << n:
             raise CaptureError("walk returned %d bytes for %d vectors" % (len(cap.data), cap.count))
-        self.ops["io"] += 2 * len(path) + (2 << n)
+        self.ops["io"] += 2 * len(path) + (reads << n)
         self.ops["clocks"] += len(path)
-        return self._bitsets(cap.data, 2, 0, n), self._bitsets(cap.data, 2, 1, n)
+        la = self._bitsets(cap.data, reads, 0, n)
+        return la, (self._bitsets(cap.data, 2, 1, n) if inv else dict(la))
 
     def transitions(self, V, base, path, probes, cand, count=None, mul=1, returns=()):
         n = len(V)

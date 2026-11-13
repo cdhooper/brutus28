@@ -94,7 +94,9 @@ Options:
 
 - `--fix 6-11=0,13=1` holds pins at fixed values and does not enumerate
   them, for pins known to be unused or tied. Each held pin halves the
-  enumeration.
+  enumeration. The recovered equations take the held values as given, so
+  they match the chip only with those pins at those values. galre stops if
+  the GAL drives a held pin.
 - `--survey N` sets how many sample inputs per state are clocked in before
   the full sweeps (default 64).
 - `--settle`, `--off` and `--on` set the firmware timing: µs after each

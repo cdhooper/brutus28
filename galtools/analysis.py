@@ -140,8 +140,14 @@ class Analysis:
         if self.clock_in_v not in self._power_up:
             self._power_up[self.clock_in_v] = Table(V0, *self.rig.walk(V0, self.base, []), full, v1)
         t = self._power_up[self.clock_in_v]
+        for p in sorted(self.fixed):
+            if t.value[p] != (full if self.fixed[p] else 0):
+                raise RuntimeError("pin %d is held at %d, but the GAL drives it; do not hold "
+                                   "it (--fix)" % (p, self.fixed[p]))
         self.comb0, self.cand = [], []
         for p in self.dev["io"]:
+            if p in self.fixed:
+                continue                      # held: an input at a known value
             d = t.driven[p]
             v = t.value[p] & d
             if (d and v not in (0, d)) or p in self.late_comb:
@@ -149,10 +155,10 @@ class Analysis:
             else:
                 self.cand.append(p)           # input, register or constant
         tri = [p for p in self.comb0 if full ^ t.driven[p] or self.late_comb.get(p)]
-        never = [p for p in self.cand if not t.driven[p] and p not in self.fixed]
+        never = [p for p in self.cand if not t.driven[p]]
         ded = [p for p in self.dev["ded"]
                if (p != CLOCK or self.clock_in_v) and p not in self.fixed]
-        self.V = sorted(ded + never + [p for p in tri if p not in self.fixed])
+        self.V = sorted(ded + never + tri)
         self.full, self.v1 = litmasks(len(self.V))
         self.log("power-up walk: combinational %s (tri-state %s), state candidates %s "
                  "(never driven %s)" % (self.comb0, tri, self.cand, never))

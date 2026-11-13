@@ -59,6 +59,31 @@ class SimulatedChip(unittest.TestCase):
                 self.assertEqual(sorted(a.reg), regs)
                 self.assertEqual(a.check_equations(), [])
 
+    def test_tables_match_chip(self):
+        """Every walk table the analysis keeps, against the simulator's own
+        levels and driven pins; also with held pins the design uses (pin 5
+        is B in fsm22v10, pin 2 is B in comb16v8)."""
+        cases = [(name, device, fixed) for name, (device, _, _, fixed) in CASES.items()]
+        cases += [("fsm22v10", "GAL22V10", {5: 1}), ("comb16v8", "GAL16V8", {2: 1, 9: 0})]
+        for name, device, fixed in cases:
+            with self.subTest(design=name, fixed=fixed):
+                a = Analysis(SimRig(jed(name)), device, fixed=fixed, log=quiet)
+                a.run()
+                self.assertEqual(a.check_equations(), [])
+                sim = SimRig(jed(name))
+                for path, t in a._walks.items():
+                    sim._replay(a.drives(path))
+                    ext = sim._ext(a.V, a.base, a.full, a.v1)
+                    level, driven, _, _ = sim.bits.settle(sim.q, ext, a.full)
+                    for p in a.comb + a.reg:
+                        self.assertEqual(t.driven[p], driven[p], "pin %d driven" % p)
+                        self.assertEqual(t.value[p] & driven[p], level[p] & driven[p],
+                                         "pin %d value" % p)
+
+    def test_held_pin_driven_by_the_gal(self):
+        with self.assertRaisesRegex(RuntimeError, "pin 19 is held"):
+            Analysis(SimRig(jed("comb16v8")), "GAL16V8", fixed={19: 0}, log=quiet).run()
+
     def test_return_paths_replace_power_cycles(self):
         rig = SimRig(jed("cnt16v8"))
         a = Analysis(rig, "GAL16V8", log=quiet)
@@ -254,6 +279,7 @@ class Firmware(unittest.TestCase):
 
     def test_commands(self):
         t = self.transport("cnt16v8", "dip20")
+        t.command("pld capture clear")          # the library is shared between tests
         self.assertEqual(t.command("pld capture set pins=3 base=0x8000000 settle=2"), "")
         self.assertIn("Invalid", t.command("pld capture set pins=xyz"))
         self.assertIn("Invalid", t.command("pld capture set foo=1"))
