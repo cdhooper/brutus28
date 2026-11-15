@@ -6,6 +6,8 @@ GAL22V10's asynchronous reset, and latches built from combinational
 feedback. It writes CUPL source and, when a CUPL compiler is available,
 builds a JED and checks it against every captured state and input vector.
 
+For a step-by-step guide, see [HOWTO_REVERSE.md](HOWTO_REVERSE.md).
+
 `pld walk` sees only the power-up state, so it cannot recover registered
 logic. galre also clocks the chip from state to state and walks each
 reachable state. The firmware side is the `pld capture` command
