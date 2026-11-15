@@ -48,9 +48,11 @@ DFU_UTIL=dfu-util
 ST_BUILD_DIR=stutils
 ST_TOOLS_PATH=$(ST_BUILD_DIR)/build/Release/bin
 
-NOW  := $(shell date)
-DATE := $(shell date -d '$(NOW)' '+%Y-%m-%d')
-TIME := $(shell date -d '$(NOW)' '+%H:%M:%S')
+# One reading of the clock, so date and time belong together.  Only
+# format options: date -d is GNU, and macOS's date doesn't have it.
+NOW  := $(shell date '+%Y-%m-%d %H:%M:%S')
+DATE := $(word 1,$(NOW))
+TIME := $(word 2,$(NOW))
 
 ## Boilerplate
 
