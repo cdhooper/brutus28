@@ -1,0 +1,29 @@
+Name     ar22v10;
+Partno   x;
+Date     2026-11-12;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g22v10;
+
+/* Test design: GAL22V10, 2-bit counter with an asynchronous reset term */
+
+Pin 1  = CLK;
+Pin 2  = EN;
+Pin 3  = RST;
+Pin 4  = HOLD;
+Pin 5  = A;
+Pin 21 = Y;
+Pin 22 = Q1;
+Pin 23 = Q0;
+
+Q0.d = EN & !Q0
+     # !EN & Q0;
+Q1.d = EN & Q0 & !Q1
+     # EN & !Q0 & Q1
+     # !EN & Q1;
+Q0.ar = RST & !HOLD;
+Q1.ar = RST & !HOLD;
+Y = A & Q1;

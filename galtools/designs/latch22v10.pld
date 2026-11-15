@@ -1,0 +1,32 @@
+Name     latch22v10;
+Partno   x;
+Date     2026-11-12;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g22v10;
+
+/* Test design: GAL22V10, latches that feed each other, so that one input
+   change can flip all three in turn (Y, then Z, then W) */
+
+Pin 2  = A;
+Pin 3  = B;
+Pin 4  = C;
+Pin 5  = RST;
+Pin 6  = E;
+Pin 20 = O;
+Pin 21 = W;    /* transparent latch of Z, open while E is high */
+Pin 22 = Z;    /* set by Y & C, reset by RST; set wins */
+Pin 23 = Y;    /* Muller C-element of A and B */
+
+Y = A & B
+  # A & Y
+  # B & Y;
+Z = Y & C
+  # Z & !RST;
+W = E & Z
+  # !E & W
+  # Z & W;
+O = Y & !Z;

@@ -1,0 +1,24 @@
+Name     reglatch16v8;
+Partno   x;
+Date     2026-11-12;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g16v8;
+
+/* Test design: GAL16V8, a register and a latch together, which galre does
+   not model */
+
+Pin 1  = CLK;
+Pin 2  = S;
+Pin 3  = R;
+Pin 4  = D;
+Pin 11 = !OE;
+Pin 17 = L;
+Pin 18 = Q;
+
+Q.d = D;
+L = S & !R
+  # L & !R;

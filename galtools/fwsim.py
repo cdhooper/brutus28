@@ -1,10 +1,14 @@
 """Run the real firmware capture engine (fw/capture.c) on the host.
 
-build() compiles fw/capture.c with stand-in headers and harness.c into a
-shared library; HarnessTransport then answers "pld capture" commands like
-the Brutus-28 console, with a galsim GAL in the socket.
+build() compiles fw/capture.c with stand-in headers and fwstub/harness.c
+into a shared library; HarnessTransport then answers "pld capture"
+commands like the Brutus-28 console, with a galsim GAL in the socket.
+SimRig uses this for designs with asynchronous parts, whose results depend
+on the exact order of the firmware's writes; the tests use it to check the
+firmware itself.
 """
 
+import atexit
 import ctypes
 import os
 import shutil
@@ -16,7 +20,15 @@ from galsim import GAL
 from rig import SOCKETS
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-FW = os.path.join(HERE, "..", "..", "fw")
+FW = os.path.join(HERE, "..", "fw")
+
+# The firmware drives the socket pins with three port writes (pldd_output
+# in fw/pld.c): socket pins 1-16, then 17-24, then 25-28.  In between, the
+# chip sees the new value on the pins written so far and the old value on
+# the rest, for a few tens of ns: long enough for a GAL.  Clocked logic
+# does not care (clock edges are writes of their own), but a latch or the
+# 22V10's asynchronous reset can.
+PORT_GROUPS = (0x000ffff, 0x0ff0000, 0xf000000)      # CAP_PORT_GROUPS in fw/capture.h
 
 
 def build(cc=None):
@@ -35,6 +47,20 @@ def build(cc=None):
                     "-Wno-unused-parameter", "-o", lib, "capture.c", "harness.c"],
                    cwd=d, check=True)
     return lib
+
+
+_library = []
+
+
+def library():
+    """The harness, built once per process and removed at exit; None
+    without a C compiler."""
+    if not _library:
+        lib = build()
+        if lib:
+            atexit.register(shutil.rmtree, os.path.dirname(lib), True)
+        _library.append(lib)
+    return _library[0]
 
 
 class SocketDevice:
@@ -56,6 +82,8 @@ class SocketDevice:
         self.supply_measured = 0     # times the supply was switched on to measure it
         self.io_count = 0
         self.writes = []             # every value written while powered
+        self.transients = True       # model the port writes (PORT_GROUPS)
+        self.last = 0                # the socket drive the chip sees
 
     def jumper_pins(self):
         if not self.jumpers_ok:
@@ -72,14 +100,21 @@ class SocketDevice:
             self.power_ons += 1
             self.g.power_up()
             self.g.settle({p: 0 for p in self.pins})   # drivers come up low
+            self.last = 0
 
     def io(self, value):
         self.io_count += 1
         if not self.powered:
             return 0
         self.writes.append(value)
-        ext = {p: 1 if value & self.sbit[p] else 0 for p in self.pins}
-        levels, _ = self.g.apply(ext)
+        if self.transients:
+            done = 0
+            for g in PORT_GROUPS[:-1]:
+                done |= g
+                mid = (value & done) | (self.last & ~done)
+                if mid != self.last and mid != value:
+                    self._apply(mid)
+        levels = self._apply(value)
         out = self.vcc_bit
         for p in self.pins:
             if levels[p]:
@@ -87,7 +122,16 @@ class SocketDevice:
         return out
 
 
+    def _apply(self, value):
+        self.last = value
+        levels, _ = self.g.apply({p: 1 if value & self.sbit[p] else 0 for p in self.pins})
+        return levels
+
+
 class HarnessTransport:
+    """The harness library is shared by every transport in the process, so
+    each run registers this transport's callbacks first."""
+
     def __init__(self, lib, device):
         self.lib = ctypes.CDLL(lib)
         self.dev = device
@@ -100,7 +144,6 @@ class HarnessTransport:
         self._pwr = PWR(lambda on: device.power(on))
         self._pins = PINS(self._jumper_pins)
         self._supply = SUPPLY(self._measure_supply)
-        self.lib.harness_init(self._io, self._pwr, self._pins, self._supply)
         self.lib.harness_run.restype = ctypes.c_size_t
         self.lib.harness_run.argtypes = [ctypes.c_char_p]
         self.lib.harness_output.restype = ctypes.POINTER(ctypes.c_ubyte)
@@ -117,6 +160,7 @@ class HarnessTransport:
         return 0
 
     def _run(self, line):
+        self.lib.harness_init(self._io, self._pwr, self._pins, self._supply)
         n = self.lib.harness_run(line.encode())
         return bytes(ctypes.cast(self.lib.harness_output(),
                                  ctypes.POINTER(ctypes.c_ubyte * n)).contents) if n else b""

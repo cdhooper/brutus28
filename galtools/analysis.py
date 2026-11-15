@@ -24,12 +24,43 @@
 Pin 1 is held low except for clock edges.  If clocking never changes the
 state, the design is taken as combinational and pin 1 is enumerated too.
 Limits: a combinational dependence on pin 1 of a registered 22V10 is not
-captured; registers that never reach a pin are not seen; asynchronous
-reset terms and latches built from feedback disturb the walks.
+captured; registers that never reach a pin are not seen.
+
+A chip that changes state without a clock is detected: the power-up walk
+is repeated in other orders (Analysis.ORDERS), and must read the same;
+every other state's walk must leave the state as it found it; and in the
+transition sweeps, reading the new state must not change it (the
+firmware reads the clocked vector before and after the probes).  The
+GAL22V10's asynchronous reset term, which clears every register, shows as
+a return to the power-up state.  It is learned (_learn_ar) and explored
+around: every write avoids its inputs, probes lie outside them, and the
+states where it can fire are walked without them.  Anything else that
+changes state without a clock (latches built from combinational feedback)
+stops the analysis with AsyncDesign.  A latch that only acts in states
+other than power-up is not seen by the first check, and the others see
+only the state candidates.
 """
 
+from functools import reduce
+
 from bitsim import litmasks
-from rig import CLOCK, MAX_PATH, MAX_PROBES, MAX_RET, MAX_RET_LEN, popcount, survey_mul
+from rig import (CLOCK, MAX_CAND, MAX_PATH, MAX_PROBES, MAX_RET, MAX_RET_LEN, cube_set,
+                 popcount, survey_mul)
+
+
+class AsyncDesign(Exception):
+    """The chip changes state without a clock edge in a way the analysis
+    does not model."""
+
+
+class LatchSuspected(AsyncDesign):
+    """The power-up walk depends on its order, as latches built from
+    combinational feedback make it (latch.LatchAnalysis takes over)."""
+
+
+class _Restart(Exception):
+    """Explore again from scratch (the asynchronous reset term is known now)."""
+
 
 DEV = {
     "GAL16V8": {"ded": [1, 2, 3, 4, 5, 6, 7, 8, 9, 11], "io": list(range(12, 20)),
@@ -105,19 +136,38 @@ def lowest(xs):
     return (xs & -xs).bit_length() - 1
 
 
-class Table:
-    """One state's exhaustive walk: per pin, driven and value bitsets."""
+def _pins(ps):
+    return "pin%s %s" % ("s" if len(ps) > 1 else "", ", ".join(map(str, ps)))
 
-    def __init__(self, V, la, lb, full, v1):
-        self.driven, self.value = {}, {}
+
+def _state(s):
+    return "".join(map(str, s))
+
+
+def _cube(c, name):
+    return " & ".join(("" if v else "!") + name(p) for p, v in sorted(c.items()))
+
+
+class Table:
+    """One state's exhaustive walk: per pin, driven and value bitsets over
+    the x in care[p].  A walk that skipped the x outside `care` knows
+    nothing there, and an enumerated pin's drive is told from the read
+    of its neighbour x ^ bit, so it needs both."""
+
+    def __init__(self, V, la, lb, full, v1, care=None):
+        care = full if care is None else care
+        self.driven, self.value, self.care = {}, {}, {}
         for p in la:
             if p in V:
                 b = V.index(p)
+                c = care & swap(care, b, v1) & full
                 sw = swap(la[p], b, v1) & full
-                self.driven[p] = full ^ (la[p] ^ sw)
+                self.driven[p] = (full ^ (la[p] ^ sw)) & c
             else:
-                self.driven[p] = full ^ (la[p] ^ lb[p])
-            self.value[p] = la[p]
+                c = care
+                self.driven[p] = (full ^ (la[p] ^ lb[p])) & c
+            self.value[p] = la[p] & c
+            self.care[p] = c
 
 
 class Analysis:
@@ -131,6 +181,11 @@ class Analysis:
         self.clock_in_v = CLOCK in self.fixed
         self.late_comb = {}       # pin -> enumerate it (tri-state)
         self._power_up = {}
+        self.ar = None            # the asynchronous reset term's inputs, pin -> value
+        self.ar_set = 0           # the x in it
+        self.ar_on = set()        # states in which it fires
+        self.ar_regs = {}         # its register literals, register pin -> value
+        self.ar_dc = set()
 
     # 1. discovery -----------------------------------------------------------
     def discover(self):
@@ -138,10 +193,19 @@ class Analysis:
               if (p != CLOCK or self.clock_in_v) and p not in self.fixed]
         full, v1 = litmasks(len(V0))
         if self.clock_in_v not in self._power_up:
-            self._power_up[self.clock_in_v] = Table(V0, *self.rig.walk(V0, self.base, []), full, v1)
+            la, lb, _ = self.rig.walk(V0, self.base, [])
+            self.walk0 = V0, la
+            self._check_order(V0, la, lb)
+            self._power_up[self.clock_in_v] = Table(V0, la, lb, full, v1)
         t = self._power_up[self.clock_in_v]
+        for p in sorted(self.fixed):
+            if t.value[p] != (full if self.fixed[p] else 0):
+                raise RuntimeError("pin %d is held at %d, but the GAL drives it; do not hold "
+                                   "it (--fix)" % (p, self.fixed[p]))
         self.comb0, self.cand = [], []
         for p in self.dev["io"]:
+            if p in self.fixed:
+                continue                      # held: an input at a known value
             d = t.driven[p]
             v = t.value[p] & d
             if (d and v not in (0, d)) or p in self.late_comb:
@@ -149,17 +213,165 @@ class Analysis:
             else:
                 self.cand.append(p)           # input, register or constant
         tri = [p for p in self.comb0 if full ^ t.driven[p] or self.late_comb.get(p)]
-        never = [p for p in self.cand if not t.driven[p] and p not in self.fixed]
+        never = [p for p in self.cand if not t.driven[p]]
         ded = [p for p in self.dev["ded"]
                if (p != CLOCK or self.clock_in_v) and p not in self.fixed]
-        self.V = sorted(ded + never + [p for p in tri if p not in self.fixed])
+        self.V = sorted(ded + never + tri)
         self.full, self.v1 = litmasks(len(self.V))
+        if self.ar:
+            if any(p not in self.V for p in self.ar):
+                raise AsyncDesign("the asynchronous reset term reads pins that are no longer "
+                                  "enumerated")
+            self.ar_set = cube_set(self.ar, self.V, self.base, self.full, self.v1)
         self.log("power-up walk: combinational %s (tri-state %s), state candidates %s "
                  "(never driven %s)" % (self.comb0, tri, self.cand, never))
         self.log("enumerated pins (%d): %s%s" % (
             len(self.V), self.V,
             ", fixed %s" % self.fixed if self.fixed else ""))
         self.probe_x = []
+
+    # Walk orders that make a latch see its inputs change in another order
+    # than counting does: descending, bit-reversed (the pin that changed
+    # fastest changes slowest) and both.  Tried on set/reset and transparent
+    # latches with their inputs on every pair of pins, and on set-only bits,
+    # together they show every latch that can leave its power-up value;
+    # no two of them do.
+    ORDERS = (("descending", -1, 0), ("bit-reversed", 1, 1), ("bit-reversed descending", -1, 1))
+
+    def _check_order(self, V, la, lb):
+        """Walk the power-up state again in other orders.  A clocked chip
+        reads the same, whatever the order.  If it does not, another walk
+        in counting order tells state that changes without a clock from
+        readings that do not repeat."""
+        n = len(V)
+        if n < 2:
+            return
+        for name, mul, rev in self.ORDERS:
+            la2, lb2, _ = self.rig.walk(V, self.base, [], mul=mul & ((1 << n) - 1), rev=rev)
+            diff = {p: (la[p] ^ la2[p]) | (lb[p] ^ lb2[p]) for p in la}
+            diff = {p: d for p, d in diff.items() if d}
+            if diff:
+                break
+        else:
+            return
+        la3, lb3, _ = self.rig.walk(V, self.base, [])
+        unsteady = sorted(p for p in la if (la[p] ^ la3[p]) | (lb[p] ^ lb3[p]))
+        if unsteady:
+            raise AsyncDesign("the same walk read differently twice on %s: a bad contact, "
+                              "a floating pin or an oscillating output" % _pins(unsteady))
+        xs = reduce(lambda a, b: a | b, diff.values())
+        x = lowest(xs)
+        raise LatchSuspected(
+            "%s read differently when the inputs are walked in %s order (%d of %d "
+            "input vectors, the first %s): the chip holds state without a clock, like a "
+            "latch built from combinational feedback" % (
+                _pins(sorted(diff)), name, popcount(xs), 1 << n,
+                " ".join("P%d=%d" % (p, x >> i & 1) for i, p in enumerate(V))))
+
+    def _disturbed(self, path, sigs, around=False):
+        before, after = (self._sig_obs(o) for o in sigs)
+        if (not around and self.ar is None and self.device == "GAL22V10"
+                and after == self.power_up_state):
+            self._learn_ar(path)
+        raise AsyncDesign(
+            "walking the inputs in state %s (%d clocks from power-up)%s changed it to %s: the "
+            "chip changes state without a clock%s" % (
+                _state(before), len(path),
+                " around the asynchronous reset term" if around else "", _state(after),
+                " in another way too" if self.ar else ""))
+
+    def _flagged(self, path, x):
+        """Reading the state that clocking x in from the path state leads
+        to changed it."""
+        if self.ar is None and self.device == "GAL22V10" and len(path) < MAX_PATH:
+            self._learn_ar(path + (x,))
+        raise AsyncDesign(
+            "reading the state %d clocks from power-up (the last with %s) changed it: the chip "
+            "changes state without a clock" % (len(path) + 1, self._inputs(x)))
+
+    def _inputs(self, x):
+        return " ".join("P%d=%d" % (p, x >> i & 1) for i, p in enumerate(self.V))
+
+    def _gray_last(self, sets, x1):
+        """For each bitset, the x in it that a Gray code walk from x1
+        reaches last (None if it is empty)."""
+        N = 1 << len(self.V)
+        bs = [b.to_bytes((N + 7) // 8, "little") for b in sets]
+        out = [None] * len(sets)
+        todo = [k for k, b in enumerate(sets) if b]
+        for i in range(N - 1, -1, -1):
+            if not todo:
+                break
+            x = i ^ (i >> 1) ^ x1
+            for k in list(todo):
+                if bs[k][x >> 3] >> (x & 7) & 1:
+                    out[k] = x
+                    todo.remove(k)
+        return out
+
+    def _learn_ar(self, path):
+        """The state at the end of path returns to the power-up state
+        without a clock: find the inputs of the asynchronous reset term,
+        then explore again around them.  The reset clears every register,
+        so it shows only in other states, and it is a product term: it
+        fires in a state for the x in a cube C (the same in every state in
+        which it fires, from its register literals).
+
+        1. Walk the state in Gray code order from the last vector of the
+           path, so one pin changes per write and no momentary mix of pin
+           values can fire the term.  The reads differ from the power-up
+           walk up to the reset, and agree after it.  The last vector
+           that reads differently on an output, d, tells the state from
+           the power-up state.
+        2. For each enumerated pin p and value v: walk the state again,
+           skipping and avoiding the x with p = v, then read d.  The state
+           survives exactly when C lies within p = v: p = v is a literal
+           of C."""
+        V, n = self.V, len(self.V)
+        drives = self.drives(path)
+        x1 = path[-1]
+        what = "the state %d clocks from power-up (the last with %s)" % (len(path),
+                                                                          self._inputs(x1))
+        la, lb, _ = self.rig.walk(V, self.base, drives, gray=1, start=x1)
+        la0, lb0 = self._raw0
+        diff = out = 0
+        for p in la:
+            diff |= (la[p] ^ la0[p]) | (lb[p] ^ lb0[p])
+            if p not in V and p != CLOCK:
+                out |= la[p] ^ la0[p]
+        last, d = self._gray_last([diff, out], x1)
+        if last is None:
+            raise AsyncDesign("%s changed without a clock, but walked in Gray code order it reads "
+                              "like the power-up state throughout: the chip changes state "
+                              "without a clock in a way galre does not model" % what)
+        if last == (1 << (n - 1)) ^ x1:          # the walk's last vector
+            raise AsyncDesign("%s changed without a clock, but a walk in Gray code order (one "
+                              "pin changing at a time) leaves it alone: the chip changes state "
+                              "without a clock in a way galre does not model" % what)
+        if d is None:
+            raise AsyncDesign("%s returns to the power-up state without a clock, but no output "
+                              "tells the two states apart" % what)
+        dpins = [p for p in sorted(la) if p not in V and p != CLOCK
+                 and (la[p] ^ la0[p]) >> d & 1][:MAX_CAND]
+        want = tuple(la[p] >> d & 1 for p in dpins)
+        probe = [self._drive(d)]
+        lits = {}
+        for b, p in enumerate(V):
+            for v in (1 ^ x1 >> b & 1, x1 >> b & 1):
+                k = {p: v}
+                _, _, sigs = self.rig.walk(V, self.base, drives, gray=1, start=x1, skip=k,
+                                           avoid=k, probes=probe, cand=dpins, data=False)
+                if tuple(a for a, _ in sigs[1][0]) == want:
+                    lits[p] = v
+                    break
+        cset = cube_set(lits, V, self.base, self.full, self.v1)
+        if not lits or (cset >> x1 | cset >> d) & 1:
+            raise AsyncDesign("%s returns to the power-up state without a clock, but not for "
+                              "the inputs of one product term" % what)
+        self.ar = lits
+        self.log("asynchronous reset: %s returns to the power-up state when %s; exploring "
+                 "again around it" % (what, _cube(lits, self.name)))
+        raise _Restart()
 
     def _drive(self, x):
         d = dict(self.base)
@@ -174,10 +386,11 @@ class Analysis:
         return [self._drive(x) for x in self.probe_x]
 
     def _add_probes(self, t):
-        """An enabling input vector for every candidate the table drives."""
+        """An enabling input vector for every candidate the table drives,
+        outside the asynchronous reset term."""
         added = False
         for r in self.cand:
-            d = t.driven[r]
+            d = t.driven[r] & ~self.ar_set
             if d and not any(d >> x & 1 for x in self.probe_x):
                 if len(self.probe_x) == MAX_PROBES:
                     raise RuntimeError("more than %d probe vectors needed" % MAX_PROBES)
@@ -210,11 +423,31 @@ class Analysis:
         return tuple(sig)
 
     def _walk(self, path):
+        """The state's table.  Where the asynchronous reset term fires (the
+        walk returns to the power-up state), the state is walked again
+        without its inputs."""
         if path not in self._walks:
             if len(path) > MAX_PATH:
                 raise RuntimeError("state needs a path of %d clocks" % len(path))
-            la, lb = self.rig.walk(self.V, self.base, self.drives(path))
-            self._walks[path] = Table(self.V, la, lb, self.full, self.v1)
+            care = None
+            if path and self.probe_x:
+                drives = self.drives(path)
+                la, lb, sigs = self.rig.walk(self.V, self.base, drives, probes=self.probes(),
+                                             cand=self.cand, avoid=self.ar)
+                if sigs[0] != sigs[1]:
+                    if not self.ar or self._sig_obs(sigs[1]) != self.power_up_state:
+                        self._disturbed(path, sigs)
+                    la, lb, sigs = self.rig.walk(self.V, self.base, drives, probes=self.probes(),
+                                                 cand=self.cand, skip=self.ar, avoid=self.ar)
+                    if sigs[0] != sigs[1]:
+                        self._disturbed(path, sigs, around=True)
+                    care = self.full ^ self.ar_set
+                    self.ar_paths.add(path)
+            else:
+                la, lb, _ = self.rig.walk(self.V, self.base, self.drives(path))
+                if not path:
+                    self._raw0 = la, lb
+            self._walks[path] = Table(self.V, la, lb, self.full, self.v1, care)
         return self._walks[path]
 
     def _returns(self, s):
@@ -252,10 +485,12 @@ class Analysis:
         n = len(self.V)
         if count is not None and count >= 1 << n:
             count = None
-        obs = self.rig.transitions(self.V, self.base, self.drives(path), self.probes(),
-                                   self.cand, count=count,
-                                   mul=1 if count is None else survey_mul(n),
-                                   returns=self._returns(s))
+        obs, flags = self.rig.transitions(self.V, self.base, self.drives(path), self.probes(),
+                                          self.cand, count=count,
+                                          mul=1 if count is None else survey_mul(n),
+                                          returns=self._returns(s), avoid=self.ar, chk=True)
+        if flags:
+            self._flagged(path, flags[0])
         m = self.edges.setdefault(s, {})
         if count is None:
             self.trans[s] = {}
@@ -290,6 +525,7 @@ class Analysis:
 
     def _explore_once(self):
         self._walks = {}
+        self.ar_paths = set()
         t0 = self._walk(())
         self._add_probes(t0)
         s0 = self._sig_table(t0)
@@ -319,7 +555,12 @@ class Analysis:
     def explore(self, max_rounds=24):
         for rnd in range(max_rounds):
             self.rediscover = False
-            if self._explore_once():
+            try:
+                done = self._explore_once()
+            except _Restart:
+                self.discover()           # new probes, outside the reset term
+                continue
+            if done:
                 break
             if self.rediscover:
                 self.discover()
@@ -339,6 +580,9 @@ class Analysis:
                 self.comb.append(r)       # constant or input-dependent
         self.log("%d states reachable from power-up; inputs %s, registered %s, "
                  "combinational %s" % (len(self.states), self.inputs, self.reg, self.comb))
+        self.ar_on = {s for s, (path, _) in self.states.items() if path in self.ar_paths}
+        if self.ar:
+            self.log("the asynchronous reset term fires in %d of them" % len(self.ar_on))
 
     def run(self):
         """discover + explore + assign + equations; treats pin 1 as an input
@@ -389,7 +633,7 @@ class Analysis:
             for s, (_, t) in self.states.items():
                 d = t.driven[p]
                 val[s] = (t.value[p] & d, (self.full ^ t.value[p]) & d)
-                oe[s] = (d, self.full ^ d)
+                oe[s] = (d, t.care[p] ^ d)
             F[(p, "")] = val
             if any(o[1] for o in oe.values()):
                 F[(p, "oe")] = oe
@@ -402,13 +646,18 @@ class Analysis:
                         on |= xs
                     else:
                         off |= xs
+                if s in self.ar_dc:
+                    # the reset clears the registers first: the edge loads
+                    # from the power-up state, whatever the state's inputs
+                    on &= ~self.ar_set
+                    off &= ~self.ar_set
                 dd[s] = (on, off)
             F[(r, "d")] = dd
             if self.device == "GAL22V10":
                 oe = {}
                 for s, (_, t) in self.states.items():
                     d = t.driven[r]
-                    oe[s] = (d, self.full ^ d)
+                    oe[s] = (d, t.care[r] ^ d)
                 if any(o[1] for o in oe.values()):
                     F[(r, "oe")] = oe
         return F
@@ -468,6 +717,13 @@ class Analysis:
 
     def equations(self):
         """[(pin, kind, inverted, expression, cubes)]"""
+        self.ar_dc = set()          # states whose next state the reset term decides in C
+        if self.ar:
+            self._ar_term()
+            s0 = self.power_up_state
+            self.ar_dc = set(self.ar_on)
+            if all(self.W[s0][sorted(self.reg).index(r)] == v for r, v in self.ar_regs.items()):
+                self.ar_dc.add(s0)
         F = self.functions()
         regs = sorted(self.reg)
         names = [self.name(p) for p in self.V] + [self.name(r) for r in regs]
@@ -486,7 +742,12 @@ class Analysis:
             k = len(sup)
             pos = sop(on, off, k)
             neg = sop(off, on, k)
-            inv = len(neg) < len(pos)
+            if kind == "d" and self.device == "GAL22V10":
+                # a cleared register (power-up, reset term) shows the output
+                # polarity on the pin: CUPL makes a negated .d active low
+                inv = bool(self.W[self.power_up_state][regs.index(p)])
+            else:
+                inv = len(neg) < len(pos)
             cubes = neg if inv else pos
             self.cover[(p, kind)] = (sup, cubes, inv)
 
@@ -499,6 +760,44 @@ class Analysis:
             eqs.append((p, kind, inv, expr, len(cubes)))
         self.eqs = sorted(eqs)
         return self.eqs
+
+    def _ar_term(self):
+        """The register literals of the asynchronous reset term: true in the
+        states in which it fires, false in the others.  In the power-up
+        state, which it cannot change, it must be false if clocking in one
+        of its x leaves that state."""
+        regs = sorted(self.reg)
+        s0 = self.power_up_state
+        on = [self.W[s] for s in self.ar_on]
+        if not on:
+            raise AsyncDesign("the asynchronous reset term fired once, but in no state "
+                              "explored since")
+        off = [self.W[s] for s in self.states if s not in self.ar_on and s != s0]
+        if any(xs & self.ar_set for s2, xs in self.trans.get(s0, {}).items() if s2 != s0):
+            off.append(self.W[s0])
+
+        def covers(lits, w):
+            return all(w[i] == v for i, v in lits.items())
+        lits = {i: on[0][i] for i in range(len(regs)) if all(w[i] == on[0][i] for w in on)}
+        if any(covers(lits, w) for w in off):
+            raise AsyncDesign("the asynchronous reset term fires in states %s, but not in %s: "
+                              "not one product term of the inputs and registers" % (
+                                  ", ".join(_state(s) for s in sorted(self.ar_on, key=str)),
+                                  ", ".join(_state(s) for s in self.states
+                                            if s not in self.ar_on and s != s0)))
+        for i in sorted(lits):
+            fewer = {j: v for j, v in lits.items() if j != i}
+            if not any(covers(fewer, w) for w in off):
+                lits = fewer
+        self.ar_regs = {regs[i]: v for i, v in lits.items()}
+
+    def ar_expr(self):
+        """The asynchronous reset term in CUPL, or None."""
+        if not self.ar:
+            return None
+        c = dict(self.ar)
+        c.update(self.ar_regs)
+        return _cube(c, self.name)
 
     def check_equations(self):
         """Every function's cover against its captured on/off sets; a list
@@ -547,4 +846,8 @@ class Analysis:
                 lines.append("%s = !(%s);" % (lhs, expr))
             else:
                 lines.append("%s%s = %s;" % ("!" if inv else "", lhs, expr))
+        if self.ar:
+            # one product term in the GAL22V10, shared by every register
+            for r in regs:
+                lines.append("%s.ar = %s;" % (self.name(r), self.ar_expr()))
         return "\n".join(lines) + "\n"
