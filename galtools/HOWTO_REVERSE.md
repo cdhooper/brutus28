@@ -1,6 +1,6 @@
 # How to reverse engineer a GAL with Brutus-28
 
-This guide takes you from a GAL16V8 or GAL22V10 pulled from a board to CUPL
+This guide takes you from a GAL16V8, GAL20V8 or GAL22V10 pulled from a board to CUPL
 source and a JED that behaves the same. `galre.py` treats the chip as a
 black box: it drives the pins, clocks the chip from state to state and
 reads what comes back. It never reads the fuses, so a read-protected chip
@@ -76,8 +76,9 @@ Set the jumpers:
 | Chip | VCC jumper | GND jumper | galre option |
 |---|---|---|---|
 | GAL16V8 (DIP20) | socket pin 28 | socket pin 10 | `-d GAL16V8` |
+| GAL20V8 (DIP24) | socket pin 28 | socket pin 12 | `-d GAL20V8` |
 | GAL22V10 (DIP24) | socket pin 28 | socket pin 12 | `-d GAL22V10` |
-| GAL22V10 (PLCC28, in the PLCC socket) | socket pin 28 | socket pin 14 | `-d GAL22V10 -s plcc28` |
+| GAL20V8 or GAL22V10 (PLCC28, in the PLCC socket) | socket pin 28 | socket pin 14 | `-d GAL20V8 -s plcc28`, `-d GAL22V10 -s plcc28` |
 
 Set the supply jumper to 5 V.
 
@@ -342,6 +343,9 @@ designs in `designs/`, with the pins the tests hold:
 | `cnt16v8` | 2-bit counter | |
 | `fsm22v10` | 3-state machine, output enables | |
 | `comb16v8` | combinational only | |
+| `cnt20v8` | GAL20V8, registered mode: counter, pin 13 as the registers' enable | |
+| `comb20v8` | GAL20V8, complex mode: an output that reads another output's pin | |
+| `simple20v8` | GAL20V8, simple mode | |
 | `ar22v10` | asynchronous reset term `P3 & !P4` | `6-11=0,13-20=0` |
 | `arlow22v10` | active-low reset input and register outputs | `4=0,6-11=0,13-20=0` |
 | `arw22v10` | reset term that reads a register | `4=0,6-11=0,13-20=0` |

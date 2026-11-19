@@ -1,0 +1,37 @@
+Name     cnt20v8;
+Partno   x;
+Date     2026-11-19;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g20v8ms;
+
+/* Test design: GAL20V8 in registered mode: a 2-bit counter with enable,
+   a combinational output with a product term enable that reads a
+   register, and one that reads pins 14 and 23 */
+
+Pin 1  = CLK;
+Pin 2  = EN;
+Pin 3  = A;
+Pin 4  = B;
+Pin 13 = !OE;
+Pin 14 = C;
+Pin 23 = D;
+Pin 19 = Y;
+Pin 20 = Z;
+Pin 21 = Q1;
+Pin 22 = Q0;
+
+Q0.d = EN & !Q0
+     # !EN & Q0;
+Q1.d = EN & Q0 & !Q1
+     # EN & !Q0 & Q1
+     # !EN & Q1;
+Y = A & Q1
+  # B & !Q0;
+Y.oe = A # !A;
+Z = C & !D
+  # !C & D;
+Z.oe = B;

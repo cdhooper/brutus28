@@ -1,6 +1,6 @@
 # galtools: black-box GAL reverse engineering with Brutus-28
 
-`galre.py` recovers the logic of a GAL16V8 or GAL22V10 from what Brutus-28
+`galre.py` recovers the logic of a GAL16V8, GAL20V8 or GAL22V10 from what Brutus-28
 can observe at the socket: combinational and registered designs, the
 GAL22V10's asynchronous reset, and latches built from combinational
 feedback, also inside a registered design. It writes CUPL source and, when a CUPL compiler is available,
@@ -204,6 +204,22 @@ turn these off.
    galre finds the support from single-variable flips and minimises it with
    a greedy two-level minimiser, on both polarities. The minimiser is the
    one from the MACH111 tester's mtest. galre then writes CUPL.
+
+   A function that needs more product terms over the inputs and registers
+   than its macrocell has (7 with an enable or 8 on a GAL16V8 and GAL20V8,
+   8 to 16 on a GAL22V10) was built with another output's pin in the
+   original: a parity of a parity, a comparison that feeds a decoder.
+   galre writes such a function again over the inputs, the registers and
+   the pins of the other outputs, and takes that if it has fewer terms
+   (`!P15 = !P18 & !P19 & !P21 # ...`, four terms where pin 21 is a sum
+   of four itself; ten over the inputs). Only outputs that are always
+   driven and written over the inputs themselves are read, so nothing
+   reads in a loop, and on a GAL16V8 and GAL20V8 without registers only
+   the six middle output pins, the ones that feed back in complex mode.
+
+   A register whose output is not enabled in some states, whatever the
+   inputs, does not show there. If nothing seen depends on it there, it
+   is taken as cleared, and its `.d` says so.
 
    A GAL22V10 register shows its output polarity on the pin whenever it is
    cleared, at power-up and by the asynchronous reset. galre writes a
@@ -496,6 +512,11 @@ needed about 3 million power cycles.
   depends on where the other pins and latches stand, so this shows much
   more of it per walk.
 
+  A GAL20V8 is a GAL16V8 with four more inputs: the same macrocells and
+  three modes, pin 13 the registers' enable in registered mode. galre
+  takes its fuse layout as CUPL writes it for `g20v8s`, `g20v8ma` and
+  `g20v8ms`.
+
   galre stops with exit code 3 before writing equations when:
   - the chip has state that no pin shows (a register whose output is
     never enabled): the same clocks then lead to different states;
@@ -600,7 +621,7 @@ chunks. The header comment of `fw/capture.c` describes the format.
 | `rig.py` | `SimRig` (simulated chip), `BrutusRig` (board, jumper check), recording and replay, socket pin maps |
 | `fwsim.py`, `fwstub/` | `fw/capture.c` built for the host, with a simulated GAL in the socket (`galmodel.c`: the GAL in C) |
 | `capture.py` | Serial transport and capture format |
-| `galsim.py` | Fuse-level GAL16V8/22V10 simulator |
+| `galsim.py` | Fuse-level GAL16V8/20V8/22V10 simulator |
 | `bitsim.py` | The same, evaluated for all input vectors at once |
 | `verify.py` | Rebuilt JED against the captures, and JED against JED |
 | `csimcheck.py` | Test vectors from the rebuilt JED for CUPL's simulator, and its verdict |

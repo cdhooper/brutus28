@@ -1,6 +1,7 @@
 """Rigs: what the analysis may do with a GAL in the Brutus-28 socket.
 
-Pins are numbered as on the DIP package (GAL16V8 1..20, GAL22V10 1..24).
+Pins are numbered as on the DIP package (GAL16V8 1..20, GAL20V8 and
+GAL22V10 1..24).
 A drive is a dict pin -> 0/1 over the signal pins (missing pins are 0).
 A path is a list of drives; each is clocked in with one rising edge on
 pin 1, starting from power-up.  Every signal pin is driven weakly (1K), so
@@ -80,8 +81,9 @@ SOCKETS = {
     "dip24": (24, 24, 12, lambda d: d if d <= 12 else d + 4),
     "plcc28": (24, 24, 12, lambda d: d + 1 + (d >= 7) + (d >= 13) + (d >= 19)),
 }
-DEFAULT_SOCKET = {"GAL16V8": "dip20", "GAL22V10": "dip24"}
-SUPPLY_MV = 5000                    # GAL16V8 and GAL22V10 are 5 V parts
+DEFAULT_SOCKET = {"GAL16V8": "dip20", "GAL20V8": "dip24", "GAL22V10": "dip24"}
+PACKAGE = {"GAL16V8": (20, 20, 10), "GAL20V8": (24, 24, 12), "GAL22V10": (24, 24, 12)}  # pins, VCC, GND
+SUPPLY_MV = 5000                    # these GALs are 5 V parts
 SUPPLY_TOLERANCE = 16               # percent, as fw/capture.c
 
 # Firmware limits (fw/capture.c)
@@ -479,7 +481,7 @@ class BrutusRig:
                  on_ms=2, log=print, jumper_check=True, follow=True, dclk=True):
         self.socket = socket or DEFAULT_SOCKET[device]
         npins, vcc, gnd, smap = SOCKETS[self.socket]
-        if npins != {"GAL16V8": 20, "GAL22V10": 24}[device]:
+        if npins != PACKAGE[device][0]:
             raise ValueError("socket %s does not fit a %s" % (socket, device))
         self.t, self.device, self.log = transport, device, log
         self.settle_us, self.off_ms, self.on_ms = settle_us, off_ms, on_ms
@@ -846,10 +848,10 @@ class ReplayRig:
                 else:
                     self.db[rec["key"]] = rec
         self.device = device or self.meta.get("device")
-        if self.device not in ("GAL16V8", "GAL22V10"):
+        if self.device not in PACKAGE:
             raise CaptureError("%s does not name the device; give it" % path)
-        self.pins = [p for p in range(1, {"GAL16V8": 20, "GAL22V10": 24}[self.device] + 1)
-                     if p not in {"GAL16V8": (10, 20), "GAL22V10": (12, 24)}[self.device]]
+        self.pins = [p for p in range(1, PACKAGE[self.device][0] + 1)
+                     if p not in PACKAGE[self.device][1:]]
         self.ops = Ops()
 
     def walk(self, V, base, path, mul=1, rev=0, probes=(), cand=(), gray=0, start=0,

@@ -68,8 +68,8 @@ class Bits:
             for o in g.olmcs:
                 if o.mode == "input":
                     continue
-                if o.mode == "reg" and g.kind == "GAL16V8":
-                    en = full ^ level[11]
+                if o.mode == "reg" and g.oe_pin:
+                    en = full ^ level[g.oe_pin]
                     v = full ^ qb[o.pin]
                 elif o.mode == "reg":
                     en = self._row(o.oe_row, col, full)
@@ -110,7 +110,7 @@ class Bits:
             s = 0
             for r in o.rows:
                 s |= self._row(r, col, full)
-            if g.kind == "GAL16V8":
+            if g.kind != "GAL22V10":
                 nextq[o.pin] = (full ^ s) if o.active_high else s
             else:
                 nextq[o.pin] = (sp | ((full ^ sp) & s)) & (full ^ ar)

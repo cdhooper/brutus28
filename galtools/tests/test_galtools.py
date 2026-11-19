@@ -41,6 +41,11 @@ CASES = {
                  {6: 0, 7: 0, 8: 0, 9: 0, 10: 0, 11: 0, 15: 0, 16: 0, 17: 0, 18: 0}),
     "comb16v8": ("GAL16V8", 1, [], {4: 0, 5: 0, 6: 0, 7: 0, 8: 0, 9: 0, 11: 0,
                                     12: 0, 13: 0, 14: 0, 15: 0, 16: 0}),
+    # GAL20V8 in its three modes: registered (pin 13 is the enable of the
+    # registers), complex and simple
+    "cnt20v8": ("GAL20V8", 4, [21, 22], {p: 0 for p in (5, 6, 7, 8, 9, 10, 11, 15, 16, 17, 18)}),
+    "comb20v8": ("GAL20V8", 1, [], {p: 0 for p in (6, 7, 8, 9, 10, 11, 16, 17, 18, 19)}),
+    "simple20v8": ("GAL20V8", 1, [], {p: 0 for p in (3, 4, 5, 6, 7, 8, 9, 10, 11, 16, 17, 21)}),
 }
 
 # designs with state that changes without a clock that galre does not
@@ -181,6 +186,7 @@ class SimulatedChip(unittest.TestCase):
         ar = ["an asynchronous reset term"]
         self.assertEqual(found, {
             "cnt16v8": [], "fsm22v10": [], "comb16v8": [],
+            "cnt20v8": [], "comb20v8": [], "simple20v8": [],
             "ar22v10": ar, "arlow22v10": ar, "arw22v10": ar,
             "latch16v8": ["combinational feedback through pins 17, 18"],
             "latch22v10": ["combinational feedback through pins 21, 22, 23"],
@@ -229,6 +235,32 @@ class SimulatedChip(unittest.TestCase):
         a = Analysis(SimRig(jed("quietlatch16v8")), "GAL16V8", fixed=fixed, log=quiet)
         with self.assertRaisesRegex(LatchSuspected, "pin 18 read differently .* Gray code"):
             a.run()
+
+    def test_reads_another_output(self):
+        """comb20v8's W is a parity of P, D and E, where P is a parity
+        itself.  Over the inputs W needs 16 product terms; the macrocell
+        has 7.  galre writes it with pin 20, as the original does."""
+        said = []
+        a = Analysis(SimRig(jed("comb20v8")), "GAL20V8", fixed=CASES["comb20v8"][3],
+                     log=said.append)
+        a.run()
+        self.assertTrue(any("pin 21 needs 16 product terms" in t for t in said))
+        eq = {(p, kind): (expr, n) for p, kind, _, expr, n in a.eqs}
+        self.assertEqual(eq[(21, "")][1], 4)
+        self.assertIn("P20", eq[(21, "")][0])
+        self.assertEqual(eq[(20, "")][1], 4)
+        self.assertEqual(a.check_equations(), [])
+        a.scover[(21, "")][0].pop()                 # the check does check these covers
+        self.assertEqual([b[:2] for b in a.check_equations()], [(21, "")])
+
+    def test_gal20v8_modes(self):
+        self.assertEqual({n: GAL(jed(n)).mode for n in ("cnt20v8", "comb20v8", "simple20v8")},
+                         {"cnt20v8": "registered", "comb20v8": "complex",
+                          "simple20v8": "simple"})
+        with self.assertRaisesRegex(ValueError, "not a valid mode"):
+            f = list(GAL(jed("cnt20v8")).fuses)
+            f[2705] = 0
+            GAL(f)
 
     def test_latch_held_by_another_output(self):
         """racelatch16v8's latch is held by another output's pin, which is
@@ -547,7 +579,7 @@ class Firmware(unittest.TestCase):
                     self.assertEqual(r, 3)
                     self.assertIn(says, report)
                     self.assertIn("no equations written", report)
-                    dev = fwsim.SocketDevice(jed(name), "dip24" if device == "GAL22V10" else "dip20")
+                    dev = fwsim.SocketDevice(jed(name), "dip20" if device == "GAL16V8" else "dip24")
                     board = os.path.join(out, "board")
                     with mock.patch.object(galre, "SerialTransport",
                                            lambda port: fwsim.HarnessTransport(self.lib, dev)):
@@ -618,7 +650,7 @@ class Firmware(unittest.TestCase):
                                            "--fix", fix, "-t", name)
                     self.assertEqual(r, 0)
                     dev = fwsim.SocketDevice(jed(name),
-                                             "dip24" if device == "GAL22V10" else "dip20")
+                                             "dip20" if device == "GAL16V8" else "dip24")
                     board = os.path.join(out, "board")
                     with mock.patch.object(galre, "SerialTransport",
                                            lambda port: fwsim.HarnessTransport(self.lib, dev)):
@@ -656,7 +688,7 @@ class Firmware(unittest.TestCase):
                                            "--fix", fix, "-t", name)
                     self.assertEqual(r, 0)
                     dev = fwsim.SocketDevice(jed(name),
-                                             "dip24" if device == "GAL22V10" else "dip20")
+                                             "dip20" if device == "GAL16V8" else "dip24")
                     board = os.path.join(out, "board")
                     with mock.patch.object(galre, "SerialTransport",
                                            lambda port: fwsim.HarnessTransport(self.lib, dev)):
@@ -687,7 +719,7 @@ class Firmware(unittest.TestCase):
         lib.gal_io.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
         lib.gal_power.argtypes = [ctypes.c_void_p, ctypes.c_int]
         for path in sorted(glob.glob(os.path.join(DESIGNS, "*.jed"))):
-            for socket in (["dip24", "plcc28"] if GAL(path).kind == "GAL22V10" else ["dip20"]):
+            for socket in (["dip20"] if GAL(path).kind == "GAL16V8" else ["dip24", "plcc28"]):
                 with self.subTest(design=os.path.basename(path), socket=socket):
                     dev = fwsim.SocketDevice(path, socket)
                     cdev = fwsim.SocketDevice(path, socket)
@@ -989,7 +1021,7 @@ class Firmware(unittest.TestCase):
 
     def test_analysis_through_firmware(self):
         for name, (device, nstates, regs, fixed) in CASES.items():
-            for socket in (["dip24", "plcc28"] if device == "GAL22V10" else ["dip20"]):
+            for socket in (["dip20"] if device == "GAL16V8" else ["dip24", "plcc28"]):
                 with self.subTest(design=name, socket=socket):
                     rig = BrutusRig(self.transport(name, socket), device, socket, log=quiet)
                     a = Analysis(rig, device, fixed=fixed, log=quiet)

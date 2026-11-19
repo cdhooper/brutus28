@@ -127,7 +127,7 @@ def main(argv=None):
     ap.add_argument("mode", choices=["board", "replay", "sim"])
     ap.add_argument("source", nargs="?", help="JED (sim) or recording (replay)")
     ap.add_argument("-o", "--out", required=True, help="output directory")
-    ap.add_argument("-d", "--device", choices=["GAL16V8", "GAL22V10"])
+    ap.add_argument("-d", "--device", choices=["GAL16V8", "GAL20V8", "GAL22V10"])
     ap.add_argument("-p", "--port", help="Brutus-28 serial device (board)")
     ap.add_argument("-s", "--socket", choices=["dip20", "dip24", "plcc28"])
     ap.add_argument("-t", "--title", help="design name (default galre)")
@@ -258,8 +258,8 @@ def main(argv=None):
         # cannot read pins 15 and 16.
         keep = "\nMIN [" in src
         tries = [(None, k) for k in ([True, False] if keep else [False])]
-        if device == "GAL16V8" and not a.reg:
-            tries += [(d, k) for d in ("g16v8ma", "g16v8ms") for _, k in tries]
+        if "modes" in a.dev and not a.reg:
+            tries += [(d, k) for d in a.dev["modes"] for _, k in tries]
         jed, said, best, first = None, [], None, []
         for dev, kept in tries:
             text = src if kept or not keep else re.sub(

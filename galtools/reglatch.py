@@ -630,11 +630,11 @@ class RegLatchAnalysis(Analysis):
         return lp
 
     def _readable(self):
-        """The output pins whose level the array can read.  A GAL16V8
-        without registers that has enables is in complex mode, where
-        pins 12 and 19 do not feed back."""
-        if self.device == "GAL16V8" and not self.reg:
-            return range(13, 19)
+        """The output pins whose level the array can read.  A GAL16V8 or
+        GAL20V8 without registers that has enables is in complex mode,
+        where the two outer output pins do not feed back."""
+        if "fed" in self.dev and not self.reg:
+            return self.dev["fed"]
         return self.dev["io"]
 
     DEEP = 22       # bits of (vector, state, output levels) up to which every output is a variable

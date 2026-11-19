@@ -1,4 +1,5 @@
-"""Fuse-level GAL16V8 / GAL22V10 simulator (scalar, one vector at a time).
+"""Fuse-level GAL16V8 / GAL20V8 / GAL22V10 simulator (scalar, one vector at
+a time).
 
 Fuse semantics follow the Atmel WinCUPL device library, checked against
 lincupl fuse plots and its csim simulator:
@@ -14,6 +15,10 @@ GAL16V8 (QF 2194): 64 rows x 32 columns, 8 rows per OLMC, OLMC 0 = pin 19.
       feedback slots of pins 19 and 12 carry pins 1 and 11.
   simple (SYN 1, AC0 0): AC1 0 output always enabled (8 rows), AC1 1 input;
       feedback slots carry 1, 19, 18, 17, 14, 13, 12, 11 (19..12).
+GAL20V8 (QF 2706): the same macrocells and modes with 40 columns, OLMC 0 =
+  pin 22, pin 13 /OE in registered mode; XOR 2560+n, AC1 2632+n, PTD
+  2640+row, SYN 2704, AC0 2705.  Its columns per mode are in GAL.V8, as
+  CUPL fuses them.
 GAL22V10 (QF 5892): 132 rows x 44 columns; row 0 AR, row 131 SP, OLMCs
   pins 23..14 with an OE row and 8,10,12,14,16,16,14,12,10,8 terms.
   Columns: pin 1, fb23, pin 2, fb22, ... pin 10, fb14, pin 11, pin 13.
@@ -53,8 +58,8 @@ class GAL:
     def __init__(self, src):
         f = read_jed(src) if isinstance(src, str) else list(src)
         self.fuses = f
-        if len(f) == 2194:
-            self._init16(f)
+        if len(f) in self.V8:
+            self._init_v8(f)
         elif len(f) in (5892, 5828):
             self._init22(f)
         else:
@@ -80,10 +85,36 @@ class GAL:
                 m |= 1 << c
         return m
 
-    def _init16(self, f):
-        self.kind, self.npins, self.vcc, self.gnd = "GAL16V8", 20, 20, 10
-        self.ncols = 32
-        syn, ac0 = f[2192], f[2193]
+    # GAL16V8 and GAL20V8: the same macrocells and modes.  Per device: pins,
+    # VCC, GND, array columns, the first fuse of XOR, AC1, PTD and SYN, the
+    # pin of OLMC 0, the output enable pin of the registered mode, and per
+    # mode what the array's column pairs read: a pin, or ("fb", pin) for an
+    # OLMC's feedback (the register's in a registered OLMC, else its pin).
+    # The GAL20V8's columns are as CUPL fuses them for g20v8s, g20v8ma and
+    # g20v8ms.
+    V8 = {
+        2194: dict(kind="GAL16V8", npins=20, vcc=20, gnd=10, ncols=32, xor=2048, ac1=2120,
+                   ptd=2128, syn=2192, top=19, oe=11, cols=dict(
+                       registered=[2, "f19", 3, "f18", 4, "f17", 5, "f16", 6, "f15", 7, "f14",
+                                   8, "f13", 9, "f12"],
+                       complex=[2, 1, 3, "f18", 4, "f17", 5, "f16", 6, "f15", 7, "f14",
+                                8, "f13", 9, 11],
+                       simple=[2, 1, 3, 19, 4, 18, 5, 17, 6, 14, 7, 13, 8, 12, 9, 11])),
+        2706: dict(kind="GAL20V8", npins=24, vcc=24, gnd=12, ncols=40, xor=2560, ac1=2632,
+                   ptd=2640, syn=2704, top=22, oe=13, cols=dict(
+                       registered=[2, 23, 3, "f22", 4, "f21", 5, "f20", 6, "f19", 7, "f18",
+                                   8, "f17", 9, "f16", 10, "f15", 11, 14],
+                       complex=[2, 1, 3, 23, 4, "f21", 5, "f20", 6, "f19", 7, "f18",
+                                8, "f17", 9, "f16", 10, 14, 11, 13],
+                       simple=[2, 1, 3, 23, 4, 22, 5, 21, 6, 20, 7, 17, 8, 16, 9, 15,
+                               10, 14, 11, 13])),
+    }
+
+    def _init_v8(self, f):
+        d = self.V8[len(f)]
+        self.kind, self.npins, self.vcc, self.gnd = d["kind"], d["npins"], d["vcc"], d["gnd"]
+        self.ncols = d["ncols"]
+        syn, ac0 = f[d["syn"]], f[d["syn"] + 1]
         if (syn, ac0) == (0, 1):
             self.mode = "registered"
         elif (syn, ac0) == (1, 1):
@@ -91,32 +122,16 @@ class GAL:
         elif (syn, ac0) == (1, 0):
             self.mode = "simple"
         else:
-            raise ValueError("GAL16V8 SYN=0 AC0=0 is not a valid mode")
-        rows = []
-        for r in range(64):
-            rows.append(self._rowmask(f, 32 * r, 32) if f[2128 + r] else None)
-        self.rows = rows
+            raise ValueError("%s SYN=0 AC0=0 is not a valid mode" % self.kind)
+        self.rows = [self._rowmask(f, self.ncols * r, self.ncols) if f[d["ptd"] + r] else None
+                     for r in range(64)]
         self.ar_row = self.sp_row = None
+        self.cols = [("fb", int(c[1:])) if isinstance(c, str) else ("pin", c)
+                     for c in d["cols"][self.mode]]
         self.olmcs = []
-        slots = []
-        for k in range(8):
-            slots.append(("pin", 2 + k))
-            slots.append(("fb", 19 - k))
-        simple_src = {19: 1, 18: 19, 17: 18, 16: 17, 15: 14, 14: 13, 13: 12, 12: 11}
-        cols = []
-        for kind, n in slots:
-            if kind == "pin":
-                cols.append(("pin", n))
-            elif self.mode == "simple":
-                cols.append(("pin", simple_src[n]))
-            elif self.mode == "complex" and n in (19, 12):
-                cols.append(("pin", 1 if n == 19 else 11))
-            else:
-                cols.append(("fb", n))
-        self.cols = cols
         for i in range(8):
-            pin = 19 - i
-            xor, ac1 = f[2048 + i], f[2120 + i]
+            pin = d["top"] - i
+            xor, ac1 = f[d["xor"] + i], f[d["ac1"] + i]
             base = 8 * i
             if self.mode == "registered" and ac1 == 0:
                 o = Olmc(pin, list(range(base, base + 8)), None, True, xor == 1, "reg")
@@ -128,7 +143,7 @@ class GAL:
                 o = Olmc(pin, [], "never", False, xor == 1, "input")
             self.olmcs.append(o)
         self.clock_pin = 1 if self.mode == "registered" else None
-        self.oe_pin = 11 if self.mode == "registered" else None
+        self.oe_pin = d["oe"] if self.mode == "registered" else None
 
     def _init22(self, f):
         self.kind, self.npins, self.vcc, self.gnd = "GAL22V10", 24, 24, 12
@@ -250,8 +265,8 @@ class GAL:
         for o in self.olmcs:
             if o.mode == "input":
                 continue
-            if o.mode == "reg" and self.kind == "GAL16V8":
-                if levels[11] == 0:
+            if o.mode == "reg" and self.oe_pin:
+                if levels[self.oe_pin] == 0:
                     drive[o.pin] = 1 - self.q[o.pin]
                 continue
             if o.oe_row == "always":
@@ -318,7 +333,7 @@ class GAL:
                 if not o.registered:
                     continue
                 s = self._sum(o, cv)
-                if self.kind == "GAL16V8":
+                if self.kind != "GAL22V10":
                     nq[o.pin] = s ^ (1 if o.active_high else 0)
                 else:
                     nq[o.pin] = 1 if sp else s

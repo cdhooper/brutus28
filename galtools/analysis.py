@@ -1,4 +1,5 @@
-"""Black-box reverse engineering of a GAL16V8 / GAL22V10 from rig captures.
+"""Black-box reverse engineering of a GAL16V8 / GAL20V8 / GAL22V10 from rig
+captures.
 
 1. discover: one exhaustive walk over every signal pin but pin 1 (and the
    pins the user fixed) at power-up.  An I/O pin whose driven value varies
@@ -77,7 +78,11 @@ class _Restart(Exception):
 
 DEV = {
     "GAL16V8": {"ded": [1, 2, 3, 4, 5, 6, 7, 8, 9, 11], "io": list(range(12, 20)),
-                "cupl": "g16v8"},
+                "cupl": "g16v8", "oe": 11, "modes": ("g16v8ma", "g16v8ms"),
+                "fed": range(13, 19)},
+    "GAL20V8": {"ded": list(range(1, 12)) + [13, 14, 23], "io": list(range(15, 23)),
+                "cupl": "g20v8", "oe": 13, "modes": ("g20v8ma", "g20v8ms"),
+                "fed": range(16, 22)},
     "GAL22V10": {"ded": list(range(1, 12)) + [13], "io": list(range(14, 24)),
                  "cupl": "g22v10"},
 }
@@ -209,6 +214,7 @@ class Analysis:
         self.ar_on = set()        # states in which it fires
         self.ar_regs = {}         # its register literals, register pin -> value
         self.ar_dc = set()
+        self.scover = {}          # covers that read other outputs' pins (_read_outputs)
 
     # 1. discovery -----------------------------------------------------------
     def discover(self):
@@ -669,12 +675,13 @@ class Analysis:
                 self.reg.append(r)
             else:
                 self.comb.append(r)       # constant or input-dependent
-        if self.device == "GAL16V8" and 11 in self.V and not self.clock_in_v:
-            # A registered GAL16V8's registers are enabled by pin 11 and by
-            # nothing else.  A pin that changes with the state but is not
+        oe = self.dev.get("oe")
+        if oe in self.V and not self.clock_in_v:
+            # A registered GAL16V8's or GAL20V8's registers are enabled by
+            # the OE pin (11, 13) and by nothing else.  A pin that changes with the state but is not
             # driven exactly while pin 11 is low is a combinational output
             # that reads the registers: it has an enable of its own.
-            b = self.V.index(11)
+            b = self.V.index(oe)
             low = self.full ^ self.v1[b]
             for r in list(self.reg):
                 if any(t.driven[r] != t.care[r] & low for _, t in self.states.values()):
@@ -1002,11 +1009,14 @@ class Analysis:
                     eqs.append((p, kind, False, term, 1))
                     continue
             eqs.append((p, kind, inv, expr, len(cubes)))
-        if self.device == "GAL16V8" and regs and not self.clock_in_v:
+        self.scover = {}
+        if not self.mixed:
+            eqs = self._read_outputs(F, eqs)
+        if self.dev.get("oe") and regs and not self.clock_in_v:
             # A registered GAL16V8's pin 11 enables its registers and is no
             # array input.  An output that is enabled by it and never
             # changes is a register that always loads the same value.
-            n11 = "!" + self.name(11)
+            n11 = "!" + self.name(self.dev["oe"])
             fixed = {p for p, kind, inv, expr, _ in eqs
                      if kind == "oe" and not inv and expr == n11}
             fixed = {p for p, kind, _, expr, _ in eqs
@@ -1015,6 +1025,147 @@ class Analysis:
                    for p, kind, inv, expr, n in eqs if not (p in fixed and kind == "oe")]
         self.eqs = sorted(eqs)
         return self.eqs
+
+    # product terms of a GAL22V10's macrocells, pins 23 down to 14
+    TERMS22 = (8, 10, 12, 14, 16, 16, 14, 12, 10, 8)
+
+    def _budget(self, p, kind):
+        """The product terms a function of pin p may have.  A GAL16V8 or
+        GAL20V8 has eight per macrocell, of which the enable takes one
+        unless the output is registered."""
+        if self.device == "GAL22V10":
+            return self.TERMS22[23 - p]
+        return 8 if kind == "d" else 7
+
+    def _read_outputs(self, F, eqs):
+        """The functions that need more product terms over the inputs and
+        registers than their macrocell has, written again over the inputs,
+        the registers and the pins of other outputs: the original read
+        another output there (!P15 = !P21 & ..., with pin 21 a sum of four
+        terms itself).  Only outputs that are always driven and written
+        over the inputs themselves are read, so nothing reads in a loop."""
+        over = [(p, kind) for p, kind, _, _, n in eqs
+                if kind in ("", "d") and n > self._budget(p, kind)]
+        if not over:
+            return eqs
+        fed = self.dev["io"] if self.reg or "fed" not in self.dev else self.dev["fed"]
+        ys = [y for y in self.comb if y in fed and y not in self.EV
+              and (y, "") in F and (y, "oe") not in F and (y, "") not in over]
+        lits = []                           # (text, {context: the x where it is true})
+        ctxs = list(self.CW)
+        for b, q in enumerate(self.EV):
+            m = self.ev1[b]
+            lits.append((self.name(q), {c: m for c in ctxs}))
+            lits.append(("!" + self.name(q), {c: self.efull ^ m for c in ctxs}))
+        for i, q in enumerate(self.cvars):
+            lits.append((self.name(q), {c: self.efull if self.CW[c][i] else 0 for c in ctxs}))
+            lits.append(("!" + self.name(q), {c: 0 if self.CW[c][i] else self.efull for c in ctxs}))
+        for y in ys:
+            lv = self._levels(y)
+            lits.append((self.name(y), {c: lv[c][0] for c in ctxs if c in lv}))
+            lits.append(("!" + self.name(y), {c: lv[c][1] for c in ctxs if c in lv}))
+        out = []
+        for p, kind, inv, expr, n in eqs:
+            if (p, kind) in over:
+                f = F[(p, kind)]
+                on = {c: v[0] for c, v in f.items()}
+                off = {c: v[1] for c, v in f.items()}
+                pos, neg = self._sop_lits(on, off, lits), self._sop_lits(off, on, lits)
+                if kind == "d" and self.device == "GAL22V10":
+                    cubes, inv2 = (neg, True) if inv else (pos, False)
+                else:
+                    cubes, inv2 = (neg, True) if len(neg) < len(pos) else (pos, False)
+                if len(cubes) < n:
+                    read = sorted({y for y in ys for c in cubes for i in c
+                                   if lits[i][0].lstrip("!") == self.name(y)})
+                    self.log("pin %d%s needs %d product terms over the inputs, more than "
+                             "its %d: %d with the pin%s of %s" % (
+                                 p, " ." + kind if kind else "", n, self._budget(p, kind),
+                                 len(cubes), "s" if len(read) > 1 else "",
+                                 ", ".join(map(str, read)) or "no other output"))
+                    self.scover[(p, kind)] = (cubes, inv2, lits)
+                    expr = "\n    # ".join(" & ".join(lits[i][0] for i in c) or "'b'1"
+                                           for c in cubes)
+                    inv, n = inv2, len(cubes)
+            out.append((p, kind, inv, expr, n))
+        return out
+
+    def _sop_lits(self, on, off, lits):
+        """A greedy cover of on (context -> the x) that avoids off, as
+        products of the literals lits ((text, {context: the x where it is
+        true})): cubes as lists of literal numbers.  From an uncovered
+        point's literals, those are dropped one by one that keep the
+        product out of off, the one first that covers most."""
+        unc = {c: v for c, v in on.items() if v}
+        ctxs = [c for c in set(on) | set(off)]
+        full = self.efull
+
+        def product(cube):
+            out = {}
+            for c in ctxs:
+                v = full
+                for i in cube:
+                    v &= lits[i][1].get(c, 0)
+                    if not v:
+                        break
+                out[c] = v
+            return out
+        cubes = []
+        while unc:
+            c0 = next(iter(unc))
+            x0 = lowest(unc[c0])
+            cube = [i for i, (_, m) in enumerate(lits) if m.get(c0, 0) >> x0 & 1]
+            while len(cube) > 0:
+                # the products without each literal: before[i] & after[i + 1]
+                k = len(cube)
+                before = [dict.fromkeys(ctxs, full)]
+                for i in cube:
+                    m = lits[i][1]
+                    before.append({c: before[-1][c] & m.get(c, 0) for c in ctxs})
+                after = [dict.fromkeys(ctxs, full)]
+                for i in reversed(cube):
+                    m = lits[i][1]
+                    after.append({c: after[-1][c] & m.get(c, 0) for c in ctxs})
+                after.reverse()
+                best = None
+                for t in range(k):
+                    gain, ok = 0, True
+                    for c in ctxs:
+                        v = before[t][c] & after[t + 1][c]
+                        if v & off.get(c, 0):
+                            ok = False
+                            break
+                        u = unc.get(c)
+                        if u:
+                            gain += popcount(v & u)
+                    if ok and (best is None or gain > best[0]):
+                        best = (gain, t)
+                if best is None:
+                    break
+                del cube[best[1]]
+            cov = product(cube)
+            for c in list(unc):
+                unc[c] &= ~cov[c]
+                if not unc[c]:
+                    del unc[c]
+            cubes.append((cube, cov))
+        # a cube that the others cover between them is not needed
+        i = 0
+        while i < len(cubes):
+            need = False
+            for c, v in on.items():
+                rest = 0
+                for j, (_, cov) in enumerate(cubes):
+                    if j != i:
+                        rest |= cov[c]
+                if v & cubes[i][1][c] & ~rest:
+                    need = True
+                    break
+            if need:
+                i += 1
+            else:
+                cubes.pop(i)
+        return [c for c, _ in cubes]
 
     def _levels(self, y):
         """Where output y is known to be high and low, per context:
@@ -1124,10 +1275,22 @@ class Analysis:
         bad = []
         for key, f in self.F.items():
             for s, (on, off) in f.items():
-                cov = self._cov(key, self.CW[s])
+                cov = self._scov(key, s) if key in self.scover else self._cov(key, self.CW[s])
                 if (on & ~cov) or (off & cov):
                     bad.append(key + (s,))
         return bad
+
+    def _scov(self, key, s):
+        """The x for which function key's cover over the inputs and other
+        outputs' pins (_read_outputs) is true in context s."""
+        cubes, inv, lits = self.scover[key]
+        cov = 0
+        for cube in cubes:
+            v = self.efull
+            for i in cube:
+                v &= lits[i][1].get(s, 0)
+            cov |= v
+        return self.efull ^ cov if inv else cov
 
     def _cov(self, key, w):
         """The x for which function key's cover is true, in a context
@@ -1160,8 +1323,8 @@ class Analysis:
         for p in sorted(set(self.EV) | set(self.reg) | set(self.comb)):
             if p == CLOCK and clocked:
                 continue
-            if self.device == "GAL16V8" and clocked and p == 11:
-                lines.append("Pin 11 = !OE;")
+            if clocked and p == self.dev.get("oe"):
+                lines.append("Pin %d = !OE;" % p)
                 continue
             lines.append("Pin %d = %s;" % (p, self.name(p)))
         lines.append("")
@@ -1169,7 +1332,7 @@ class Analysis:
         if latches:
             lines += [KEEP, "MIN [%s] = 0;" % ", ".join(latches), ""]
         for p, kind, inv, expr, n in self.eqs:
-            if self.device == "GAL16V8" and clocked and p in regs and kind == "oe":
+            if self.dev.get("oe") and clocked and p in regs and kind == "oe":
                 continue
             lhs = self.name(p) + ("." + kind if kind else "")
             if kind == "oe" and inv:

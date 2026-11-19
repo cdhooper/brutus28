@@ -150,7 +150,7 @@ class SocketDevice:
                 + [ctypes.c_void_p] * 2 + [u32, ctypes.c_void_p, u32, ctypes.c_int]
             lib.gal_add_olmc.argtypes = [ctypes.c_void_p] + [ctypes.c_int] * 6 + [ctypes.c_void_p]
             c = lib.gal_new(
-                g.kind == "GAL16V8", g.clock_pin or 0,
+                g.kind != "GAL22V10", g.clock_pin or 0,
                 -1 if g.ar_row is None else g.ar_row, -1 if g.sp_row is None else g.sp_row,
                 ncols, (u8 * ncols)(*[n for _, n in g.cols]), (u8 * ncols)(*regfb),
                 len(rows), (u64 * len(rows))(*rows),
@@ -160,8 +160,8 @@ class SocketDevice:
                 raise RuntimeError("galmodel.c does not take this GAL")
             for o in g.olmcs:
                 mode = {"input": 0, "comb": 1, "reg": 2}[o.mode]
-                if o.mode == "reg" and g.kind == "GAL16V8":
-                    oe, row = 3, 0                    # the OE pin, 11
+                if o.mode == "reg" and g.oe_pin:
+                    oe, row = 3, g.oe_pin             # the OE pin
                 elif o.oe_row == "always":
                     oe, row = 0, 0
                 elif o.oe_row == "never":

@@ -1,5 +1,5 @@
 /*
- * A GAL16V8 / GAL22V10 in the Brutus-28 socket, simulated from its fuse
+ * A GAL16V8 / GAL20V8 / GAL22V10 in the Brutus-28 socket, simulated from its fuse
  * map: galsim.py's GAL and fwsim.py's SocketDevice in C, for speed.  The
  * Python classes are the reference; tests compare the two read for read.
  *
@@ -20,7 +20,7 @@
 #define GAL_MAX_LIVE   16
 
 enum { OLMC_INPUT = 0, OLMC_COMB = 1, OLMC_REG = 2 };
-enum { OE_ALWAYS = 0, OE_NEVER = 1, OE_ROW = 2, OE_PIN11 = 3 };
+enum { OE_ALWAYS = 0, OE_NEVER = 1, OE_ROW = 2, OE_PIN = 3 };  /* OE_PIN: oe_row is the pin */
 
 typedef struct {
     uint8_t  pin;
@@ -33,7 +33,7 @@ typedef struct {
 } olmc_t;
 
 struct gal {
-    int      is16v8;
+    int      is16v8;                    /* GAL16V8 or GAL20V8: D = sum ^ XOR, pin = !Q */
     int      clock_pin;                 /* 0: none */
     int      ar_row;                    /* -1: none */
     int      sp_row;
@@ -112,8 +112,8 @@ gal_outputs(const gal_t *g, uint32_t levels, uint32_t *mask, uint32_t *val)
 
         if (o->mode == OLMC_INPUT)
             continue;
-        if (o->oe_kind == OE_PIN11) {
-            if (((levels >> 11) & 1) == 0) {
+        if (o->oe_kind == OE_PIN) {
+            if (((levels >> o->oe_row) & 1) == 0) {
                 m |= 1U << o->pin;
                 if (!((g->q >> o->pin) & 1))
                     v |= 1U << o->pin;

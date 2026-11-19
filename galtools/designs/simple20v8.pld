@@ -1,0 +1,31 @@
+Name     simple20v8;
+Partno   x;
+Date     2026-11-19;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g20v8s;
+
+/* Test design: GAL20V8 in simple mode: outputs without enables, on the
+   two middle pins too, which have no feedback there, and I/O pins as
+   inputs */
+
+Pin 1  = A;
+Pin 2  = B;
+Pin 13 = C;
+Pin 14 = D;
+Pin 23 = E;
+Pin 15 = F;
+Pin 22 = G;
+Pin 18 = Y;
+Pin 19 = !Z;
+Pin 20 = W;
+
+Y = A & B
+  # C & !D;
+Z = E & F
+  # !G;
+W = A & !E
+  # D & G;
