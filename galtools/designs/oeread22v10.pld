@@ -1,0 +1,26 @@
+Name     oeread22v10;
+Partno   x;
+Date     2026-11-19;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g22v10;
+
+/* Test design: GAL22V10, an output whose enable reads another output's
+   pin.  SLAVE drives its pin low while A is high, and lets it go
+   otherwise (an open-drain bus signal); CINH is driven whenever that pin
+   is low, whoever pulls it. */
+
+Pin 2  = A;
+Pin 3  = B;
+Pin 21 = Y;
+Pin 22 = !CINH;
+Pin 23 = !SLAVE;
+
+SLAVE = 'b'1;
+SLAVE.oe = A;
+CINH = SLAVE;
+CINH.oe = SLAVE;
+Y = B & !SLAVE;

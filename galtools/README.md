@@ -3,7 +3,7 @@
 `galre.py` recovers the logic of a GAL16V8 or GAL22V10 from what Brutus-28
 can observe at the socket: combinational and registered designs, the
 GAL22V10's asynchronous reset, and latches built from combinational
-feedback. It writes CUPL source and, when a CUPL compiler is available,
+feedback, also inside a registered design. It writes CUPL source and, when a CUPL compiler is available,
 builds a JED and checks it against every captured state and input vector.
 
 For a step-by-step guide, see [HOWTO_REVERSE.md](HOWTO_REVERSE.md).
@@ -26,7 +26,8 @@ reachable state. The firmware side is the `pld capture` command
 - Brutus-28 firmware with `pld capture`.
 - Optional: a CUPL compiler, used to turn the result into a JED and check it
   (`--cupl`, `$CUPL`, or `cupl` on the PATH). It is run as
-  `cupl -jaxm4 NAME.pld`, so WinCUPL's `cupl` or a native build of it
+  `cupl -jaxm4 NAME.pld` (`-jaxm0` for a design with latches, see
+  Latches), so WinCUPL's `cupl` or a native build of it
   will do.
 
 ## Use
@@ -113,7 +114,7 @@ galre exits with:
 - 1 when the equations or the JED disagree with the captures;
 - 2 when the jumper check failed;
 - 3 when the chip changes state without a clock in a way galre does not
-  model, such as registers and latches in one design (see Limits).
+  model, or has state that no pin shows (see Limits).
 
 Options:
 
@@ -280,11 +281,102 @@ The equations read the latch pins, as the original's do:
         # !P5 & P17
         # P4 & P17;
 
+The last term changes nothing at rest: it holds the latch while P5
+changes. CUPL's minimiser removes such terms, so galre compiles a design
+with latches without it (`-m0`), and with it only if the design does not
+fit or the JED then disagrees with the captures.
+
 The rebuilt JED is checked against the walks from the first read where it
 agrees, and in `sim` against the original under random stimulus that
 changes one input at a time. galre does not model the latches' state at
 power-up, which in a cross-coupled pair is a race the rebuilt chip may
 settle differently. It reports the walks that start differently.
+
+### Registers and latches together
+
+A registered design can hold state in a latch too, and a GAL22V10's
+product terms can read pin 1, the clock, like any other input. An example
+from an Amiga SCSI controller: a chip select that is set while the clock
+is high and a register is set, holds itself while that register and an
+input allow, and is let go when the reset term clears the register.
+Such a latch does not show in the power-up walk. It shows when, after a
+clock edge, reading the new state changes a pin without a clock, and it is
+not the reset term. galre then goes on (`reglatch.py`):
+
+1. The pins that change without a clock are no state candidates any more,
+   and the transition sweeps leave them out of their reads (`mask`). What
+   is left are the registers. galre explores them as usual: states,
+   transitions, the reset term. Each sweep also records the level of every
+   pin just before each clock edge (`pre`), because a register input may
+   read a latch.
+2. It walks pin 1 together with the enumerated pins, in Gray code order,
+   so the walk clocks the chip whenever it raises pin 1. galre follows the
+   register state through such a walk. A clock edge with the outputs at
+   the levels the sweep had goes where the sweep went. With a latch at
+   another level, it may go elsewhere: galre takes it on trust, and
+   checks every registered pin that is driven in the reads that follow.
+   A register that reads otherwise loaded the other value; galre keeps
+   that edge, and so learns the register inputs with the latch pins as
+   inputs. The walks are:
+   - from every state, two with pin 1 changing slowest: every input
+     vector with pin 1 high, then every one with pin 1 low, around the
+     reset term where it would fire;
+   - from power-up, one for every other position of pin 1 in the bit
+     order, both ways, so that the chip is clocked and reset in many
+     places;
+   - then walks from other states and start vectors, until the learned
+     circuit predicts two in a row.
+3. The outputs that read differently at the same inputs, pin 1 level and
+   register state are the latch pins, less those that are a function of
+   these and the other latch pins. Every output, enable and register
+   input is learned per context: a register state with the levels of the
+   latch pins. A latch pin's excitation is learned as for latches alone,
+   with pin 1 as an input: a step that changes one pin, or clocks the
+   chip, says where the latches settle from the levels they had.
+
+   A latch can sit on a bidirectional pin: the GAL drives it only while
+   its enable is true, and reads it as an input otherwise (a bus signal
+   such as DTACK). galre enumerates such a pin like an input. The GAL
+   drives it for sure where it is not at the level Brutus drives it to,
+   and does not where it follows when the walk changes its drive. The
+   enable is one product term; galre takes the shortest one that holds
+   all the first reads and none of the second. The other equations read
+   the pin's level, whoever drives it.
+4. The equations are written over pin 1 (as `CLK`), the enumerated pins,
+   the registers and the latch pins. A latch gets a product term for
+   every step that holds it. From `designs/reglatch22v10`:
+
+       P21 = CLK & !P3 & P4
+           # CLK & P3 & P22
+           # P3 & P22 & P21
+           # CLK & P4 & P22;
+
+   The last term is not in the original: it holds the latch while P3
+   changes with the clock high.
+
+If the power-up walk does read differently in another order, galre first
+tries latches alone, and then registers and latches together
+(`designs/reglatch16v8`). A design without registers goes the same way if
+its outputs have enables, which the analysis of latches alone does not
+take; pin 1 is then one more input.
+
+An output with a constant value and an enable (`X = 'b'0; X.oe = ...`, an
+open-drain bus signal) is not enumerated at first: undriven, it sits at
+the level Brutus drives it to, 0, or 1 in every second read. If other
+logic reads that pin, it is an input as well. After the exploration,
+galre therefore walks (and sweeps) every state with all such pins held at
+the level they do not drive, and once more for each with that pin at the
+other level. A pin whose level makes a difference is enumerated, and
+handled like a latch on a bidirectional pin, so that the equations read
+its level (`designs/oeread22v10`: `P22.oe = !P23`).
+
+Tried in simulation on the eight GALs of a Zorro III SCSI controller,
+which have up to six registers, three latches and 52 states: latches
+that read the clock pin, latches on bidirectional bus pins, and register
+inputs that read latches.
+
+The rebuilt JED is also run through every walk with pin 1, and compared
+read for read.
 
 Estimated board time is based on the simulator's count of operations
 (about 2.5 µs per write and read, 22 ms per power cycle, and USB transfer):
@@ -306,6 +398,11 @@ A latch design takes one Gray code walk per bit order and a few more to
 check, each of every input vector, and learning grows with the number of
 vectors: half a second for latch22v10 with 11 inputs.
 
+Latches in a registered design take, on top of the registers, two walks
+per state and two per enumerated pin, each of every input vector with
+pin 1 high and low. With 17 pins enumerated and 8 states that is about 50
+walks of 262144 vectors, about 5 s each on the board.
+
 Return paths replace almost all power cycles. Without them, the last design
 needed about 3 million power cycles.
 
@@ -315,8 +412,12 @@ needed about 3 million power cycles.
   chip only on those states.
 - A combinational output that depends only on registers looks the same as a
   register and is written as one. It behaves the same on the pins.
-- Pin 1 stays low except for clock edges, so a combinational use of pin 1
-  in a registered 22V10 is not captured.
+- In a registered design, pin 1 stays low except for clock edges, unless
+  galre finds latches in it and walks pin 1 with the inputs. So a
+  combinational use of pin 1 in a registered GAL22V10 is captured only in
+  a design with latches. A latch that is open while the clock is high and
+  holds whatever the inputs do while it is low looks like a register, and
+  is written as one.
 - Registers that never reach a pin are not seen.
 - Of state that changes without a clock, galre models the GAL22V10's
   asynchronous reset term and latches built from combinational feedback.
@@ -324,20 +425,29 @@ needed about 3 million power cycles.
   in another order. Tried in simulation on set/reset and transparent
   latches with their inputs on every pair of pins, and on set-only bits,
   the three extra orders together show every latch that can leave its
-  power-up value. No two of them do. A latch that acts only in states
-  other than power-up, in a registered design, is not seen.
+  power-up value. No two of them do. A latch in a registered design that
+  acts only in other states shows when reading a new state changes it.
 
   galre stops with exit code 3 before writing equations when:
-  - a design has both registers and latches (the same inputs and latch
-    levels then lead to different places);
+  - the chip has state that no pin shows (a register whose output is
+    never enabled): the same clocks then lead to different states;
+  - a state is reached only with a latch at a level that the sweeps never
+    had at that clock edge, or a clock edge goes another way because of a
+    latch and no registered pin shows it before the next edge;
   - a latch reacts only to several inputs changing at once;
-  - a latch output is not always driven;
-  - in a registered design, a state's walk does not leave it as it found
-    it (other than by returning to the power-up state where the
-    asynchronous reset term fires), or reading a new state in a
-    transition sweep changes it.
+  - in a design of latches alone, a latch output is not always driven and
+    the registers-and-latches analysis cannot take it either;
+  - in a registered design, something other than the reset term or a
+    latch pin changes without a clock.
 - For latches, the result holds for inputs that change one at a time, and
-  the latches' state at power-up is not modelled.
+  the latches' state at power-up is not modelled. In a registered design,
+  a clock edge is taken to change pin 1 and the registers at the same
+  moment; a latch that catches the few ns between the two is not
+  modelled. The equations hold where the walks went: every input vector
+  in every register state at both levels of pin 1, but not every latch
+  level in each of them. Where a latch and a condition always go
+  together, an equation or enable may read the one where the original
+  reads the other, or both.
 - The asynchronous reset term must be one product term of the enumerated
   inputs and the registers. A term that reads a combinational output
   stops galre.
@@ -359,8 +469,8 @@ The supply is measured only when the pins match the job's `vcc=` and
 The host first configures a job:
 
 - `set pins= base= inv= clk= cand= mask= count= mul= rev= gray= rot=
-  start= skm= skv= avm= avv= quiet= chk= follow= dclk= settle= off= on=
-  vcc= gnd= supply=`
+  start= skm= skv= avm= avv= quiet= chk= pre= follow= dclk= settle= off=
+  on= vcc= gnd= supply=`
 - `path`
 - `probe`
 - `ret <crc> <vectors>`
@@ -377,12 +487,18 @@ It then runs one of:
   left by `rot` bits within its n bits. Bit b of x drives the b-th
   enumerated pin from the lowest socket pin up, or from the highest down
   with `rev=1`. Every vector is XORed with `start`.
-  Vectors v with v & `skm` = `skv` are skipped (read as 0). With probe
+  Vectors v with v & `skm` = `skv` are skipped (read as 0). The
+  enumerated pins may include the clock pins: after the path, the walk
+  then drives them like any other pin, and clocks the chip when it raises
+  them. With probe
   vectors set, the signature of the state is reported before and after the
   walk; with `quiet=1`, only the signatures are.
 - `trans`: the clock transitions from the path state. With `chk=1`, the
   clocked vector is also read right after the edge and again after the
-  probes, and the first 16 vectors where the reads differ are reported.
+  probes, and the first 16 vectors where the reads differ are reported,
+  each with the pins that differ. Pins left out of `mask` do not count.
+  With `pre=1`, every vector's record is followed by the read of all
+  pins just before its clock edge.
 - `state`: the signature of the path state.
 
 Every clock step drives its vector with the clock pins low, then raises
@@ -408,6 +524,7 @@ chunks. The header comment of `fw/capture.c` describes the format.
 | `galre.py` | Command line |
 | `analysis.py` | Discovery, exploration, equations, CUPL |
 | `latch.py` | Latches built from combinational feedback |
+| `reglatch.py` | Latches in a registered design, and pin 1 as an input |
 | `rig.py` | `SimRig` (simulated chip), `BrutusRig` (board, jumper check), recording and replay, socket pin maps |
 | `fwsim.py`, `fwstub/` | `fw/capture.c` built for the host, with a simulated GAL in the socket |
 | `capture.py` | Serial transport and capture format |

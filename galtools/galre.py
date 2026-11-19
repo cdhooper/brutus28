@@ -25,26 +25,41 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from analysis import Analysis, AsyncDesign, LatchSuspected  # noqa: E402
+from analysis import AsyncDesign, LatchSuspected            # noqa: E402
 from capture import CaptureError, SerialTransport          # noqa: E402
 from latch import LatchAnalysis                            # noqa: E402
+from reglatch import RegLatchAnalysis                      # noqa: E402
 from rig import BrutusRig, RecordingRig, ReplayRig, SimRig  # noqa: E402
 import verify                                              # noqa: E402
 
 
 def analyse(rig, device, fixed=None, survey=64, log=print):
-    """Run the analysis of a clocked design, or of latches when the chip
-    holds state without a clock; returns the Analysis or LatchAnalysis.
-    Raises AsyncDesign when neither models the chip."""
-    a = Analysis(rig, device, fixed=fixed, survey=survey, log=log)
+    """Run the analysis of a clocked design (which goes on to latches in
+    it, if the chip changes state without a clock), or of latches alone
+    when the power-up walk shows them; returns the RegLatchAnalysis or
+    LatchAnalysis.  Raises AsyncDesign when none models the chip."""
+    a = RegLatchAnalysis(rig, device, fixed=fixed, survey=survey, log=log)
     try:
         a.run()
+        return a
     except LatchSuspected as e:
         log("asynchronous behaviour: %s" % e)
         log("trying latches built from combinational feedback")
-        a = LatchAnalysis(rig, device, fixed=fixed, log=log, walk0=a.walk0)
-        a.run()
-    return a
+        b = LatchAnalysis(rig, device, fixed=fixed, log=log, walk0=a.walk0)
+        try:
+            b.run()
+            return b
+        except AsyncDesign as e2:
+            if 1 in (fixed or {}):
+                raise                     # pin 1 is held: no walks with it
+            log("not latches alone: %s" % e2)
+            log("trying registers and latches together")
+            c = RegLatchAnalysis(rig, device, fixed=fixed, survey=survey, log=log, hist=e.pins)
+            try:
+                c.run()
+            except LatchSuspected:
+                raise e2 from None
+            return c
 
 
 def parse_fixed(text):
@@ -87,12 +102,16 @@ def describe(meta):
     return lines
 
 
-def compile_cupl(cupl, pld, log):
+def compile_cupl(cupl, pld, log, minimise=4):
+    """The JED of pld (None if CUPL makes none); minimise is CUPL's -m
+    level, 0 for none."""
     out = os.path.dirname(pld)
     base = os.path.splitext(os.path.basename(pld))[0]
-    r = subprocess.run([cupl, "-jaxm4", os.path.basename(pld)], cwd=out,
-                       capture_output=True, text=True)
     jed = os.path.join(out, base + ".jed")
+    if os.path.exists(jed):
+        os.remove(jed)
+    r = subprocess.run([cupl, "-jaxm%d" % minimise, os.path.basename(pld)], cwd=out,
+                       capture_output=True, text=True)
     if not os.path.exists(jed):
         log("CUPL did not produce %s:\n%s%s" % (jed, r.stdout, r.stderr))
         return None
@@ -188,7 +207,7 @@ def main(argv=None):
         except AsyncDesign as e:
             log("asynchronous behaviour: %s" % e)
             log("galre models clocked designs, the GAL22V10's asynchronous reset term, and "
-                "latches without registers; no equations written.")
+                "latches, alone or in a clocked design; no equations written.")
             return 3
         finally:
             if isinstance(rig, RecordingRig):
@@ -198,6 +217,7 @@ def main(argv=None):
         if bad:
             log("equations disagree with the captures: %s" % bad[:6])
         log("")
+        mixed = not latches and a.mixed
         if not latches:
             for s, (path, _) in a.states.items():
                 log("state %s  W=%s  path %s" % ("".join(map(str, s)), a.W.get(s), list(path)))
@@ -216,23 +236,45 @@ def main(argv=None):
         if not args.cupl:
             log("no CUPL compiler (--cupl or $CUPL): %s not compiled" % pld)
             return 0 if not bad else 1
-        jed = compile_cupl(args.cupl, pld, log)
+        # A latch's cover has product terms that only hold it through a
+        # step.  CUPL's minimiser takes them out again, so a design with
+        # latches is compiled without it, if it fits that way.
+        jed = None
+        if latches or mixed:
+            jed = compile_cupl(args.cupl, pld, lambda msg: None, minimise=0)
+            if jed:
+                notes = []
+                diff = verify.check_captures(a, jed, notes)
+                if diff:
+                    log("compiled without CUPL's minimisation, %s disagrees with the "
+                        "captures (%s); compiling with it" % (os.path.basename(jed), diff[:3]))
+                    jed = None
+                else:
+                    log("compiled without CUPL's minimisation (-m0), which would remove the "
+                        "product terms that hold the latches through a step")
+            else:
+                log("does not fit without CUPL's minimisation; compiling with it (the "
+                    "latches lose the product terms that hold them through a step)")
         if not jed:
-            return 1
-        notes = []
-        diff = verify.check_captures(a, jed, notes)
-        log("%s against the captures (%s x %d input vectors): %s" % (
+            jed = compile_cupl(args.cupl, pld, log)
+            if not jed:
+                return 1
+            notes = []
+            diff = verify.check_captures(a, jed, notes)
+        log("%s against the captures (%s x %d input vectors%s): %s" % (
             os.path.basename(jed),
             "%d walks" % len(a.walks) if latches else "%d states" % len(a.states),
-            1 << len(a.V), "identical" if not diff else diff[:6]))
+            1 << len(a.V),
+            ", %d walks with pin 1" % (len(a.lwalks) - len(a.states)) if mixed else "",
+            "identical" if not diff else diff[:6]))
         if notes:
             log("  %d walks start differently (galre does not model the latches' state at "
                 "power-up), the first %s" % (len(notes), notes[0]))
         if args.mode == "sim":
             d, first, osc = verify.compare_jeds(args.source, jed, args.steps, fixed=a.fixed,
-                                                sic=latches)
+                                                sic=latches or mixed)
             log("random %d-step run%s, original vs rebuilt: %s" % (
-                args.steps, " (one input changing at a time)" if latches else "",
+                args.steps, " (one input changing at a time)" if latches or mixed else "",
                 "no difference" if not d else "%s, first %s" % (d, first)))
             diff = diff or d
         return 0 if not (bad or diff) else 1

@@ -23,17 +23,26 @@ a pin the GAL does not drive reads back its drive.
         transitions() observes a state, else None.  For a clocked design
         the order and sigs make no difference; a chip with asynchronous
         state shows them.
+        With a path, V may include pin 1: the path clocks as usual, then
+        the walk drives pin 1 like any other enumerated pin (bit of start:
+        the level it begins at), and the chip is clocked whenever the walk
+        raises it.
     transitions(V, base, path, probes, cand, count=None, mul=1, returns=(),
-                avoid=None, chk=False)
+                avoid=None, chk=False, ignore=(), pre=False)
         For each x (all, or (i * mul) mod 2^n for i < count): from the path
         state, clock x in and observe the new state: for each probe drive
         (pin 1 low), per candidate pin c, (level of c, level of c with only
         c's drive inverted).  Returns ({observation: bitset of x}, flags).
         returns lists (observation, [drives]): clocked paths from the state
         with that observation back to the path state, which save power
-        cycles.  With chk, flags lists x whose state the observation
-        changed (read at x after the clock edge and again after the
-        probes), at most 16 of them; else it is empty.
+        cycles.  With chk, flags lists (x, pins) for the x whose state the
+        observation changed (read at x after the clock edge and again
+        after the probes; pins read differently), at most 16 of them; else
+        it is empty.  The pins in ignore are left out of every read: pins
+        known to change without a clock (latches) then neither flag a
+        vector nor tell two states apart.  With pre, a third value is
+        returned: pin -> bitset over x of the pin's level with x driven,
+        just before the clock edge (every pin, also those in ignore).
 
 avoid (a cube, like skip) makes every write go around it: no momentary mix
 of old and new pin values on the way to a vector lies in it (fw/capture.c,
@@ -125,6 +134,17 @@ def gray_order(n, rot=0, rev=0, start=0):
 _BIT = [bytes(49 if v >> k & 1 else 48 for v in range(256)) for k in range(8)]
 
 
+def pin_bitsets(raw, sbit):
+    """pin -> bitset over x, from 4 bytes per x (a 28-bit socket read, low
+    byte first) and each pin's socket bit."""
+    out = {}
+    for p, m in sbit.items():
+        b = m.bit_length() - 1
+        s = raw[b >> 3::4].translate(_BIT[b & 7])
+        out[p] = int(s[::-1], 2) if s else 0
+    return out
+
+
 def cube_set(cube, V, base, full, v1):
     """Bitset of the x whose drive lies in cube (pin -> 0/1); pins outside
     V are at base."""
@@ -178,19 +198,28 @@ class SimRig:
         self.q0 = {o.pin: 0 for o in self.g.olmcs if o.registered}
         self.async_parts = self.g.async_parts()
         self.fw = None
+        self._fw_args = (jed, socket)
         loops = [a for a in self.async_parts if a.startswith("combinational")]
         if loops or (self.async_parts and not careful):
-            import fwsim
-            lib = fwsim.library()
-            if not lib:
-                raise RuntimeError("%s has %s: simulating it needs a C compiler" % (
-                    jed, " and ".join(self.async_parts)))
-            socket = socket or DEFAULT_SOCKET[self.device]
-            self.socket_device = fwsim.SocketDevice(jed, socket)
-            self.fw = BrutusRig(fwsim.HarnessTransport(lib, self.socket_device), self.device,
-                                socket, off_ms=off_ms, on_ms=on_ms, log=lambda *a: None,
-                                jumper_check=False)
-            self.ops = self.fw.ops
+            self._firmware()
+
+    def _firmware(self):
+        """From now on, run every job through the firmware built for the
+        host."""
+        import fwsim
+        jed, socket = self._fw_args
+        lib = fwsim.library()
+        if not lib:
+            raise RuntimeError("%s has %s: simulating it needs a C compiler" % (
+                jed, " and ".join(self.async_parts) or "pin 1 walked in a registered design"))
+        socket = socket or DEFAULT_SOCKET[self.device]
+        self.socket_device = fwsim.SocketDevice(jed, socket)
+        self.fw = BrutusRig(fwsim.HarnessTransport(lib, self.socket_device), self.device,
+                            socket, off_ms=self.off_ms, on_ms=self.on_ms, log=lambda *a: None,
+                            jumper_check=False)
+        for k, v in self.ops.items():
+            self.fw.ops[k] += v
+        self.ops = self.fw.ops
 
     def _replay(self, path):
         self.q = dict(self.q0)
@@ -237,6 +266,8 @@ class SimRig:
 
     def walk(self, V, base, path, mul=1, rev=0, probes=(), cand=(), gray=0, start=0,
              skip=None, avoid=None, data=True, rot=0):
+        if not self.fw and CLOCK in V and self.q0:
+            self._firmware()          # the walk clocks the registers
         if self.fw:
             return self.fw.walk(V, base, path, mul=mul, rev=rev, probes=probes, cand=cand,
                                 gray=gray, start=start, skip=skip, avoid=avoid, data=data,
@@ -275,21 +306,23 @@ class SimRig:
         return la, lb, sigs
 
     def transitions(self, V, base, path, probes, cand, count=None, mul=1, returns=(),
-                    avoid=None, chk=False):
+                    avoid=None, chk=False, ignore=(), pre=False):
         if self.fw:
             return self.fw.transitions(V, base, path, probes, cand, count=count, mul=mul,
-                                       returns=returns, avoid=avoid, chk=chk)
+                                       returns=returns, avoid=avoid, chk=chk, ignore=ignore,
+                                       pre=pre)
         self._replay(path)
         q0 = dict(self.q)
         n = len(V)
         full, v1 = litmasks(n)
         sel = x_selection(n, count, mul)
         ext = self._ext(V, base, full, v1)
-        _, _, nextq, ar = self.bits.settle(q0, ext, full)
+        before, _, nextq, ar = self.bits.settle(q0, ext, full)
         if ar:
             # cleared before the edge, which loads from the cleared state
-            _, _, nq0, _ = self.bits.settle(self.q0, ext, full)
+            b0, _, nq0, _ = self.bits.settle(self.q0, ext, full)
             nextq = {p: (v & ~ar) | (nq0[p] & ar) for p, v in nextq.items()}
+            before = {p: (v & ~ar) | (b0[p] & ar) for p, v in before.items()}
         groups = [((), sel)]
         regs = sorted(nextq)
         for p in regs:
@@ -342,7 +375,9 @@ class SimRig:
             ops["power_cycles"] += k
             ops["clocks"] += k * len(path)
             ops["io"] += k * (2 * len(path) + nsig)
-        ops["bytes"] += popcount(sel) + 4 * nsig * (len(out) + 1)
+        ops["bytes"] += popcount(sel) * (5 if pre else 1) + 4 * nsig * (len(out) + 1)
+        if pre:
+            return out, [], {p: before[p] & sel for p in self.pins}
         return out, []
 
 
@@ -463,7 +498,8 @@ class BrutusRig:
             self._cmd("pld capture %s + %s" % (name, " ".join("%x" % v for v in vecs[i:i + 32])))
 
     def _job(self, V, base, path, probes, cand, inv=0, count=None, mul=1, returns=(), rev=0,
-             gray=0, start=0, skip=None, avoid=None, quiet=False, chk=False, rot=0):
+             gray=0, start=0, skip=None, avoid=None, quiet=False, chk=False, rot=0,
+             ignore=(), pre=False):
         if list(V) != sorted(V):
             raise ValueError("enumerated pins must be in ascending order")
         if len(cand) > MAX_CAND:
@@ -471,8 +507,8 @@ class BrutusRig:
         self._cmd("pld capture clear")
         self._cmd("pld capture set pins=%x base=%x inv=%x clk=%x cand=%x mask=%x "
                   "count=%x mul=%x rev=%x settle=%d off=%d on=%d%s" % (
-                      self._mask(V), self._vec(base), inv, self.sbit[CLOCK] if CLOCK not in V else 0,
-                      self._mask(cand), self.readmask, count or 0, mul, rev,
+                      self._mask(V), self._vec(base), inv, self.sbit[CLOCK],
+                      self._mask(cand), self.readmask & ~self._mask(ignore), count or 0, mul, rev,
                       self.settle_us, self.off_ms, self.on_ms,
                       " vcc=%x gnd=%x supply=%d" % (self.vcc_bit, self.gnd_bit, SUPPLY_MV)
                       if self.jumper_check else ""))
@@ -492,6 +528,8 @@ class BrutusRig:
             extra.append("quiet=1")
         if chk:
             extra.append("chk=1")
+        if pre:
+            extra.append("pre=1")
         if extra:
             self._cmd("pld capture set " + " ".join(extra))
         self._list("path", [self._vec(d) for d in path], MAX_PATH)
@@ -605,16 +643,17 @@ class BrutusRig:
         return la, lb, sigs
 
     def transitions(self, V, base, path, probes, cand, count=None, mul=1, returns=(),
-                    avoid=None, chk=False):
+                    avoid=None, chk=False, ignore=(), pre=False):
         n = len(V)
         self._job(V, base, path, probes, cand, count=count, mul=mul, returns=returns,
-                  avoid=avoid, chk=chk)
+                  avoid=avoid, chk=chk, ignore=ignore, pre=pre)
         cap = self._run("trans")
         nsig = cap.sig_reads
         self._obs(cap.sigs[0], probes, cand)          # the path state itself
         data = cap.data
         N = 1 << n
         defs, maps = [], []
+        before = bytearray(4 * N) if pre else None
         pos = 0
         for i in range(cap.count):
             k = data[pos]
@@ -626,12 +665,18 @@ class BrutusRig:
                 maps.append(bytearray((N + 7) // 8))
             x = (i * mul) & (N - 1)
             maps[k][x >> 3] |= 1 << (x & 7)
+            if pre:
+                before[4 * x:4 * x + 4] = data[pos:pos + 4]
+                pos += 4
         out = {}
         for o, bm in zip(defs, maps):
             out[o] = out.get(o, 0) | int.from_bytes(bm, "little")
         self.ops["io"] += cap.count * (2 + nsig + (2 if chk else 0))
         self.ops["clocks"] += cap.count
-        return out, list(cap.flags)
+        flags = [(x, tuple(p for p in self.pins if d & self.sbit[p])) for x, d in cap.flags]
+        if pre:
+            return out, flags, pin_bitsets(bytes(before), {p: self.sbit[p] for p in self.pins})
+        return out, flags
 
 
 # -- recording and replay ----------------------------------------------------
@@ -700,17 +745,20 @@ class RecordingRig:
         return la, lb, sigs
 
     def transitions(self, V, base, path, probes, cand, count=None, mul=1, returns=(),
-                    avoid=None, chk=False):
-        out, flags = self.rig.transitions(V, base, path, probes, cand, count=count, mul=mul,
-                                          returns=returns, avoid=avoid, chk=chk)
+                    avoid=None, chk=False, ignore=(), pre=False):
+        res = self.rig.transitions(V, base, path, probes, cand, count=count, mul=mul,
+                                   returns=returns, avoid=avoid, chk=chk, ignore=ignore, pre=pre)
+        out, flags = res[0], res[1]
         rec = {"key": _key("trans", V, base, path, probes, cand, count, mul, avoid=avoid,
-                           chk=chk),
+                           chk=chk, ignore=list(ignore), pre=pre),
                "out": [[_enc(o), "%x" % xs] for o, xs in out.items()]}
         if flags:
             rec["flags"] = _enc(flags)
+        if pre:
+            rec["pre"] = _enc(res[2])
         self.f.write(json.dumps(rec) + "\n")
         self.f.flush()
-        return out, flags
+        return res
 
 
 class ReplayRig:
@@ -748,10 +796,15 @@ class ReplayRig:
                 {int(p): int(v, 16) for p, v in rec["lb"].items()}, sigs)
 
     def transitions(self, V, base, path, probes, cand, count=None, mul=1, returns=(),
-                    avoid=None, chk=False):
+                    avoid=None, chk=False, ignore=(), pre=False):
         rec = self.db.get(_key("trans", V, base, path, probes, cand, count, mul, avoid=avoid,
-                               chk=chk))
+                               chk=chk, ignore=list(ignore), pre=pre))
         if rec is None:
             raise CaptureError("transitions not in the recording; rerun on the board")
-        return ({_dec_obs(o): int(xs, 16) for o, xs in rec["out"]},
-                [int(x, 16) for x in rec.get("flags", ())])
+        flags = [(int(f, 16), ()) if isinstance(f, str)       # recorded before the pins
+                 else (int(f[0], 16), tuple(int(p, 16) for p in f[1]))
+                 for f in rec.get("flags", ())]
+        out = {_dec_obs(o): int(xs, 16) for o, xs in rec["out"]}
+        if pre:
+            return out, flags, {int(p): int(v, 16) for p, v in rec["pre"].items()}
+        return out, flags

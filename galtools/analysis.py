@@ -14,6 +14,9 @@
    clocked routes from other known states back, so the firmware rarely has
    to power-cycle.  If a new state drives a candidate that no probe
    enables, probes are added and the exploration restarts.
+   Outputs with a constant value and an enable are not enumerated; if
+   something reads one where the GAL lets it go (_let_go_inputs), it is
+   enumerated too, and the exploration runs again.
 3. assign: the would-be value of every registered pin per state; a pin
    that is never enabled in a state takes the complement of the only value
    it is ever seen with.
@@ -36,9 +39,9 @@ a return to the power-up state.  It is learned (_learn_ar) and explored
 around: every write avoids its inputs, probes lie outside them, and the
 states where it can fire are walked without them.  Anything else that
 changes state without a clock (latches built from combinational feedback)
-stops the analysis with AsyncDesign.  A latch that only acts in states
-other than power-up is not seen by the first check, and the others see
-only the state candidates.
+stops this analysis with AsyncDesign; reglatch.RegLatchAnalysis goes on
+from there.  It keeps the pins that change without a clock in self.hist:
+they are no state candidates, and the transition sweeps do not read them.
 """
 
 from functools import reduce
@@ -55,7 +58,12 @@ class AsyncDesign(Exception):
 
 class LatchSuspected(AsyncDesign):
     """The power-up walk depends on its order, as latches built from
-    combinational feedback make it (latch.LatchAnalysis takes over)."""
+    combinational feedback make it (latch.LatchAnalysis takes over).
+    pins: those that read differently."""
+
+    def __init__(self, message, pins=()):
+        super().__init__(message)
+        self.pins = tuple(pins)
 
 
 class _Restart(Exception):
@@ -156,6 +164,7 @@ class Table:
 
     def __init__(self, V, la, lb, full, v1, care=None):
         care = full if care is None else care
+        self.la, self.lb, self.walked = la, lb, care
         self.driven, self.value, self.care = {}, {}, {}
         for p in la:
             if p in V:
@@ -180,6 +189,9 @@ class Analysis:
         self.max_states = max_states
         self.clock_in_v = CLOCK in self.fixed
         self.late_comb = {}       # pin -> enumerate it (tri-state)
+        self.hist = set()         # pins that change without a clock (reglatch)
+        self.mixed = False        # the chip holds state without a clock too (reglatch)
+        self.bidir = set()        # pins of hist that the GAL does not always drive
         self._power_up = {}
         self.ar = None            # the asynchronous reset term's inputs, pin -> value
         self.ar_set = 0           # the x in it
@@ -206,6 +218,8 @@ class Analysis:
         for p in self.dev["io"]:
             if p in self.fixed:
                 continue                      # held: an input at a known value
+            if p in self.hist:
+                continue                      # a latch or one of its outputs
             d = t.driven[p]
             v = t.value[p] & d
             if (d and v not in (0, d)) or p in self.late_comb:
@@ -216,7 +230,7 @@ class Analysis:
         never = [p for p in self.cand if not t.driven[p]]
         ded = [p for p in self.dev["ded"]
                if (p != CLOCK or self.clock_in_v) and p not in self.fixed]
-        self.V = sorted(ded + never + tri)
+        self.V = sorted(set(ded + never + tri) | self.bidir)
         self.full, self.v1 = litmasks(len(self.V))
         if self.ar:
             if any(p not in self.V for p in self.ar):
@@ -224,7 +238,9 @@ class Analysis:
                                   "enumerated")
             self.ar_set = cube_set(self.ar, self.V, self.base, self.full, self.v1)
         self.log("power-up walk: combinational %s (tri-state %s), state candidates %s "
-                 "(never driven %s)" % (self.comb0, tri, self.cand, never))
+                 "(never driven %s)%s" % (
+                     self.comb0, tri, self.cand, never,
+                     ", changing without a clock %s" % sorted(self.hist) if self.hist else ""))
         self.log("enumerated pins (%d): %s%s" % (
             len(self.V), self.V,
             ", fixed %s" % self.fixed if self.fixed else ""))
@@ -246,16 +262,20 @@ class Analysis:
         n = len(V)
         if n < 2:
             return
-        for name, mul, rev in self.ORDERS:
+        found, pins = None, set()
+        for order, mul, rev in self.ORDERS:
             la2, lb2, _ = self.rig.walk(V, self.base, [], mul=mul & ((1 << n) - 1), rev=rev)
-            diff = {p: (la[p] ^ la2[p]) | (lb[p] ^ lb2[p]) for p in la}
-            diff = {p: d for p, d in diff.items() if d}
-            if diff:
-                break
-        else:
+            d = {p: (la[p] ^ la2[p]) | (lb[p] ^ lb2[p]) for p in la if p not in self.hist}
+            d = {p: v for p, v in d.items() if v}
+            if d and found is None:
+                found = order, d
+            pins.update(d)                    # every order: each may show other pins
+        if found is None:
             return
+        name, diff = found
         la3, lb3, _ = self.rig.walk(V, self.base, [])
-        unsteady = sorted(p for p in la if (la[p] ^ la3[p]) | (lb[p] ^ lb3[p]))
+        unsteady = sorted(p for p in la if p not in self.hist
+                          and (la[p] ^ la3[p]) | (lb[p] ^ lb3[p]))
         if unsteady:
             raise AsyncDesign("the same walk read differently twice on %s: a bad contact, "
                               "a floating pin or an oscillating output" % _pins(unsteady))
@@ -266,7 +286,8 @@ class Analysis:
             "input vectors, the first %s): the chip holds state without a clock, like a "
             "latch built from combinational feedback" % (
                 _pins(sorted(diff)), name, popcount(xs), 1 << n,
-                " ".join("P%d=%d" % (p, x >> i & 1) for i, p in enumerate(V))))
+                " ".join("P%d=%d" % (p, x >> i & 1) for i, p in enumerate(V))),
+            pins=sorted(pins))
 
     def _disturbed(self, path, sigs, around=False):
         before, after = (self._sig_obs(o) for o in sigs)
@@ -280,9 +301,9 @@ class Analysis:
                 " around the asynchronous reset term" if around else "", _state(after),
                 " in another way too" if self.ar else ""))
 
-    def _flagged(self, path, x):
+    def _flagged(self, path, x, pins=()):
         """Reading the state that clocking x in from the path state leads
-        to changed it."""
+        to changed it (pins read differently)."""
         if self.ar is None and self.device == "GAL22V10" and len(path) < MAX_PATH:
             self._learn_ar(path + (x,))
         raise AsyncDesign(
@@ -336,6 +357,8 @@ class Analysis:
         la0, lb0 = self._raw0
         diff = out = 0
         for p in la:
+            if p in self.hist:
+                continue
             diff |= (la[p] ^ la0[p]) | (lb[p] ^ lb0[p])
             if p not in V and p != CLOCK:
                 out |= la[p] ^ la0[p]
@@ -351,7 +374,7 @@ class Analysis:
         if d is None:
             raise AsyncDesign("%s returns to the power-up state without a clock, but no output "
                               "tells the two states apart" % what)
-        dpins = [p for p in sorted(la) if p not in V and p != CLOCK
+        dpins = [p for p in sorted(la) if p not in V and p != CLOCK and p not in self.hist
                  and (la[p] ^ la0[p]) >> d & 1][:MAX_CAND]
         want = tuple(la[p] >> d & 1 for p in dpins)
         probe = [self._drive(d)]
@@ -485,17 +508,29 @@ class Analysis:
         n = len(self.V)
         if count is not None and count >= 1 << n:
             count = None
-        obs, flags = self.rig.transitions(self.V, self.base, self.drives(path), self.probes(),
-                                          self.cand, count=count,
-                                          mul=1 if count is None else survey_mul(n),
-                                          returns=self._returns(s), avoid=self.ar, chk=True)
+        res = self.rig.transitions(self.V, self.base, self.drives(path), self.probes(),
+                                   self.cand, count=count,
+                                   mul=1 if count is None else survey_mul(n),
+                                   returns=self._returns(s), avoid=self.ar, chk=True,
+                                   ignore=sorted(self.hist), pre=self.mixed)
+        obs, flags = res[0], res[1]
+        if self.mixed and count is None:
+            self.pre[s] = res[2]              # the pin levels each x was clocked in with
         if flags:
-            self._flagged(path, flags[0])
+            self._flagged(path, *flags[0])
         m = self.edges.setdefault(s, {})
         if count is None:
             self.trans[s] = {}
         for o, xs in obs.items():
             s2 = self._sig_obs(o)
+            for s3, x3 in m.items():
+                if s3 != s2 and x3 & xs and not self.mixed:
+                    self._two_ways(
+                        "clocking %s in from state %s led to state %s once and to %s once: "
+                        "the next state depends on more than the inputs and the registers "
+                        "(a register input that reads a latch), or the readings do not "
+                        "repeat" % (self._inputs(lowest(x3 & xs)), _state(s), _state(s3),
+                                    _state(s2)))
             self.obs_of.setdefault(s2, set()).add(o)
             m[s2] = m.get(s2, 0) | xs
             if count is None:
@@ -510,7 +545,11 @@ class Analysis:
                     return False
                 late = [r for r, v in zip(self.cand, st) if v == "?"]
                 if not late:
-                    raise RuntimeError("state %s walks as %s" % (s2, st))
+                    raise AsyncDesign(
+                        "clocking %s in from state %s led to state %s, but the same clocks "
+                        "from power-up lead to %s: the chip has state that no pin shows, or "
+                        "its readings do not repeat" % (
+                            self._inputs(lowest(xs)), _state(s), _state(s2), _state(st)))
                 # constant at power-up, input-dependent here: combinational
                 for r in late:
                     self.late_comb[r] = bool(self.full ^ t.driven[r])
@@ -531,7 +570,7 @@ class Analysis:
         s0 = self._sig_table(t0)
         self.power_up_state = s0
         self.states = {s0: ((), t0)}
-        self.trans, self.edges, self.obs_of = {}, {}, {}
+        self.trans, self.edges, self.obs_of, self.pre = {}, {}, {}, {}
         if self.clock_in_v:
             self.trans[s0] = {s0: self.full}
             return True
@@ -591,13 +630,95 @@ class Analysis:
         self.explore()
         if (not self.reg and len(self.states) == 1 and not self.clock_in_v
                 and CLOCK not in self.fixed):
-            self.log("clocking never changes the state: combinational design, "
-                     "enumerating pin 1 as an input")
-            self.clock_in_v = True
+            self._unclocked()
+        while self._let_go_inputs():
             self.discover()
             self.explore()
         self.assign()
+        self.asynchronous()
         return self.equations()
+
+    def _let_go_inputs(self):
+        """Outputs with a constant value and an enable (X = 'b'0; X.oe = ...)
+        looked like state candidates, so they were never enumerated: where
+        the GAL lets one go, it sat at its base level, and in every second
+        read at the other level together with all the others.  If another
+        pin, an enable or a register input reads such a pin, it is an
+        input too, and what is learned is wrong where it is let go at the
+        other level.
+
+        To find out, every state is walked (and swept, if there are
+        registers) with all of them held at the level they do not drive,
+        so that each shows where it is driven; then, for each, once more
+        with that one at the level it drives.  One whose level makes a
+        difference to any other pin or to a transition is enumerated from
+        the next round on (True: discover and explore again)."""
+        held = {}
+        for r in self.cand:
+            if r not in self.comb or r in self.late_comb or r in self.hist:
+                continue
+            tables = [t for _, t in self.states.values()]
+            if not any(t.care[r] ^ t.driven[r] for t in tables):
+                continue                              # always driven
+            vals = {v for t in tables for v in (0, 1)
+                    if (t.value[r] if v else ~t.value[r]) & t.driven[r]}
+            if len(vals) == 1:
+                held[r] = 1 - vals.pop()
+        if not held:
+            return False
+        base = dict(self.base)
+        base.update(held)
+        ignore = sorted(self.hist)
+
+        def look(b, s, path, t):
+            kw = dict(skip=self.ar if s in self.ar_on else None,
+                      avoid=self.ar if path else None)
+            la, lb, _ = self.rig.walk(self.V, b, self.drives(path), **kw)
+            tr = None
+            if self.reg and self.probe_x:
+                obs = self.rig.transitions(self.V, b, self.drives(path), self.probes(),
+                                           self.cand, avoid=self.ar, ignore=ignore)[0]
+                tr = {}
+                for o, xs in obs.items():
+                    s2 = self._sig_obs(o)
+                    tr[s2] = tr.get(s2, 0) | xs
+            return la, lb, tr
+        found = set()
+        for s, (path, t) in self.states.items():
+            la0, lb0, tr0 = look(base, s, path, t)
+            for q in sorted(held):
+                if q in found:
+                    continue
+                b = dict(base)
+                b[q] = 1 - held[q]
+                la, lb, tr = look(b, s, path, t)
+                if tr != tr0 or any(((la[p] ^ la0[p]) | (lb[p] ^ lb0[p])) & t.walked
+                                    for p in la if p not in (q, CLOCK) and p not in self.hist):
+                    found.add(q)
+        if not found:
+            return False
+        for q in found:
+            self.late_comb[q] = True
+        self.log("%s %s an enable, and other logic reads %s where the GAL lets go: "
+                 "enumerating %s too, and exploring again" % (
+                     _pins(sorted(found)), "has" if len(found) == 1 else "have",
+                     "it" if len(found) == 1 else "them", "it" if len(found) == 1 else "them"))
+        return True
+
+    def _two_ways(self, msg):
+        """The survey and the full sweep of a state disagree."""
+        raise AsyncDesign(msg)
+
+    def _unclocked(self):
+        self.log("clocking never changes the state: combinational design, "
+                 "enumerating pin 1 as an input")
+        self.clock_in_v = True
+        self.discover()
+        self.explore()
+
+    def asynchronous(self):
+        """What the exploration left out (reglatch.RegLatchAnalysis: the
+        pins that change without a clock)."""
 
     # 3. would-be register values per state ---------------------------------
     def assign(self):
@@ -638,21 +759,7 @@ class Analysis:
             if any(o[1] for o in oe.values()):
                 F[(p, "oe")] = oe
         for i, r in enumerate(regs):
-            dd = {}
-            for s, m in self.trans.items():
-                on = off = 0
-                for s2, xs in m.items():
-                    if self.W[s2][i]:
-                        on |= xs
-                    else:
-                        off |= xs
-                if s in self.ar_dc:
-                    # the reset clears the registers first: the edge loads
-                    # from the power-up state, whatever the state's inputs
-                    on &= ~self.ar_set
-                    off &= ~self.ar_set
-                dd[s] = (on, off)
-            F[(r, "d")] = dd
+            F[(r, "d")] = self._dfunction(i)
             if self.device == "GAL22V10":
                 oe = {}
                 for s, (_, t) in self.states.items():
@@ -662,19 +769,45 @@ class Analysis:
                     F[(r, "oe")] = oe
         return F
 
+    def _dfunction(self, i):
+        """Per state, the (on, off) sets of the i-th register's input."""
+        dd = {}
+        for s, m in self.trans.items():
+            on = off = 0
+            for s2, xs in m.items():
+                if self.W[s2][i]:
+                    on |= xs
+                else:
+                    off |= xs
+            if s in self.ar_dc:
+                # the reset clears the registers first: the edge loads
+                # from the power-up state, whatever the state's inputs
+                on &= ~self.ar_set
+                off &= ~self.ar_set
+            dd[s] = (on, off)
+        return dd
+
+    def _eq_space(self):
+        """What the equations are written over: the pins EV, with their
+        bitset masks; and the variables that are constant in a context
+        (cvars, the registered pins; CW gives a context's values, and a
+        context is a state)."""
+        self.EV, self.efull, self.ev1 = self.V, self.full, self.v1
+        self.cvars, self.CW = sorted(self.reg), self.W
+
     def _support(self, f):
-        """Variables (index into V, then registers) f depends on."""
-        n, regs = len(self.V), sorted(self.reg)
+        """Variables (index into EV, then cvars) f depends on."""
+        n = len(self.EV)
         sup = set()
         for s, (on, off) in f.items():
             for b in range(n):
-                if b not in sup and (on & swap(off, b, self.v1)) & self.full:
+                if b not in sup and (on & swap(off, b, self.ev1)) & self.efull:
                     sup.add(b)
         sl = list(f)
-        for i in range(len(regs)):
+        for i in range(len(self.cvars)):
             for a in sl:
                 for b in sl:
-                    wa, wb = self.W[a], self.W[b]
+                    wa, wb = self.CW[a], self.CW[b]
                     if sum(x != y for x, y in zip(wa, wb)) == 1 and wa[i] != wb[i] and wa[i] == 0:
                         if (f[a][0] & f[b][1]) or (f[a][1] & f[b][0]):
                             sup.add(n + i)
@@ -683,11 +816,11 @@ class Analysis:
     def _project(self, f, sup):
         """on/off minterm bitsets over the support, by splitting the x
         bitsets on each support variable."""
-        n = len(self.V)
+        n = len(self.EV)
         vpos = [(j, v) for j, v in enumerate(sup) if v < n]
         on = off = 0
         for s, (fo, ff) in f.items():
-            w = self.W[s]
+            w = self.CW[s]
             wbits = 0
             for j, v in enumerate(sup):
                 if v >= n and w[v - n]:
@@ -697,7 +830,7 @@ class Analysis:
                 for j, v in vpos:
                     ng = []
                     for m, g in groups:
-                        a, b = g & ~self.v1[v], g & self.v1[v]
+                        a, b = g & ~self.ev1[v], g & self.ev1[v]
                         if a:
                             ng.append((m, a))
                         if b:
@@ -724,9 +857,10 @@ class Analysis:
             self.ar_dc = set(self.ar_on)
             if all(self.W[s0][sorted(self.reg).index(r)] == v for r, v in self.ar_regs.items()):
                 self.ar_dc.add(s0)
+        self._eq_space()
         F = self.functions()
         regs = sorted(self.reg)
-        names = [self.name(p) for p in self.V] + [self.name(r) for r in regs]
+        names = [self.name(p) for p in self.EV] + [self.name(r) for r in self.cvars]
         self.F, self.cover, eqs = F, {}, []
         for (p, kind), f in F.items():
             sup = self._support(f)
@@ -734,7 +868,7 @@ class Analysis:
                 on, off = self._project(f, sup)
                 if not on & off:
                     break
-                extra = [i for i in range(len(self.V) + len(regs)) if i not in sup]
+                extra = [i for i in range(len(self.EV) + len(self.cvars)) if i not in sup]
                 if not extra:
                     raise RuntimeError("pin %d %s is not a function of the inputs and "
                                        "registers" % (p, kind))
@@ -742,6 +876,7 @@ class Analysis:
             k = len(sup)
             pos = sop(on, off, k)
             neg = sop(off, on, k)
+            pos, neg = self._hazards(p, kind, sup, pos, neg, on, off)
             if kind == "d" and self.device == "GAL22V10":
                 # a cleared register (power-up, reset term) shows the output
                 # polarity on the pin: CUPL makes a negated .d active low
@@ -760,6 +895,11 @@ class Analysis:
             eqs.append((p, kind, inv, expr, len(cubes)))
         self.eqs = sorted(eqs)
         return self.eqs
+
+    def _hazards(self, p, kind, sup, pos, neg, on, off):
+        """The two covers of a function, with whatever its kind needs
+        beyond covering (reglatch: a latch must not glitch)."""
+        return pos, neg
 
     def _ar_term(self):
         """The register literals of the asynchronous reset term: true in the
@@ -802,27 +942,33 @@ class Analysis:
     def check_equations(self):
         """Every function's cover against its captured on/off sets; a list
         of (pin, kind, state) that disagree (empty when all hold)."""
-        n, bad = len(self.V), []
+        bad = []
         for key, f in self.F.items():
-            sup, cubes, inv = self.cover[key]
             for s, (on, off) in f.items():
-                cov = 0
-                for care, val in cubes:
-                    c = self.full
-                    for j, v in enumerate(sup):
-                        if not care >> j & 1:
-                            continue
-                        want = val >> j & 1
-                        if v < n:
-                            c &= self.v1[v] if want else self.full ^ self.v1[v]
-                        elif self.W[s][v - n] != want:
-                            c = 0
-                    cov |= c
-                if inv:
-                    cov = self.full ^ cov
+                cov = self._cov(key, self.CW[s])
                 if (on & ~cov) or (off & cov):
                     bad.append(key + (s,))
         return bad
+
+    def _cov(self, key, w):
+        """The x for which function key's cover is true, in a context
+        whose cvars have the values w."""
+        sup, cubes, inv = self.cover[key]
+        n = len(self.EV)
+        cov = 0
+        for care, val in cubes:
+            c = self.efull
+            for j, v in enumerate(sup):
+                if not care >> j & 1:
+                    continue
+                want = val >> j & 1
+                if v < n:
+                    c &= self.ev1[v] if want else self.efull ^ self.ev1[v]
+                elif w[v - n] != want:
+                    c = 0
+                    break
+            cov |= c
+        return self.efull ^ cov if inv else cov
 
     def cupl(self, title="galre"):
         regs = sorted(self.reg)
@@ -832,7 +978,9 @@ class Analysis:
                  "Device %s;" % self.dev["cupl"], ""]
         if clocked:
             lines.append("Pin 1 = CLK;")
-        for p in sorted(set(self.V) | set(self.reg) | set(self.comb)):
+        for p in sorted(set(self.EV) | set(self.reg) | set(self.comb)):
+            if p == CLOCK and clocked:
+                continue
             if self.device == "GAL16V8" and clocked and p == 11:
                 lines.append("Pin 11 = !OE;")
                 continue

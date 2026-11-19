@@ -2,8 +2,9 @@
 
 The firmware answers a run ("pld capture walk / trans / state") with the
 line "---- CAPTURE ----" and binary chunks <type:1> <length:2 LE> <payload>:
-'H' header, 'P' signature reads, 'D' data, 'F' flagged vectors, 'E' end with
-status, counters and a CRC-32 over all chunk bytes before it.  Configuration commands ("pld
+'H' header, 'P' signature reads, 'D' data, 'F' flagged vectors (each with
+the mask of the pins that changed), 'E' end with status, counters and a
+CRC-32 over all chunk bytes before it.  Configuration commands ("pld
 capture set / path / probe / ret") print nothing unless they fail.
 """
 
@@ -30,7 +31,7 @@ class Capture:
     def __init__(self):
         self.sigs = []          # signatures, each a list of sig_reads reads
         self.data = bytearray()  # all 'D' payloads
-        self.flags = []          # 'F' vectors
+        self.flags = []          # 'F': (vector, mask of the pins that changed)
         self.status = None
 
     def _header(self, p):
@@ -70,7 +71,10 @@ def read_capture(read_exact):
         elif kind == "D":
             cap.data += payload
         elif kind == "F":
-            cap.flags.extend(struct.unpack("<%dI" % (n // 4), payload))
+            words = struct.unpack("<%dI" % (n // 4), payload)
+            if len(words) & 1:
+                raise CaptureError("flag chunk without pin masks (older firmware?)")
+            cap.flags.extend(zip(words[0::2], words[1::2]))
         else:
             raise CaptureError("unknown chunk type %r" % kind)
 
