@@ -46,6 +46,7 @@ the board work in .ops.
 import json
 import re
 import struct
+import sys
 import zlib
 from array import array
 from functools import reduce
@@ -107,6 +108,21 @@ def walk_x(i, n, mul=1, rev=0, gray=0, start=0, rot=0):
     if rot:
         x = ((x << rot) | (x >> (n - rot))) & m
     return (bitrev(x, n) if rev else x) ^ start
+
+
+def gray_order(n, rot=0, rev=0, start=0):
+    """The vectors of a Gray code walk in the order written: walk_x(i, n,
+    gray=1, ...) for i = 0, 1, ..."""
+    pos = [1 << (n - 1 - (g + rot) % n if rev else (g + rot) % n) for g in range(n)]
+    x = start
+    yield x
+    for i in range(1, 1 << n):
+        x ^= pos[(i & -i).bit_length() - 1]
+        yield x
+
+
+# per bit of a byte: the byte values as '1' (bit set) or '0'
+_BIT = [bytes(49 if v >> k & 1 else 48 for v in range(256)) for k in range(8)]
 
 
 def cube_set(cube, V, base, full, v1):
@@ -533,16 +549,24 @@ class BrutusRig:
         except ImportError:
             reads = array("I")
             reads.frombytes(bytes(data))
+            if sys.byteorder != "little":
+                reads.byteswap()
             reads = reads[offset::step]
             if mul != 1 or rev or gray or start or rot:
                 ordered = array("I", bytes(4 * N))
-                for i, r in enumerate(reads):
-                    ordered[walk_x(i, n, mul, rev, gray, start, rot)] = r
+                if gray:
+                    for r, x in zip(reads, gray_order(n, rot, rev, start)):
+                        ordered[x] = r
+                else:
+                    for i, r in enumerate(reads):
+                        ordered[walk_x(i, n, mul, rev, gray, start, rot)] = r
                 reads = ordered
-            table = bytes.maketrans(b"\x00\x01", b"01")
+            if sys.byteorder != "little":
+                reads.byteswap()
+            raw = reads.tobytes()                # 4 bytes per read, low byte first
             for p in self.pins:
-                m = self.sbit[p]
-                s = bytes(1 if r & m else 0 for r in reads).translate(table)
+                b = self.sbit[p].bit_length() - 1
+                s = raw[b >> 3::4].translate(_BIT[b & 7])
                 out[p] = int(s[::-1], 2) if s else 0
         return out
 

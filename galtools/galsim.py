@@ -59,6 +59,16 @@ class GAL:
             self._init22(f)
         else:
             raise ValueError("unsupported fuse count %d" % len(f))
+        # for the simulation: per array column, the pin it reads and its
+        # true and complement bits (register feedback apart); per OLMC, the
+        # product terms that can be true
+        self._pins = [p for p in range(1, self.npins + 1) if p not in (self.vcc, self.gnd)]
+        self._lvcols, self._fbcols = [], []
+        for k, (kind, n) in enumerate(self.cols):
+            reg = kind == "fb" and self._olmc(n).registered
+            (self._fbcols if reg else self._lvcols).append((n, 1 << (2 * k), 1 << (2 * k + 1)))
+        for o in self.olmcs:
+            o.live = [self.rows[r] for r in o.rows if self.satisfiable(r)]
         self.power_up()
 
     # -- fuse map decoding -------------------------------------------------
@@ -205,13 +215,15 @@ class GAL:
         self.unstable = set()
 
     def signal_pins(self):
-        return [p for p in range(1, self.npins + 1) if p not in (self.vcc, self.gnd)]
+        return list(self._pins)
 
     def _colvals(self, levels):
         v = 0
-        for k, (kind, n) in enumerate(self.cols):
-            bit = (1 - self.q[n]) if kind == "fb" and self._olmc(n).registered else levels[n]
-            v |= (1 << (2 * k)) if bit else (1 << (2 * k + 1))
+        for n, t, c in self._lvcols:
+            v |= t if levels[n] else c
+        q = self.q
+        for n, t, c in self._fbcols:
+            v |= c if q[n] else t
         return v
 
     def _olmc(self, pin):
@@ -225,7 +237,11 @@ class GAL:
         return m is not None and (m & ~cv) == 0
 
     def _sum(self, o, cv):
-        return int(any(self._term(r, cv) for r in o.rows))
+        ncv = ~cv
+        for m in o.live:
+            if not m & ncv:
+                return 1
+        return 0
 
     def _outputs(self, levels):
         """Pins the chip drives and their values, for the given pin levels."""
@@ -257,7 +273,7 @@ class GAL:
         """Apply external drive (dict pin -> 0/1 for every signal pin) and
         settle.  Returns (levels, driven-set)."""
         self.ext = dict(ext)
-        pins = self.signal_pins()
+        pins = self._pins
         levels = dict(self.levels) if self.levels else {p: ext.get(p, 0) for p in pins}
         for p in pins:
             if p not in self.driven:
