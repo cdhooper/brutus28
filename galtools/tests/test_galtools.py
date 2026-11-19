@@ -573,6 +573,41 @@ class Firmware(unittest.TestCase):
         finally:
             shutil.rmtree(out)
 
+    def test_c_model(self):
+        """fwstub/galmodel.c, the chip SimRig puts in the socket, reads the
+        same as galsim.py's GAL in fwsim.SocketDevice after every write:
+        single pins, clock edges, whole vectors and power cycles."""
+        import ctypes
+        import glob
+        import random
+        lib = ctypes.CDLL(self.lib)
+        lib.gal_io.restype = ctypes.c_uint32
+        lib.gal_io.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        lib.gal_power.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        for path in sorted(glob.glob(os.path.join(DESIGNS, "*.jed"))):
+            for socket in (["dip24", "plcc28"] if GAL(path).kind == "GAL22V10" else ["dip20"]):
+                with self.subTest(design=os.path.basename(path), socket=socket):
+                    dev = fwsim.SocketDevice(path, socket)
+                    cdev = fwsim.SocketDevice(path, socket)
+                    c = cdev.cgal(lib)
+                    rnd = random.Random(7)
+                    bits = [dev.sbit[p] for p in dev.pins]
+                    v = 0
+                    for i in range(1500):
+                        r = rnd.random()
+                        if i == 0 or r < 0.004:
+                            on = int(i == 0 or r < 0.003)
+                            dev.power(on)
+                            lib.gal_power(c, on)
+                            continue
+                        if r < 0.5:
+                            v ^= rnd.choice(bits)
+                        elif r < 0.6:
+                            v ^= dev.sbit[1]
+                        else:
+                            v = sum(b for b in bits if rnd.random() < 0.5)
+                        self.assertEqual(lib.gal_io(c, v), dev.io(v), (i, hex(v)))
+
     def test_walk_with_pin_1(self):
         """A walk that enumerates pin 1 after a clocked path clocks the
         chip whenever it raises pin 1: cnt16v8 counts."""

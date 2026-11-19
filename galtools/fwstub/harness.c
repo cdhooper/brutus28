@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "capture.h"
+#include "galmodel.h"
 
 typedef uint32_t (*io_cb_t)(uint32_t value);
 typedef void (*power_cb_t)(int on);
@@ -22,6 +23,7 @@ static unsigned char *out;
 static size_t         out_len;
 static size_t         out_cap;
 static uint32_t       direct_seen;
+static gal_t         *fast_gal;       /* the chip in C, instead of io_cb / power_cb */
 
 static void
 out_put(const void *p, size_t n)
@@ -56,14 +58,27 @@ harness_printf(const char *fmt, ...)
 void
 cap_hw_power(int on)
 {
-    power_cb(on);
+    if (fast_gal != NULL)
+        gal_power(fast_gal, on);
+    else
+        power_cb(on);
 }
 
 uint32_t
 cap_hw_io(uint32_t value, uint settle_usec)
 {
     (void) settle_usec;
+    if (fast_gal != NULL)
+        return (gal_io(fast_gal, value));
     return (io_cb(value));
+}
+
+/* The chip for the runs that follow: a galmodel.c GAL, or NULL for the
+ * callbacks given to harness_init */
+void
+harness_gal(gal_t *gal)
+{
+    fast_gal = gal;
 }
 
 void

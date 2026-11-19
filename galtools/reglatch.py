@@ -70,7 +70,7 @@ from array import array
 from analysis import Analysis, AsyncDesign, _Restart, _pins, _state, lowest, swap
 from bitsim import litmasks
 from latch import LatchAnalysis, _ONES, _ZEROS, _from_bytes
-from rig import CLOCK, bitrev, cube_set, gray_order, survey_mul
+from rig import CLOCK, bitrev, cube_set, gray_arrays, survey_mul
 
 _T01 = bytes.maketrans(b"01", b"\x00\x01")
 
@@ -356,7 +356,9 @@ class RegLatchAnalysis(Analysis):
         skipb = None
         if mode == self.AROUND:
             skipb = _b01(cube_set(self.ar, self.Vc, self.base, self.cfull, self.cv1), N)
-        vecs = [xp for xp in gray_order(n1, rot, rev, start) if not (skipb and skipb[xp])]
+        vecs = gray_arrays(n1, rot, rev, start)[0]
+        if skipb:
+            vecs = [xp for xp in vecs if not skipb[xp]]
         key = self._pack(w.la, N)
         nk = range(len(key))
         regs = [(i, r) for i, r in enumerate(sorted(self.reg))

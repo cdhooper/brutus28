@@ -59,6 +59,7 @@ import sys
 import zlib
 from array import array
 from functools import reduce
+from operator import itemgetter
 
 from bitsim import Bits, litmasks
 from galsim import GAL
@@ -128,6 +129,26 @@ def gray_order(n, rot=0, rev=0, start=0):
     for i in range(1, 1 << n):
         x ^= pos[(i & -i).bit_length() - 1]
         yield x
+
+
+_orders = {}
+
+
+def gray_arrays(n, rot=0, rev=0, start=0):
+    """(order, where): gray_order as an array, and for each vector the
+    step at which it is written.  The last few are kept: a walk is
+    decoded, followed and checked in the same order."""
+    key = (n, rot, rev, start)
+    hit = _orders.get(key)
+    if hit is None:
+        order = array("I", gray_order(n, rot, rev, start))
+        where = array("I", bytes(4 << n))
+        for i, x in enumerate(order):
+            where[x] = i
+        if len(_orders) >= 24:
+            del _orders[next(iter(_orders))]
+        hit = _orders[key] = (order, where)
+    return hit
 
 
 # per bit of a byte: the byte values as '1' (bit set) or '0'
@@ -213,7 +234,7 @@ class SimRig:
             raise RuntimeError("%s has %s: simulating it needs a C compiler" % (
                 jed, " and ".join(self.async_parts) or "pin 1 walked in a registered design"))
         socket = socket or DEFAULT_SOCKET[self.device]
-        self.socket_device = fwsim.SocketDevice(jed, socket)
+        self.socket_device = fwsim.SocketDevice(jed, socket, fast=True)
         self.fw = BrutusRig(fwsim.HarnessTransport(lib, self.socket_device), self.device,
                             socket, off_ms=self.off_ms, on_ms=self.on_ms, log=lambda *a: None,
                             jumper_check=False)
@@ -591,14 +612,14 @@ class BrutusRig:
                 reads.byteswap()
             reads = reads[offset::step]
             if mul != 1 or rev or gray or start or rot:
-                ordered = array("I", bytes(4 * N))
-                if gray:
-                    for r, x in zip(reads, gray_order(n, rot, rev, start)):
-                        ordered[x] = r
+                if gray and N > 1:
+                    # the read of vector x is the where[x]-th
+                    reads = array("I", itemgetter(*gray_arrays(n, rot, rev, start)[1])(reads))
                 else:
+                    ordered = array("I", bytes(4 * N))
                     for i, r in enumerate(reads):
                         ordered[walk_x(i, n, mul, rev, gray, start, rot)] = r
-                reads = ordered
+                    reads = ordered
             if sys.byteorder != "little":
                 reads.byteswap()
             raw = reads.tobytes()                # 4 bytes per read, low byte first

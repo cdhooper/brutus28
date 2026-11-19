@@ -104,8 +104,10 @@ A design with an asynchronous reset term or combinational feedback loops
 behaves differently depending on the exact order of the firmware's writes,
 so `sim` runs it through the firmware built for the host (`fwsim.py`,
 needs a C compiler). That model includes the three port writes per vector
-(see Limits). It simulates the chip one write at a time, so it is slow
-with many enumerated pins; hold the unused ones with `--fix`.
+(see Limits). The chip in the socket is then simulated in C as well
+(`fwstub/galmodel.c`, the same model as `galsim.py`; a test compares the
+two read for read), at a few million writes per second: a design with
+latches, three registers and 15 enumerated pins takes about 15 s.
 
 galre exits with:
 
@@ -526,7 +528,7 @@ chunks. The header comment of `fw/capture.c` describes the format.
 | `latch.py` | Latches built from combinational feedback |
 | `reglatch.py` | Latches in a registered design, and pin 1 as an input |
 | `rig.py` | `SimRig` (simulated chip), `BrutusRig` (board, jumper check), recording and replay, socket pin maps |
-| `fwsim.py`, `fwstub/` | `fw/capture.c` built for the host, with a simulated GAL in the socket |
+| `fwsim.py`, `fwstub/` | `fw/capture.c` built for the host, with a simulated GAL in the socket (`galmodel.c`: the GAL in C) |
 | `capture.py` | Serial transport and capture format |
 | `galsim.py` | Fuse-level GAL16V8/22V10 simulator |
 | `bitsim.py` | The same, evaluated for all input vectors at once |

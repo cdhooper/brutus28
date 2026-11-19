@@ -331,7 +331,8 @@ JED with the original under random stimulus:
 
 A design with an asynchronous reset term or latches is simulated through
 the firmware built for the host (needs a C compiler), one port write at a
-time. That is slow with many pins, so hold the unused ones. The test
+time, with the chip simulated in C too; that takes seconds, also with
+every pin enumerated. The test
 designs in `designs/`, with the pins the tests hold:
 
 | Design | What it shows | `--fix` |

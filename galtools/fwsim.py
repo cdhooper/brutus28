@@ -40,12 +40,12 @@ def build(cc=None):
     d = tempfile.mkdtemp(prefix="capharness")
     for f in ("capture.c", "capture.h"):
         shutil.copy(os.path.join(FW, f), d)
-    for f in ("main.h", "cmdline.h", "printf.h", "harness.c"):
+    for f in ("main.h", "cmdline.h", "printf.h", "harness.c", "galmodel.c", "galmodel.h"):
         shutil.copy(os.path.join(HERE, "fwstub", f), d)
     lib = os.path.join(d, "libcapture.so")
     subprocess.run([cc, "-shared", "-fPIC", "-O2", "-Wall", "-Wextra", "-Werror",
-                    "-Wno-unused-parameter", "-o", lib, "capture.c", "harness.c"],
-                   cwd=d, check=True)
+                    "-Wno-unused-parameter", "-o", lib, "capture.c", "harness.c",
+                    "galmodel.c"], cwd=d, check=True)
     return lib
 
 
@@ -64,9 +64,16 @@ def library():
 
 
 class SocketDevice:
-    """A GAL in the Brutus-28 socket, as the firmware sees it."""
+    """A GAL in the Brutus-28 socket, as the firmware sees it.
 
-    def __init__(self, jed, socket):
+    With fast, the harness simulates the chip itself, in C (fwstub/
+    galmodel.c, the same model as galsim.py's GAL and this class): about
+    a hundred times faster, but power() and io() are then not called, so
+    the counters and writes below stay as they are."""
+
+    def __init__(self, jed, socket, fast=False):
+        self.fast = fast
+        self._cgal = None
         self.g = GAL(jed)
         npins, vcc, gnd, smap = SOCKETS[socket]
         self.pins = self.g.signal_pins()
@@ -127,6 +134,52 @@ class SocketDevice:
         levels, _ = self.g.apply({p: 1 if value & self.sbit[p] else 0 for p in self.pins})
         return levels
 
+    def cgal(self, lib):
+        """This chip as a galmodel.c GAL of the harness library lib."""
+        if self._cgal is None:
+            g = self.g
+            u8, u32, u64 = ctypes.c_uint8, ctypes.c_uint32, ctypes.c_uint64
+            ncols = len(g.cols)
+            regfb = [kind == "fb" and g._olmc(n).registered for kind, n in g.cols]
+            # a row mask has its true and complement fuses side by side, as galmodel.c
+            rows = [0 if m is None else m for m in g.rows]
+            sbit = [self.sbit.get(p, 0) for p in range(32)]
+            pins = sum(1 << p for p in self.pins)
+            lib.gal_new.restype = ctypes.c_void_p
+            lib.gal_new.argtypes = [ctypes.c_int] * 5 + [ctypes.c_void_p] * 2 + [ctypes.c_int] \
+                + [ctypes.c_void_p] * 2 + [u32, ctypes.c_void_p, u32, ctypes.c_int]
+            lib.gal_add_olmc.argtypes = [ctypes.c_void_p] + [ctypes.c_int] * 6 + [ctypes.c_void_p]
+            c = lib.gal_new(
+                g.kind == "GAL16V8", g.clock_pin or 0,
+                -1 if g.ar_row is None else g.ar_row, -1 if g.sp_row is None else g.sp_row,
+                ncols, (u8 * ncols)(*[n for _, n in g.cols]), (u8 * ncols)(*regfb),
+                len(rows), (u64 * len(rows))(*rows),
+                (u8 * len(rows))(*[m is not None for m in g.rows]),
+                pins, (u32 * 32)(*sbit), self.vcc_bit, self.transients)
+            if not c:
+                raise RuntimeError("galmodel.c does not take this GAL")
+            for o in g.olmcs:
+                mode = {"input": 0, "comb": 1, "reg": 2}[o.mode]
+                if o.mode == "reg" and g.kind == "GAL16V8":
+                    oe, row = 3, 0                    # the OE pin, 11
+                elif o.oe_row == "always":
+                    oe, row = 0, 0
+                elif o.oe_row == "never":
+                    oe, row = 1, 0
+                else:
+                    oe, row = 2, o.oe_row
+                if lib.gal_add_olmc(c, o.pin, mode, o.active_high, oe, row, len(o.live),
+                                    (u64 * max(1, len(o.live)))(*o.live)):
+                    raise RuntimeError("galmodel.c does not take this GAL")
+            lib.gal_free.argtypes = [ctypes.c_void_p]
+            self._cgal = ctypes.c_void_p(c)
+            self._lib = lib
+        return self._cgal
+
+    def __del__(self):
+        if getattr(self, "_cgal", None) is not None:
+            self._lib.gal_free(self._cgal)
+
 
 class HarnessTransport:
     """The harness library is shared by every transport in the process, so
@@ -147,6 +200,7 @@ class HarnessTransport:
         self.lib.harness_run.restype = ctypes.c_size_t
         self.lib.harness_run.argtypes = [ctypes.c_char_p]
         self.lib.harness_output.restype = ctypes.POINTER(ctypes.c_ubyte)
+        self.lib.harness_gal.argtypes = [ctypes.c_void_p]
 
     def _jumper_pins(self, vcc, gnd):
         j = self.dev.jumper_pins()
@@ -161,6 +215,7 @@ class HarnessTransport:
 
     def _run(self, line):
         self.lib.harness_init(self._io, self._pwr, self._pins, self._supply)
+        self.lib.harness_gal(self.dev.cgal(self.lib) if self.dev.fast else None)
         n = self.lib.harness_run(line.encode())
         return bytes(ctypes.cast(self.lib.harness_output(),
                                  ctypes.POINTER(ctypes.c_ubyte * n)).contents) if n else b""
