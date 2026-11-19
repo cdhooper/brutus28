@@ -165,6 +165,9 @@ class RegLatchAnalysis(Analysis):
         self.readpins = set()     # outputs with an enable whose level other logic reads
         self.rise = {}            # clock edges a walk showed: (state, x, levels) -> state
         self._dtab = None         # the register inputs learned so far, for _guess
+        # what checking the steps against the learned circuit added (_refine)
+        self.extra, self.split, self.stuck, self._lkey = {}, set(), set(), None
+        self._tabs = {}
 
     # 1. exploration without the pins that change without a clock ------------
     def _history(self, pins, err):
@@ -269,6 +272,7 @@ class RegLatchAnalysis(Analysis):
         # the outputs' levels each x was clocked in with, in each state's sweep
         self.prek = [self._pack(self.pre[s], N) if s in self.pre else None for s in self.S]
         self.rise, self._dtab = {}, None
+        self.extra, self.split, self.stuck, self._lkey = {}, set(), set(), None
 
     def _pack(self, la, N):
         """The outputs' levels per vector, 8 pins to a byte (in the order
@@ -632,6 +636,12 @@ class RegLatchAnalysis(Analysis):
         # nothing depends on Brutus's drive of such a pin, only on its level:
         # samples are kept with those drive bits at 0
         canon = ~sum(1 << b for _, b in bj)
+        self._bq = [(q, self.L.index(q), self.Vc.index(q)) for q in self.B]
+        self.steps = []
+        if self._lkey != (tuple(self.L), tuple(self.B)):
+            # other latch pins: what was added for the old ones means nothing now
+            self.extra, self.split, self.stuck = {}, set(), set()
+            self._lkey = (tuple(self.L), tuple(self.B))
         if not m:
             return
 
@@ -715,20 +725,29 @@ class RegLatchAnalysis(Analysis):
                     lcm = lc ^ rel
                     e = xx | lp << nn
                     ch = lcm ^ lp
-                    if ch & (ch - 1):
-                        multi.append((pxx, xx, lp, lcm, rel, lc))
-                    elif rel and ch:
-                        # did the latch react before the pin moved, or to
-                        # its move?  Decided when every walk is in.
-                        late.append((e, xx | (lp ^ rel) << nn, lp, lcm, lc, u))
+                    # What the step proves (see latch.py, learn): nothing
+                    # moved: no latch may glitch between the two points.
+                    # One latch moved: it is excited at e; what the others
+                    # do there is not known (one may pulse for a gate
+                    # delay).  Several moved: nothing yet.  Every step with
+                    # a change is then checked against the learned circuit
+                    # (_refine), which adds what the check shows missing.
+                    if not ch and not rel:
+                        hold(pxx | lp << nn, e, lp)
                     else:
-                        for j in rm:
-                            if not u >> j & 1:
-                                put(j, e, lcm >> j & 1)
-                        f1 = (ch.bit_length() - 1,) if ch else ()
-                        hold(pxx | lp << nn, e, lp, f1)
-                        if ch:
-                            hold(e, xx | lcm << nn, lp, f1)
+                        key = (xp, pxp, sid[xp] - 1, prev[1], lc)
+                        self.steps.append((key, e, lp, lcm, rel, u, pxx, xx))
+                        if ch and not ch & (ch - 1):
+                            q = ch.bit_length() - 1
+                            if rel:
+                                # did the latch react before the pin moved,
+                                # or to its move?  Decided when every walk
+                                # is in.
+                                late.append((e, xx | (lp ^ rel) << nn, lcm, lc, q))
+                            else:
+                                put(q, e, lcm >> q & 1)
+                        elif ch and key in self.split:
+                            multi.append((pxx, xx, lp, lcm, rel, lc))
                 prev = (xx, lc, u, xp)
         # A step in which the GAL lets go of a pin and a latch flips: the
         # latch reacted to the step with the pin still at its level (at e),
@@ -737,21 +756,18 @@ class RegLatchAnalysis(Analysis):
         todo = late
         while todo:
             rest = []
-            for e, e2, lp, lcm, lc, u in todo:
-                drv = [j for j in rm if not u >> j & 1]
-                first = all(g[j][e] in (0, (lcm >> j & 1) + 1) for j in drv)
-                then = all(g[j][e] in (0, (lp >> j & 1) + 1)
-                           and g[j][e2] in (0, (lc >> j & 1) + 1) for j in drv)
+            for e, e2, lcm, lc, q in todo:
+                first = g[q][e] in (0, (lcm >> q & 1) + 1)
+                then = g[q][e2] in (0, (lc >> q & 1) + 1)
                 if first and then and todo is late:
-                    rest.append((e, e2, lp, lcm, lc, u))       # see what the others say
+                    rest.append((e, e2, lcm, lc, q))       # see what the others say
                 elif first:
-                    for j in drv:
-                        put(j, e, lcm >> j & 1)
+                    put(q, e, lcm >> q & 1)
                 else:
-                    for j in drv:
-                        put(j, e, lp >> j & 1)
-                        put(j, e2, lc >> j & 1)
+                    put(q, e2, lc >> q & 1)
             todo, late = rest, None
+        for (j, i), v in self.extra.items():
+            put(j, i, v)
         if multi:
             k = nn + m
             full, v1 = litmasks(k)
@@ -962,9 +978,16 @@ class RegLatchAnalysis(Analysis):
         register inputs just learned; if that changes a walk, learn
         again."""
         for _ in range(8):
-            self._learn()
-            self._collect()
-            self.equations()
+            for _ in range(40):
+                self._learn()
+                self._collect()
+                self.equations()
+                if not self._refine():
+                    break
+            else:
+                raise AsyncDesign("checking the steps against the learned circuit keeps adding "
+                                  "to it: not a circuit of registers and latches that galre "
+                                  "models")
             self._dtab = {}
             self.lpos = [divmod(self.O.index(q), 8) for q in self.L]
             again = False
@@ -1077,6 +1100,7 @@ class RegLatchAnalysis(Analysis):
     def equations(self):
         if not self.mixed:
             return super().equations()
+        self._tabs = {}               # of the covers before
         try:
             return super().equations()
         except Limit as e:
@@ -1139,26 +1163,107 @@ class RegLatchAnalysis(Analysis):
                 hf(neg, [(a, b) for a, b, v in pairs if not v], on, k, full, v1))
 
     # the learned circuit --------------------------------------------------------
+    def _tab(self, j, a, lv):
+        """Latch j's learned excitation in state a with the latch pins at
+        lv, per vector."""
+        t = self._tabs.get((j, a, lv))
+        if t is None:
+            t = self._tabs[(j, a, lv)] = _b01(
+                self._cov((self.L[j], ""), self.CW[(a, lv)]), 1 << self.n1)
+        return t
+
+    def _en(self, q, a, lv):
+        t = self._tabs.get((q, a, lv, "oe"))
+        if t is None:
+            t = self._tabs[(q, a, lv, "oe")] = _b01(self._enabled(q, a, lv), 1 << self.n1)
+        return t
+
+    def _advance(self, lv, a, pxp, xp):
+        """Where the learned latches come to rest at vector xp in state a,
+        from the levels lv they had at vector pxp.  Every excited latch
+        moves at once, as in the chip's simulator (one gate delay each);
+        if that does not settle, one at a time.  A pin the GAL does not
+        drive is an input: it follows its drive.  One that the GAL lets go
+        moves to its drive after the latches have reacted.  None if they
+        never rest."""
+        m, bq = len(self.L), self._bq
+        for q, j, b in bq:
+            if (xp ^ pxp) >> b & 1 and (lv >> j ^ xp >> b) & 1 and not self._en(q, a, lv)[xp]:
+                lv ^= 1 << j
+        for it in range(5 * m + 16):
+            free, rel = 0, -1
+            for q, j, b in bq:
+                if not self._en(q, a, lv)[xp]:
+                    free |= 1 << j
+                    if (lv >> j ^ xp >> b) & 1:
+                        rel = j
+            exc = 0
+            for j in range(m):
+                if not free >> j & 1 and self._tab(j, a, lv)[xp] != lv >> j & 1:
+                    exc |= 1 << j
+            if exc:
+                lv ^= exc if it < m + 6 else exc & -exc
+            elif rel >= 0:
+                lv ^= 1 << rel
+            else:
+                return lv
+        return None
+
+    def _refine(self):
+        """Check every step in which a latch pin changed against the learned
+        circuit, which must come to rest where the chip did.  Where it
+        does not: after a step that changed one latch, a latch that the
+        circuit moves at the step's first point, and the chip left as it
+        was, holds there; a step that changed several is split into rounds
+        (_learn, multi).  True if anything was added: learn again."""
+        m = len(self.L)
+        if not m or not self.steps:
+            return False
+        self._tabs = {}
+        added = False
+        seen = set()
+        for key, e, lp, lcm, rel, u, pxx, xx in self.steps:
+            if key in seen:
+                continue                  # the same step in another walk
+            seen.add(key)
+            xp, pxp, a, lp0, lc = key
+            if self._advance(lp0, a, pxp, xp) == lc:
+                continue
+            ch = lcm ^ lp
+            where = "%s in state %s" % (self._cinputs(xp), _state(self.S[a]))
+            if ch and not ch & (ch - 1):
+                q = ch.bit_length() - 1
+                others = [j for j in range(m) if j != q and not u >> j & 1
+                          and (j, e) not in self.extra]
+                moved = [j for j in others if self._tab(j, a, lp)[xp] != lp >> j & 1]
+                if not moved and key not in self.stuck:
+                    self.stuck.add(key)
+                    moved = others
+                if not moved:
+                    raise AsyncDesign(
+                        "pin %d changes at %s, and the circuit learned from the other steps "
+                        "ends elsewhere: what happens there depends on more than the levels "
+                        "seen" % (self.L[q], where))
+                for j in moved:
+                    self.extra[(j, e)] = lp >> j & 1
+                added = True
+            elif ch and key not in self.split:
+                self.split.add(key)
+                added = True
+            else:
+                raise AsyncDesign(
+                    "latch pins %s change together at %s, and no circuit learned from the "
+                    "other steps explains it" % (
+                        [self.L[j] for j in range(m) if (lp ^ lc) >> j & 1], where))
+        return added
+
     def _predict(self, w):
         """What the learned circuit gets wrong in walk w, as text (None if
         nothing)."""
         m, N = len(self.L), 1 << self.n1
         if m and w.order is not None and len(w.order):
             lvl = [_b01(w.la[p], N) for p in self.L]
-            tabs = {}
             rm = range(m)
-
-            def tab(j, a, lv):
-                t = tabs.get((j, a, lv))
-                if t is None:
-                    t = tabs[(j, a, lv)] = _b01(self._cov((self.L[j], ""), self.CW[(a, lv)]), N)
-                return t
-            def enabled(q, a, lv):
-                t = tabs.get((q, a, lv, "oe"))
-                if t is None:
-                    t = tabs[(q, a, lv, "oe")] = _b01(self._enabled(q, a, lv), N)
-                return t
-            bq = [(q, self.L.index(q), self.Vc.index(q)) for q in self.B]
             sid = w.sid
             lv = 0
             for j in rm:
@@ -1166,28 +1271,9 @@ class RegLatchAnalysis(Analysis):
             pxp = w.order[0]
             for xp in w.order:
                 a = sid[xp] - 1
-                # a pin the GAL does not drive is an input: it follows its drive
-                for q, j, b in bq:
-                    if (xp ^ pxp) >> b & 1 and (lv >> j ^ xp >> b) & 1 \
-                            and not enabled(q, a, lv)[xp]:
-                        lv ^= 1 << j
+                lv = self._advance(lv, a, pxp, xp)
                 pxp = xp
-                for _ in range(3 * m + 4):
-                    free, rel = 0, -1
-                    for q, j, b in bq:
-                        if not enabled(q, a, lv)[xp]:
-                            free |= 1 << j
-                            if (lv >> j ^ xp >> b) & 1:
-                                rel = j
-                    exc = [j for j in rm if not free >> j & 1
-                           and tab(j, a, lv)[xp] != lv >> j & 1]
-                    if exc:
-                        lv ^= 1 << exc[0]         # the latches react first
-                    elif rel >= 0:
-                        lv ^= 1 << rel            # then a pin let go moves to its drive
-                    else:
-                        break
-                else:
+                if lv is None:
                     return "the latches do not settle at %s" % self._cinputs(xp)
                 for j in rm:
                     if lvl[j][xp] != lv >> j & 1:

@@ -248,7 +248,26 @@ class LatchAnalysis:
                 if j not in moving:
                     pairs[j].add((min(a, b), max(a, b), lv >> j & 1))
 
-        multi = []
+        # What a step proves.  The chip is seen at rest only: before the
+        # step at (x', L'), after it at (x, L).  At rest every latch is
+        # excited to the level it has (rest()).
+        # - Nothing changed: the same, at (x, L'), and no latch may glitch
+        #   between the two points (hold).
+        # - One latch changed: it is taken to be excited at (x, L').  What
+        #   the others do there is NOT known: one of them may be excited
+        #   for one gate delay and fall back when the first has moved (in
+        #   a board's GAL, pin 14 pulsed low while pin 18 rose).  Recording
+        #   "holds" there bends its equation.
+        # - Several changed: in which order, and through which levels, is
+        #   not seen.
+        # So the circuit is learned from the first two, and every step is
+        # then checked: the learned circuit, every excited latch moving at
+        # once as in the chip's simulator (one gate delay each), must come
+        # to rest where the chip did.  Where it does not, the step says
+        # more: a latch that did not change but moves in the learned
+        # circuit holds at (x, L'); a step with several changes is split
+        # into rounds (_step).  Then all are checked again.
+        steps = set()
         for w in self.walks:
             xp = w.xs[0]
             lp = self._lstate(w, xp)
@@ -258,27 +277,75 @@ class LatchAnalysis:
                 rest(x, lc, w)
                 e = x | lp << n
                 ch = lc ^ lp
-                if popcount(ch) <= 1:
-                    for j in range(m):
-                        put(g[j], e, lc >> j & 1, "the excitation of pin %d" % self.L[j])
-                    f1 = (ch.bit_length() - 1,) if ch else ()
-                    hold(xp | lp << n, e, lp, f1)
-                    if ch:
-                        hold(e, x | lc << n, lp, f1)
+                if not ch:
+                    hold(xp | lp << n, e, lp)
                 else:
-                    multi.append((xp, x, lp, lc))
+                    if ch & (ch - 1) == 0:
+                        q = ch.bit_length() - 1
+                        put(g[q], e, lc >> q & 1, "the excitation of pin %d" % self.L[q])
+                    steps.add((xp, x, lp, lc))
                 xp, lp = x, lc
-        k = n + m
-        full, v1 = litmasks(k)
-        proj = [self._supported(_from_bytes(g[j], _ONES), _from_bytes(g[j], _ZEROS),
-                                k, full, v1) for j in range(m)]
-        for xp, x, lp, lc in multi:
-            if not self._step(g, proj, x, lp, lc, hold, xp | lp << n):
-                bits = [self.L[j] for j in range(m) if (lp ^ lc) >> j & 1]
-                raise AsyncDesign("latch pins %s change together at %s, in no order that "
-                                  "agrees with the other walks" % (bits, self._inputs(x)))
         self.g, self.f, self.pairs = g, f, pairs
         self._minimise()
+        self._tables()
+        k = n + m
+        full, v1 = litmasks(k)
+        todo = sorted(steps)
+        self.races = sum(1 for t in todo if (t[2] ^ t[3]) & ((t[2] ^ t[3]) - 1))
+        for _ in range(24):
+            wrong = [t for t in todo if self._settle(t[1], t[2]) != t[3]]
+            if not wrong:
+                break
+            proj = None
+            for xp, x, lp, lc in wrong:
+                ch = lc ^ lp
+                e = x | lp << n
+                if ch & (ch - 1) == 0:
+                    # the latches that the learned circuit moves, but the chip did not
+                    for j in range(m):
+                        if j != ch.bit_length() - 1 and self.tab[self.L[j]][lp][x] != lp >> j & 1:
+                            put(g[j], e, lp >> j & 1, "the excitation of pin %d" % self.L[j])
+                    continue
+                if proj is None:
+                    proj = [self._supported(_from_bytes(g[j], _ONES), _from_bytes(g[j], _ZEROS),
+                                            k, full, v1) for j in range(m)]
+                if not self._step(g, proj, x, lp, lc, hold, xp | lp << n):
+                    bits = [self.L[j] for j in range(m) if ch >> j & 1]
+                    raise AsyncDesign("latch pins %s change together at %s, in no order that "
+                                      "agrees with the other walks" % (bits, self._inputs(x)))
+            done = {t for t in wrong if (t[2] ^ t[3]) & ((t[2] ^ t[3]) - 1)}
+            todo = [t for t in todo if t not in done]
+            self._minimise()
+            self._tables()
+        else:
+            xp, x, lp, lc = wrong[0]
+            raise AsyncDesign(
+                "%d steps are not explained by one circuit of latches (the first: pins %s "
+                "change at %s): what happens there depends on more than the levels seen" % (
+                    len(wrong), [self.L[j] for j in range(m) if (lp ^ lc) >> j & 1],
+                    self._inputs(x)))
+
+    def _settle(self, x, lv):
+        """Where the learned latches come to rest with the inputs at x,
+        from the levels lv: every excited latch moves at once, as in the
+        chip's simulator (one gate delay each); if that does not settle,
+        one at a time.  None if they never rest."""
+        m = len(self.L)
+        gt = [self.tab[p] for p in self.L]
+        rm = range(m)
+        for _ in range(m + 6):
+            nxt = 0
+            for j in rm:
+                nxt |= gt[j][lv][x] << j
+            if nxt == lv:
+                return lv
+            lv = nxt
+        for _ in range(4 * m + 8):
+            exc = [j for j in rm if gt[j][lv][x] != lv >> j & 1]
+            if not exc:
+                return lv
+            lv ^= 1 << exc[0]
+        return None
 
     def _step(self, g, proj, x, lp, lc, hold, prev):
         """Several latches changed in one step: fire them in rounds, the
@@ -427,12 +494,8 @@ class LatchAnalysis:
         others = [p for p in self.outputs if p not in self.L]
         lv = self._lstate(w, w.xs[0])
         for i, x in enumerate(w.xs):
-            for _ in range(m + 2):
-                exc = [j for j in range(m) if gt[j][lv][x] != lv >> j & 1]
-                if not exc:
-                    break
-                lv ^= 1 << exc[0]
-            else:
+            lv = self._settle(x, lv)
+            if lv is None:
                 return (i, x, None, None, None)
             for j, p in enumerate(self.L):
                 if w.levels[p][x] != lv >> j & 1:
