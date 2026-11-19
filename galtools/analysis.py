@@ -617,6 +617,17 @@ class Analysis:
                 self.reg.append(r)
             else:
                 self.comb.append(r)       # constant or input-dependent
+        if self.device == "GAL16V8" and 11 in self.V and not self.clock_in_v:
+            # A registered GAL16V8's registers are enabled by pin 11 and by
+            # nothing else.  A pin that changes with the state but is not
+            # driven exactly while pin 11 is low is a combinational output
+            # that reads the registers: it has an enable of its own.
+            b = self.V.index(11)
+            low = self.full ^ self.v1[b]
+            for r in list(self.reg):
+                if any(t.driven[r] != t.care[r] & low for _, t in self.states.values()):
+                    self.reg.remove(r)
+                    self.comb.append(r)
         self.log("%d states reachable from power-up; inputs %s, registered %s, "
                  "combinational %s" % (len(self.states), self.inputs, self.reg, self.comb))
         self.ar_on = {s for s, (path, _) in self.states.items() if path in self.ar_paths}
