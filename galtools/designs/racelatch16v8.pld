@@ -1,0 +1,30 @@
+Name     racelatch16v8;
+Partno   x;
+Date     2026-11-19;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g16v8ma;
+
+/* Test design: GAL16V8, a latch that another output's pin holds, with a
+   race.  NC is the complement of C, one gate delay late.  L holds while
+   C is high, or while NC is: by its equation, always.  But when C falls,
+   the term with C lets go at once and the one with NC holds a gate delay
+   later, so L drops.  galre must write L with NC's pin, not with !C. */
+
+Pin 2  = S;
+Pin 3  = C;
+Pin 4  = A;
+Pin 5  = EN;
+Pin 15 = NC;
+Pin 16 = L;
+Pin 17 = Y;
+
+NC = !C;
+L = S
+  # L & C
+  # L & NC;
+Y = L & A;
+Y.oe = EN;

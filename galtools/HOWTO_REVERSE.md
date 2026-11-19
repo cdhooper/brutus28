@@ -354,6 +354,8 @@ designs in `designs/`, with the pins the tests hold:
 | `latchd16v8` | a register input that reads a latch | `5-9=0,11=0,12-16=0,19=0` |
 | `trilatch22v10` | a latch on a bidirectional pin, read by an output and a register | `7-11=0,13-20=0` |
 | `oeread22v10` | an enable that reads another output's pin | `4-11=0,13-20=0` |
+| `quietlatch16v8` | a latch that only shows when one pin changes at a time | `2=0,6-9=0,11-16=0,19=0` |
+| `racelatch16v8` | a latch held by another output's pin, with a race | `6-9=0,11-14=0,18-19=0` |
 | `buried22v10` | a register that never reaches its pin: galre stops | `5-11=0,13-21=0` |
 
 ## 10. When galre stops
@@ -380,7 +382,8 @@ commit (section 2).
 | "the registers do not follow the transitions the sweeps and the walks showed" | The registers go another way than learned, and no latch explains it: state that no pin shows, or readings that do not repeat. |
 | "... led to state ..., but the same clocks from power-up lead to ..." | The same: a register that never reaches a pin, or readings that do not repeat (reseat the chip). |
 | "... leads to a state the sweeps did not find" | A state that is reached only while a latch is set, which galre does not explore. |
-| "... is 1 once and 0 once: not a circuit of registers and latches on those pins" | A pin that changes without a clock, but not as a latch does. |
+| "... is 1 once and 0 once: the pin oscillates there ..., or it is not a circuit of registers and latches on those pins" | The same point was seen with two outcomes. galre first tries again with every output pin as a signal of its own ("trying again with every output pin ..."); this is the reason only if that fails too. Then: an output that oscillates, or state that no pin shows. |
+| "pin ... changes at ..., and the circuit learned from the other steps ends elsewhere" or "latch pins ... change together ..., and no circuit learned from the other steps explains it" | A step whose outcome depends on more than the levels galre sees, such as a race that the chip's delays decide. |
 | "the model of registers and latches did not predict ..." | Latches in a clocked design that behave in a way galre's model does not cover. |
 | "latch pin ... is not driven" | A latch in a clocked design with a tri-state output. |
 | "walks that change one input at a time do not" | The chip reacts only to several inputs changing at once. |

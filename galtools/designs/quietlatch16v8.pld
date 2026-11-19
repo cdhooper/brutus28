@@ -1,0 +1,26 @@
+Name     quietlatch16v8;
+Partno   x;
+Date     2026-11-19;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g16v8ma;
+
+/* Test design: GAL16V8, a latch that holds only while another signal
+   keeps still.  L is low while A is low, and stays low when A rises as
+   long as Z is low.  Z depends on a pin below A and one above it, so in
+   every counting order A rises together with a change of Z, and L never
+   holds: the chip then reads as L = A.  It takes one pin changing at a
+   time to see the latch. */
+
+Pin 3  = B;
+Pin 4  = A;
+Pin 5  = C;
+Pin 17 = Z;
+Pin 18 = L;
+
+!Z = !B & !C;
+!L = !A
+   # !L & !Z;

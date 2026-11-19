@@ -22,7 +22,7 @@ sys.path.insert(0, HERE)
 import fwsim                                       # noqa: E402
 import galre                                       # noqa: E402
 import verify                                      # noqa: E402
-from analysis import Analysis                      # noqa: E402
+from analysis import Analysis, LatchSuspected      # noqa: E402
 from capture import CaptureError                   # noqa: E402
 from latch import LatchAnalysis                    # noqa: E402
 from galsim import GAL                             # noqa: E402
@@ -61,8 +61,9 @@ ASYNC_CASES = {
 # the GAL drives it only while pin 4 is high, and an output and the
 # register input read its level, whoever drives it.  oeread22v10 has no
 # latch and no register: pin 23 is an output with an enable, and the
-# enable of pin 22 reads its level where the GAL lets it go (pin 23 counts
-# as a latch pin for the analysis: the equations read its level).
+# enable of pin 22 reads its level where the GAL lets it go (the analysis
+# keeps pin 23 with the latch pins, a.L, so that the equations read its
+# level; it holds no state, so it is not in the fourth column, a.Lh).
 MIXED_CASES = {
     "reglatch22v10": ("GAL22V10", "7-11=0,13-19=0", [20, 21], [21], [22, 23], 4, {
         (20, ""): "P6 & P21",
@@ -82,7 +83,7 @@ MIXED_CASES = {
         (22, ""): "P2 & !P3\n    # !P3 & P22",
         (22, "oe"): "P4",
         (23, "d"): "P6 & P22"}),
-    "oeread22v10": ("GAL22V10", "4-11=0,13-20=0", [], [23], [], 1, {
+    "oeread22v10": ("GAL22V10", "4-11=0,13-20=0", [], [], [], 1, {
         (21, ""): "P3 & P23",
         (22, ""): "'b'0",
         (22, "oe"): "!P23",
@@ -111,6 +112,9 @@ LATCH_CASES = {
         14: "!P2 & P4\n    # !P4 & P14\n    # !P2 & P14",
         15: "P3 & P4\n    # !P4 & P15\n    # P3 & P15",
         16: "!P14 & P15"}),
+    "quietlatch16v8": ("GAL16V8", "2=0,6-9=0,11-16=0,19=0", [18], [17], {
+        17: "!!P3 & !P5",
+        18: "!!P3 & !P5 & !P18\n    # !P4"}),
     "srnor16v8": ("GAL16V8", "6-9=0,11-14=0,19=0", [17, 18], [15, 16], {
         15: "P4 & !P17\n    # !P4 & P17",
         16: "!P2 & !P17",
@@ -186,6 +190,7 @@ class SimulatedChip(unittest.TestCase):
             "latchd16v8": ["combinational feedback through pin 17"],
             "reglatch22v10": ar + ["combinational feedback through pin 21"],
             "trilatch22v10": ["combinational feedback through pin 22"],
+            "quietlatch16v8": ["combinational feedback through pin 18"],
             "oeread22v10": [],
             "buried22v10": ["combinational feedback through pin 22"]})
 
@@ -212,6 +217,38 @@ class SimulatedChip(unittest.TestCase):
         self.assertNotEqual(list(gray_order(6, mix=1)), list(gray_order(6, mix=2)))
         self.assertNotEqual(list(gray_order(6, mix=1)), list(gray_order(6)))
 
+    def test_latch_that_counting_walks_miss(self):
+        """quietlatch16v8's latch holds only while another signal keeps
+        still.  In the counting orders the chip reads as combinational,
+        with a wrong equation; the Gray code orders show the latch."""
+        fixed = galre.parse_fixed(LATCH_CASES["quietlatch16v8"][1])
+        with mock.patch.object(Analysis, "ORDERS", Analysis.ORDERS[:3]):
+            a = Analysis(SimRig(jed("quietlatch16v8")), "GAL16V8", fixed=fixed, log=quiet)
+            a.run()
+        self.assertIn((18, "", False, "P4", 1), a.eqs)        # L = A: wrong
+        a = Analysis(SimRig(jed("quietlatch16v8")), "GAL16V8", fixed=fixed, log=quiet)
+        with self.assertRaisesRegex(LatchSuspected, "pin 18 read differently .* Gray code"):
+            a.run()
+
+    def test_latch_held_by_another_output(self):
+        """racelatch16v8's latch is held by another output's pin, which is
+        late when its input falls, so the latch drops.  No circuit in
+        which only the latch has a delay does that; galre then takes every
+        output pin for a signal of its own, and the latch's equation reads
+        pin 15."""
+        said = []
+        a = galre.analyse(SimRig(jed("racelatch16v8")), "GAL16V8",
+                          fixed=galre.parse_fixed("6-9=0,11-14=0,18-19=0"), log=said.append)
+        self.assertTrue(a.deep)
+        self.assertTrue(any("every output pin as a signal with a delay" in t for t in said))
+        self.assertEqual(a.Lh, [16])
+        self.assertEqual(a.L, [15, 16, 17])
+        eq = {(p, kind): expr for p, kind, _, expr, _ in a.eqs}
+        self.assertIn("P15", eq[(16, "")])
+        self.assertEqual(eq[(17, "oe")], "P5")
+        self.assertEqual(a.check_equations(), [])
+        self.assertEqual(verify.check_captures(a, jed("racelatch16v8")), [])
+
     def test_gray_order(self):
         for n, rot, rev, start in ((1, 0, 0, 0), (4, 0, 0, 0), (5, 2, 0, 9), (5, 3, 1, 30),
                                    (6, 5, 1, 0)):
@@ -230,7 +267,8 @@ class SimulatedChip(unittest.TestCase):
                                   log=quiet)
                 self.assertIsInstance(a, RegLatchAnalysis)
                 self.assertEqual(sorted(a.hist), hist)
-                self.assertEqual(a.L, latches)
+                self.assertEqual(a.Lh, latches)
+                self.assertFalse(a.deep)
                 self.assertEqual(sorted(a.reg), regs)
                 self.assertEqual(len(a.states), nstates)
                 self.assertEqual({(p, kind): expr for p, kind, _, expr, _ in a.eqs}, eqs)
@@ -338,6 +376,7 @@ class SimulatedChip(unittest.TestCase):
         cases += [(name, device, galre.parse_fixed(fix))
                   for name, (device, fix, _, _, _) in LATCH_CASES.items()]
         cases += [(name, c[0], galre.parse_fixed(c[1])) for name, c in MIXED_CASES.items()]
+        cases += [("racelatch16v8", "GAL16V8", galre.parse_fixed("6-9=0,11-14=0,18-19=0"))]
         try:
             for name, device, fixed in cases:
                 with self.subTest(design=name):
@@ -345,7 +384,7 @@ class SimulatedChip(unittest.TestCase):
                     pld = os.path.join(out, name + ".pld")
                     with open(pld, "w") as f:
                         f.write(a.cupl(name))
-                    latches = name in LATCH_CASES or name in MIXED_CASES
+                    latches = name in LATCH_CASES or name in MIXED_CASES or "latch" in name
                     rebuilt = galre.compile_cupl(CUPL, pld, quiet)
                     self.assertEqual(rebuilt, os.path.join(out, name + ".jed"))
                     notes = []

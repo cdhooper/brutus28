@@ -231,7 +231,8 @@ class LatchAnalysis:
                 x, lv = i & ((1 << n) - 1), i >> n
                 raise AsyncDesign(
                     "%s at %s with latch pins %s at %s is %d once and %d once: not a circuit "
-                    "of latches on those pins (registers, or a latch that is not seen?)" % (
+                    "of latches on those pins (registers, an oscillating output, or a latch "
+                    "that is not seen?)" % (
                         what, self._inputs(x), self.L,
                         "".join(str(lv >> j & 1) for j in range(m)), old - 1, v))
 
@@ -457,7 +458,7 @@ class LatchAnalysis:
             care = ((1 << k) - 1) & ~(a ^ b)
             val = a & care
             if _cube_set(care, val, k, full, v1) & off:
-                raise RuntimeError("hazard pair %x %x crosses the off set" % (a, b))
+                continue        # from a step split into rounds by guess: not a hold after all
             for bit in range(k):
                 if care >> bit & 1:
                     c2 = care & ~(1 << bit)

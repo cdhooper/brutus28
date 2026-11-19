@@ -277,11 +277,25 @@ registers (`latch.py`):
   latch pin it is the excitation: the chip rests where it equals the latch
   pins' levels and moves otherwise. Each step of a walk says that the
   vector before rested, and where the latches settled from the new one.
-- When several latch pins change in one step, galre fires them in rounds:
-  those of a round together (latches with a shared enable), the rounds one
-  after the other (a latch that reads another flips after it). Of the
-  splits that contradict nothing seen, it takes the one that best agrees
-  with the steps that change a single latch.
+- The chip is seen at rest only, so a step proves little about what the
+  latches do on the way:
+  - nothing changed: every latch is excited to stay, and may not glitch
+    between the two points;
+  - one latch changed: that latch is excited at the step's first point.
+    What the others do there is not known: one may be excited for a gate
+    delay and fall back once the first has moved (in a GAL from an A4000,
+    pin 14 pulses low while pin 18 rises);
+  - several changed: in which order, and through which levels, is not
+    seen.
+
+  galre learns the circuit from the first two. It then runs the learned
+  circuit through every step, every excited latch moving at once (one
+  gate delay each, as in the chip's simulator), and it must come to rest
+  where the chip did. Where it does not, the step says more: a latch that
+  the circuit moves and the chip left alone holds there; a step that
+  changed several latches is split into rounds, those of a round moving
+  together, of the splits that contradict nothing seen the one that best
+  agrees with the rest. Then every step is checked again.
 - Each output is minimised, on both polarities, over the variables the
   steps show it depending on; where the walks did not go, it does not
   depend on the others either. A latch also gets, for every step that
@@ -376,6 +390,19 @@ not the reset term. galre then goes on (`reglatch.py`):
 
    The last term is not in the original: it holds the latch while P3
    changes with the clock high.
+
+Every output's pin is a signal with a gate delay of its own, and another
+output may read it. That matters when a latch is held through another
+output: in `designs/racelatch16v8`, L is held by C or by NC, the
+complement of C on another pin. By its equation it always holds. In the
+chip it drops when C falls, because the term with C lets go a gate delay
+before the one with NC holds. No circuit in which only the latches have
+a delay does that, and galre finds contradicting samples. It then learns
+again with every output pin the array can read as a variable, so that the
+equations read other outputs' pins as the original's do
+(`!P16 = !P3 & !P15 # !P2 & !P16`, with pin 15 for NC). It does this only
+as a second attempt, and only up to 22 bits of inputs, register states
+and outputs together.
 
 If the power-up walk does read differently in another order, galre first
 tries latches alone, and then registers and latches together
@@ -476,6 +503,9 @@ needed about 3 million power cycles.
     had at that clock edge, or a clock edge goes another way because of a
     latch and no registered pin shows it before the next edge;
   - a latch reacts only to several inputs changing at once;
+  - an output oscillates (it feeds back inverted, as in a ring
+    oscillator): its level when read is then arbitrary, and the samples
+    contradict each other;
   - in a design of latches alone, a latch output is not always driven and
     the registers-and-latches analysis cannot take it either;
   - in a registered design, something other than the reset term or a

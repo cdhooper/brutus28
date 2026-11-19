@@ -67,6 +67,7 @@ is not modelled.
 
 import sys
 from array import array
+from functools import reduce
 
 from analysis import Analysis, AsyncDesign, Limit, _Restart, _pins, _state, lowest, swap
 from bitsim import litmasks
@@ -161,13 +162,14 @@ class RegLatchAnalysis(Analysis):
         self.hist = {p for p in hist if p in self.dev["io"] and p not in self.fixed}
         self.mixed = bool(self.hist)
         self.max_checks, self.confirm = max_checks, confirm
-        self.L, self.O, self.lwalks = [], [], []
+        self.L, self.Lh, self.O, self.lwalks = [], [], [], []
         self.readpins = set()     # outputs with an enable whose level other logic reads
         self.rise = {}            # clock edges a walk showed: (state, x, levels) -> state
         self._dtab = None         # the register inputs learned so far, for _guess
         # what checking the steps against the learned circuit added (_refine)
         self.extra, self.split, self.stuck, self._lkey = {}, set(), set(), None
         self._tabs = {}
+        self.deep = False         # every readable output is a variable, not only the latches
 
     # 1. exploration without the pins that change without a clock ------------
     def _history(self, pins, err):
@@ -616,12 +618,48 @@ class RegLatchAnalysis(Analysis):
                 if function(p, [q for q in lp if q != p]):
                     lp.remove(p)
                     changed = True
+        self.Lh = list(lp)            # the pins that hold state
+        if lp and self.deep:
+            # Every output's pin is a signal with a gate delay of its own,
+            # which other outputs may read: a latch that reads another
+            # output drops if that output is late (!P18 held by P13, which
+            # rises one delay after the term that held before falls).  So
+            # every output is a variable, not only the latches.
+            lp = sorted(set(lp) | {p for p in self.O if p not in self.reg
+                                   and p in self._readable()})
         return lp
+
+    def _readable(self):
+        """The output pins whose level the array can read.  A GAL16V8
+        without registers that has enables is in complex mode, where
+        pins 12 and 19 do not feed back."""
+        if self.device == "GAL16V8" and not self.reg:
+            return range(13, 19)
+        return self.dev["io"]
+
+    DEEP = 22       # bits of (vector, state, output levels) up to which every output is a variable
+
+    def _deep_fits(self):
+        outs = [p for p in self.O if p not in self.reg and p in self._readable()]
+        return self.n1 + max(1, (len(self.S) - 1).bit_length()) + len(outs) <= self.DEEP
 
     def _learn(self):
         """The latch pins, and their excitation from every walk: g[j] over
         (vector, state index, latch levels), 0 unknown, 1 low, 2 high."""
         self.L = self._latch_pins()
+        # A latch pin that is not enumerated must be driven throughout: where
+        # the GAL lets it go, it is an input at whatever level Brutus
+        # drives it to, and what it holds then depends on that level.
+        new = sorted(q for q in self.L if q not in self.Vc and q not in self.base and any(
+            (w.la[q] ^ w.lb[q]) & reduce(lambda a, b: a | b, w.smask.values(), 0)
+            for w in self.lwalks))
+        if new:
+            self.bidir.update(new)
+            self.log("%s %s state and %s not always driven: enumerating %s too, and starting "
+                     "again" % (_pins(new), "holds" if len(new) == 1 else "hold",
+                                "is" if len(new) == 1 else "are",
+                                "it" if len(new) == 1 else "them"))
+            raise _Again()
         self.L += [q for q in sorted(self.readpins) if q not in self.L and q in self.Vc]
         m, n1 = len(self.L), self.n1
         N = 1 << n1
@@ -652,8 +690,9 @@ class RegLatchAnalysis(Analysis):
             elif old != v + 1:
                 raise AsyncDesign(
                     "the excitation of pin %d at %s in state %s with latch pins %s at %s is "
-                    "%d once and %d once: not a circuit of registers and latches on those "
-                    "pins" % (self.L[j], self._cinputs(i & (N - 1)),
+                    "%d once and %d once: the pin oscillates there (an output that feeds "
+                    "back inverted), or it is not a circuit of registers and latches on "
+                    "those pins" % (self.L[j], self._cinputs(i & (N - 1)),
                               _state(self.S[i >> n1 & ((1 << (nn - n1)) - 1)]), self.L,
                               "".join(str(i >> (nn + q) & 1) for q in range(m)), old - 1, v))
 
@@ -880,8 +919,8 @@ class RegLatchAnalysis(Analysis):
             for q in self.B:
                 off = mask & ~self._enabled(q, a, lv)
                 if off:
-                    acc |= int.from_bytes(_b01(off, N), "little") << self.L.index(q)
-        return acc.to_bytes(N, "little")
+                    acc |= _cells(off, N) << self.L.index(q)
+        return _states(acc, N)
 
     def _walk_sets(self, w):
         """Per output and context of one walk: where it is driven, where
@@ -936,6 +975,37 @@ class RegLatchAnalysis(Analysis):
             sorted(self.reg), " for %s" % _pins(sorted(self.hist)) if self.hist else ""))
         for cfg in self._configs():
             self.lwalks.append(self._event(*cfg))
+        try:
+            self._converge()
+        except Limit:
+            raise
+        except (RuntimeError, OverflowError) as e:
+            if not self.deep:
+                raise
+            raise AsyncDesign("with every output pin as a signal of its own: %s" % e)
+        except AsyncDesign as e:
+            if self.deep or not self._deep_fits():
+                raise
+            # Not a circuit in which only the latches are signals with a
+            # delay.  Every output's pin is one, and other outputs may read
+            # it: a latch that another output holds drops when that output
+            # is late.  Learn again with every readable output as a
+            # variable; the equations then read other outputs' pins.
+            self.log("asynchronous behaviour: %s" % e)
+            self.log("trying again with every output pin as a signal with a delay of its "
+                     "own, which the other outputs may read")
+            self.deep = True
+            try:
+                self._converge()
+            except Limit:
+                raise
+            except (AsyncDesign, RuntimeError, OverflowError) as e2:
+                self.log("that does not explain the chip either: %s" % e2)
+                raise e from None
+
+    def _converge(self):
+        """Learn from the walks, then walk on until the learned circuit
+        predicts enough walks in a row."""
         self._solve()
         good = checks = 0
         need = self._need()
@@ -962,7 +1032,7 @@ class RegLatchAnalysis(Analysis):
             raise AsyncDesign("the model of registers and latches did not predict %d walks in "
                               "a row within %d walks" % (need, limit))
         cut = [w for w in self.lwalks if w.cut]
-        latches = [p for p in self.L if p not in self.readpins]
+        latches = [p for p in self.Lh if p not in self.readpins]
         self.log("latch model: latch pins %s, other outputs %s, from %d walks with pin 1 "
                  "enumerated%s" % (latches, [p for p in self.O if p not in latches],
                                    len(self.lwalks) - len(self.S),
@@ -1150,7 +1220,7 @@ class RegLatchAnalysis(Analysis):
         return pairs
 
     def _latch_names(self):
-        return [self.name(p) for p in self.L] if self.mixed else []
+        return [self.name(p) for p in self.Lh] if self.mixed else []
 
     def _hazards(self, p, kind, sup, pos, neg, on, off):
         if kind or p not in self.L:
