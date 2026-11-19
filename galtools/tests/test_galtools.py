@@ -264,6 +264,41 @@ class SimulatedChip(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "pin 19 is held"):
             Analysis(SimRig(jed("comb16v8")), "GAL16V8", fixed={19: 0}, log=quiet).run()
 
+    @unittest.skipUnless(CUPL and shutil.which("csim"), "no CUPL compiler and simulator")
+    def test_csim_second_opinion(self):
+        """csim, on the source galre wrote, agrees with galsim's reading of
+        the JED built from it: registers, a reset term, latches (whose
+        level is unknown to csim until something sets them), a latch on a
+        bidirectional pin.  It does not agree with another design's JED."""
+        import csimcheck
+        csim = shutil.which("csim")
+        out = tempfile.mkdtemp(prefix="galre")
+        cases = [("cnt16v8", "GAL16V8", None), ("fsm22v10", "GAL22V10", None),
+                 ("arlow22v10", "GAL22V10", AR_CASES["arlow22v10"][0]),
+                 ("latch16v8", "GAL16V8", LATCH_CASES["latch16v8"][1])]
+        cases += [(n, MIXED_CASES[n][0], MIXED_CASES[n][1])
+                  for n in ("reglatch22v10", "reglatch16v8", "trilatch22v10")]
+        try:
+            built = {}
+            for name, device, fix in cases:
+                with self.subTest(design=name):
+                    a = galre.analyse(SimRig(jed(name)), device, fixed=galre.parse_fixed(fix),
+                                      log=quiet)
+                    pld = os.path.join(out, name + ".pld")
+                    with open(pld, "w") as f:
+                        f.write(a.cupl(name))
+                    built[name] = pld, galre.compile_cupl(CUPL, pld, quiet, minimise=0)
+                    n, unknown, bad = csimcheck.check(csim, *built[name], steps=300)
+                    self.assertEqual((n, bad), (300, []))
+                    if name == "latch16v8":
+                        self.assertGreater(unknown, 0)      # until its latches are set
+            # reglatch16v8's source against latchd16v8's JED: the register differs
+            _, _, bad = csimcheck.check(csim, built["reglatch16v8"][0], jed("latchd16v8"), 300)
+            self.assertTrue(bad)
+            self.assertIn("P18", bad[0][1])
+        finally:
+            shutil.rmtree(out)
+
     def test_return_paths_replace_power_cycles(self):
         rig = SimRig(jed("cnt16v8"))
         a = Analysis(rig, "GAL16V8", log=quiet)

@@ -144,6 +144,9 @@ def main(argv=None):
                     help="keep driving the enumerated levels at the clock edge, against "
                          "the pins the GAL drives (board)")
     ap.add_argument("--cupl", default=os.environ.get("CUPL") or shutil.which("cupl"))
+    ap.add_argument("--csim", default=os.environ.get("CSIM") or shutil.which("csim"),
+                    help="CUPL's simulator, for a second opinion on the result "
+                         "(default: $CSIM, or csim on the PATH)")
     ap.add_argument("--steps", type=int, default=30000,
                     help="random steps to compare with the original (sim)")
     args = ap.parse_args(argv)
@@ -279,6 +282,9 @@ def main(argv=None):
         if notes:
             log("  %d walks start differently (galre does not model the latches' state at "
                 "power-up), the first %s" % (len(notes), notes[0]))
+        if args.csim:
+            import csimcheck
+            log(csimcheck.report(args.csim, pld, jed))
         if args.mode == "sim":
             d, first, osc = verify.compare_jeds(args.source, jed, args.steps, fixed=a.fixed,
                                                 sic=latches or mixed)

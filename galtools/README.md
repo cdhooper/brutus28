@@ -88,6 +88,15 @@ This writes:
   and date.
 - With a CUPL compiler, also `out/mychip.jed`.
 
+With `csim`, CUPL's simulator, on the PATH (or `--csim`, `$CSIM`), galre
+also asks it for a second opinion (`csimcheck.py`): it writes test vectors
+(`out/mychip.si`) from what its own simulator says the JED does under
+random stimulus, and runs csim on the recovered source. csim works from
+the compiled source and the device library, not from the fuse map, so an
+agreement checks galre's simulator and the compiler against each other.
+csim does not know the level of a latch that nothing has set since
+power-up; galre expects such levels as unknown.
+
 To redo the analysis without the board:
 
     galtools/galre.py replay out/capture.jsonl -o out2
@@ -533,6 +542,7 @@ chunks. The header comment of `fw/capture.c` describes the format.
 | `galsim.py` | Fuse-level GAL16V8/22V10 simulator |
 | `bitsim.py` | The same, evaluated for all input vectors at once |
 | `verify.py` | Rebuilt JED against the captures, and JED against JED |
+| `csimcheck.py` | Test vectors from the rebuilt JED for CUPL's simulator, and its verdict |
 | `designs/` | Test designs (CUPL source and compiled JEDs) |
 | `tests/` | Test suite |
 
