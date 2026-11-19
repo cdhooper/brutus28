@@ -565,6 +565,9 @@ class RegLatchAnalysis(Analysis):
         self.B = [q for q in self.L if q in self.Vc]
         self.oecube, self._oebits = {q: self._enable_cube(q) for q in self.B}, {}
         bj = [(self.L.index(q), self.Vc.index(q)) for q in self.B]
+        # nothing depends on Brutus's drive of such a pin, only on its level:
+        # samples are kept with those drive bits at 0
+        canon = ~sum(1 << b for _, b in bj)
         if not m:
             return
 
@@ -597,7 +600,7 @@ class RegLatchAnalysis(Analysis):
                         arr = self.hz[j][var] = bytearray(size + 7 >> 3)
                     arr[lo >> 3] |= 1 << (lo & 7)
 
-        multi = []
+        multi, late = [], []
         rm = range(m)
         for w in self.lwalks:
             lvl = [_b01(w.la[p], N) for p in self.L]
@@ -610,7 +613,7 @@ class RegLatchAnalysis(Analysis):
                             lc = 0
                             for j in rm:
                                 lc |= lvl[j][xp] << j
-                            i = xp | a << n1 | lc << nn
+                            i = xp & canon | a << n1 | lc << nn
                             u = und[xp] if und else 0
                             for j in rm:
                                 if not u >> j & 1:
@@ -621,16 +624,16 @@ class RegLatchAnalysis(Analysis):
                 lc = 0
                 for j in rm:
                     lc |= lvl[j][xp] << j
-                xx = xp | (sid[xp] - 1) << n1
+                xx = xp & canon | (sid[xp] - 1) << n1
                 i = xx | lc << nn
                 u = und[xp] if und else 0
                 for j in rm:
                     if not u >> j & 1:
                         put(j, i, lc >> j & 1)
                 if prev is not None and clean[k]:
-                    pxx, lp, pu = prev
+                    pxx, lp, pu, pxp = prev
                     for j, b in bj:
-                        if (xp ^ pxx) >> b & 1 and (lc ^ lp) >> j & 1 and not u >> j & 1:
+                        if (xp ^ pxp) >> b & 1 and (lc ^ lp) >> j & 1 and not u >> j & 1:
                             raise AsyncDesign(
                                 "pin %d follows its drive at %s in state %s, where the "
                                 "enable learned for it is on: not one product term of the "
@@ -650,15 +653,10 @@ class RegLatchAnalysis(Analysis):
                     ch = lcm ^ lp
                     if ch & (ch - 1):
                         multi.append((pxx, xx, lp, lcm, rel, lc))
-                    elif rel and any(g[j][e] not in (0, (lcm >> j & 1) + 1)
-                                     for j in rm if not u >> j & 1):
-                        # that contradicts what is known: the latches react
-                        # only once the pin has moved
-                        e2 = xx | (lp ^ rel) << nn
-                        for j in rm:
-                            if not u >> j & 1:
-                                put(j, e, lp >> j & 1)
-                                put(j, e2, lc >> j & 1)
+                    elif rel and ch:
+                        # did the latch react before the pin moved, or to
+                        # its move?  Decided when every walk is in.
+                        late.append((e, xx | (lp ^ rel) << nn, lp, lcm, lc, u))
                     else:
                         for j in rm:
                             if not u >> j & 1:
@@ -667,7 +665,29 @@ class RegLatchAnalysis(Analysis):
                         hold(pxx | lp << nn, e, lp, f1)
                         if ch:
                             hold(e, xx | lcm << nn, lp, f1)
-                prev = (xx, lc, u)
+                prev = (xx, lc, u, xp)
+        # A step in which the GAL lets go of a pin and a latch flips: the
+        # latch reacted to the step with the pin still at its level (at e),
+        # or only to the pin's move to its drive (at e2).  Whichever the
+        # other samples allow; if both, the first.
+        todo = late
+        while todo:
+            rest = []
+            for e, e2, lp, lcm, lc, u in todo:
+                drv = [j for j in rm if not u >> j & 1]
+                first = all(g[j][e] in (0, (lcm >> j & 1) + 1) for j in drv)
+                then = all(g[j][e] in (0, (lp >> j & 1) + 1)
+                           and g[j][e2] in (0, (lc >> j & 1) + 1) for j in drv)
+                if first and then and todo is late:
+                    rest.append((e, e2, lp, lcm, lc, u))       # see what the others say
+                elif first:
+                    for j in drv:
+                        put(j, e, lcm >> j & 1)
+                else:
+                    for j in drv:
+                        put(j, e, lp >> j & 1)
+                        put(j, e2, lc >> j & 1)
+            todo, late = rest, None
         if multi:
             k = nn + m
             full, v1 = litmasks(k)
@@ -982,6 +1002,11 @@ class RegLatchAnalysis(Analysis):
                                 off | swap(off, b, self.cv1) & self.cfull)
                           for ctx, (on, off) in f.items()}
         return F
+
+    def _levels(self, y):
+        if not self.mixed:
+            return super()._levels(y)
+        return {c: (hi, lo) for c, (hi, lo) in self.Fv.get(y, {}).items()}
 
     def equations(self):
         if not self.mixed:

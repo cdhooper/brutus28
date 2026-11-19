@@ -238,29 +238,38 @@ def main(argv=None):
             return 0 if not bad else 1
         # A latch's cover has product terms that only hold it through a
         # step.  CUPL's minimiser takes them out again, so a design with
-        # latches is compiled without it, if it fits that way.
-        jed = None
-        if latches or mixed:
-            jed = compile_cupl(args.cupl, pld, lambda msg: None, minimise=0)
-            if jed:
-                notes = []
-                diff = verify.check_captures(a, jed, notes)
-                if diff:
-                    log("compiled without CUPL's minimisation, %s disagrees with the "
-                        "captures (%s); compiling with it" % (os.path.basename(jed), diff[:3]))
-                    jed = None
-                else:
-                    log("compiled without CUPL's minimisation (-m0), which would remove the "
-                        "product terms that hold the latches through a step")
-            else:
-                log("does not fit without CUPL's minimisation; compiling with it (the "
-                    "latches lose the product terms that hold them through a step)")
-        if not jed:
-            jed = compile_cupl(args.cupl, pld, log)
-            if not jed:
-                return 1
+        # latches is compiled without it, if it fits that way.  A GAL16V8
+        # without registers may need its mode named: CUPL takes the simple
+        # mode unless an output has an enable, and that mode cannot read
+        # pins 15 and 16.
+        tries = [(None, m) for m in ([0, 4] if latches or mixed else [4])]
+        if device == "GAL16V8" and not a.reg:
+            tries += [(d, m) for d in ("g16v8ma", "g16v8ms") for _, m in tries]
+        jed, said = None, []
+        for dev, level in tries:
+            if dev:
+                with open(pld, "w") as f:
+                    f.write(src.replace("Device %s;" % a.dev["cupl"], "Device %s;" % dev))
+            said = []
+            j = compile_cupl(args.cupl, pld, said.append, minimise=level)
+            if not j:
+                continue
             notes = []
-            diff = verify.check_captures(a, jed, notes)
+            diff = verify.check_captures(a, j, notes)
+            jed = j
+            if not diff:
+                break
+        if not jed:
+            for msg in said:
+                log(msg)
+            return 1
+        if dev:
+            log("compiled for %s (CUPL does not choose that mode by itself)" % dev)
+        if (latches or mixed) and not diff:
+            log("compiled without CUPL's minimisation (-m0), which would remove the product "
+                "terms that hold the latches through a step" if level == 0 else
+                "compiled with CUPL's minimisation: it does not fit without (the latches "
+                "lose the product terms that hold them through a step)")
         log("%s against the captures (%s x %d input vectors%s): %s" % (
             os.path.basename(jed),
             "%d walks" % len(a.walks) if latches else "%d states" % len(a.states),

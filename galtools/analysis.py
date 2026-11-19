@@ -892,9 +892,83 @@ class Analysis:
                 return " & ".join(("" if c[1] >> j & 1 else "!") + names[sup[j]]
                                   for j in range(k) if c[0] >> j & 1)
             expr = "\n    # ".join(lit(c) for c in cubes) if cubes else "'b'0"
+            if kind == "oe" and len(cubes) > 1 and not (
+                    inv and all(c[0] & (c[0] - 1) == 0 for c in cubes)):
+                # an enable is one product term: over the inputs it is not,
+                # so it reads another output's pin
+                term = self._one_term(p, f)
+                if term:
+                    eqs.append((p, kind, False, term, 1))
+                    continue
             eqs.append((p, kind, inv, expr, len(cubes)))
+        if self.device == "GAL16V8" and regs and not self.clock_in_v:
+            # A registered GAL16V8's pin 11 enables its registers and is no
+            # array input.  An output that is enabled by it and never
+            # changes is a register that always loads the same value.
+            n11 = "!" + self.name(11)
+            fixed = {p for p, kind, inv, expr, _ in eqs
+                     if kind == "oe" and not inv and expr == n11}
+            fixed = {p for p, kind, _, expr, _ in eqs
+                     if p in fixed and kind == "" and expr.startswith("'b'")}
+            eqs = [(p, "d" if p in fixed and kind == "" else kind, inv, expr, n)
+                   for p, kind, inv, expr, n in eqs if not (p in fixed and kind == "oe")]
         self.eqs = sorted(eqs)
         return self.eqs
+
+    def _levels(self, y):
+        """Where output y is known to be high and low, per context:
+        {context: (high, low)} over the x of the equations."""
+        return {s: (t.value[y] & t.driven[y], t.driven[y] & ~t.value[y])
+                for s, (_, t) in self.states.items()}
+
+    def _one_term(self, p, f):
+        """Function f of pin p (per context, on and off sets) as one product
+        term over the inputs, the registers and the levels of the other
+        outputs, or None: the literals that hold wherever f is on, less
+        those not needed to keep it off elsewhere."""
+        ctxs = [c for c in f if f[c][0] or f[c][1]]
+        lits = []                       # (text, {context: the x at which it is true})
+        for b, q in enumerate(self.EV):
+            if q == p:
+                continue
+            for val in (1, 0):
+                m = self.ev1[b] if val else self.efull ^ self.ev1[b]
+                if all(not f[c][0] & ~m for c in ctxs):
+                    lits.append((("" if val else "!") + self.name(q), {c: m for c in ctxs}))
+        for i, q in enumerate(self.cvars):
+            vals = {self.CW[c][i] for c in ctxs if f[c][0]}
+            if len(vals) == 1 and q != p:
+                v = vals.pop()
+                lits.append((("" if v else "!") + self.name(q),
+                             {c: self.efull if self.CW[c][i] == v else 0 for c in ctxs}))
+        outs = [y for y in self.comb if y != p and y not in self.EV and y not in self.cvars]
+        for y in outs:
+            lv = self._levels(y)
+            if not all(c in lv for c in ctxs):
+                continue
+            for val in (1, 0):
+                if all(not f[c][0] & ~lv[c][1 - val] for c in ctxs):
+                    # true where the level is not known to be the other one
+                    lits.append((("" if val else "!") + self.name(y),
+                                 {c: self.efull ^ lv[c][val] for c in ctxs}))
+
+        def off(ls):
+            for c in ctxs:
+                bits = f[c][1]
+                for _, m in ls:
+                    bits &= m[c]
+                    if not bits:
+                        break
+                if bits:
+                    return True
+            return False
+        if not lits or off(lits):
+            return None
+        for item in list(lits):
+            rest = [x for x in lits if x is not item]
+            if rest and not off(rest):
+                lits = rest
+        return " & ".join(t for t, _ in lits)
 
     def _hazards(self, p, kind, sup, pos, neg, on, off):
         """The two covers of a function, with whatever its kind needs
