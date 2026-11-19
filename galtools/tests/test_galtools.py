@@ -637,6 +637,47 @@ class Firmware(unittest.TestCase):
         self.assertEqual(len(cap.sigs), 1)
         self.assertEqual(len(cap.sigs[0]), 2 * 3)
 
+    def _edges(self, follow, dclk=False):
+        """fsm22v10 explored through the firmware: the analysis, the pins
+        driven against the GAL at a rising clock edge, the pins driven
+        directly."""
+        t = self.transport("fsm22v10", "dip24")
+        dev, io = t.dev, t.dev.io
+        log = []
+
+        def logged(value):
+            r = io(value)
+            if dev.powered:
+                log.append((value, r))
+            return r
+        dev.io = logged
+        t.lib.harness_direct()
+        rig = BrutusRig(t, "GAL22V10", log=quiet, follow=follow, dclk=dclk)
+        a = Analysis(rig, "GAL22V10", fixed=CASES["fsm22v10"][3], log=quiet)
+        a.run()
+        direct = t.lib.harness_direct()
+        clk, mask = rig.sbit[1], rig.readmask
+        fought = 0
+        for (_, r), (w, _) in zip(log, log[1:]):
+            if w & clk and not r & clk:
+                fought |= (w ^ r) & mask & ~clk
+        return a, fought, direct
+
+    def test_follow_and_dclk(self):
+        plain, fought, direct = self._edges(follow=False)
+        self.assertNotEqual(fought, 0)      # the test sees a fight
+        self.assertEqual(direct, 0)
+        a, fought, direct = self._edges(follow=True, dclk=True)
+        self.assertEqual(fought, 0)
+        self.assertEqual(direct, 1 << 0)    # socket pin 1, the clock
+        self.assertEqual(a.equations(), plain.equations())
+        self.assertEqual(a.trans, plain.trans)
+
+    def test_dclk_refuses_supply_pin(self):
+        t = self.transport("fsm22v10", "dip24")
+        self.assertIn("dclk: a clock pin is a VCC or GND pin",
+                      t.command("pld capture set clk=8000000 vcc=8000000 gnd=800 dclk=1"))
+
     def test_analysis_through_firmware(self):
         for name, (device, nstates, regs, fixed) in CASES.items():
             for socket in (["dip24", "plcc28"] if device == "GAL22V10" else ["dip20"]):

@@ -13,9 +13,11 @@ logic. galre also clocks the chip from state to state and walks each
 reachable state. The firmware side is the `pld capture` command
 (`fw/capture.c`).
 
-> **Status:** the firmware commands have run only on the host, against the
-> GAL simulator (`fwsim.py` compiles `fw/capture.c` for the test
-> suite). They have not yet been run on a Brutus-28 board.
+> **Status:** first board run on 2026-11-18: an ATF22V10 in the PLCC
+> socket, a ROM-board state machine (19 pins enumerated, 6 states), came
+> out the same as the analysis of its original JED, equation for equation.
+> The asynchronous reset and latch paths have run only on the host, against
+> the GAL simulator (the test suite builds `fw/capture.c` for the host).
 
 ## Requirements
 
@@ -127,6 +129,18 @@ Options:
 - `--no-jumper-check` powers the socket without checking the jumpers.
 
 ## How it works
+
+Brutus drives every pin through a 1K resistor, except the clock: through
+the 1K, the clock edge is slow, and a GAL22V10 then takes some transitions
+wrongly, because its registers do not all switch at the same moment and
+one can catch another's new value through the feedback. On the first
+board run, a few transitions in a thousand from one state came out wrong
+that way, and not always the same ones. So the
+firmware drives pin 1 directly from the CPU (`dclk`), which is safe because
+pin 1 of a GAL is always an input. Also, just before each clock edge, it
+drives every pin at the level it reads (`follow`), so no pin the GAL
+drives is fought through its 1K at the edge. `--no-dclk` and `--no-follow`
+turn these off.
 
 1. **Power-up walk.** galre walks every signal pin except pin 1 (the clock,
    held low) and the held pins. Every pin is driven weakly through Brutus's
@@ -345,8 +359,8 @@ The supply is measured only when the pins match the job's `vcc=` and
 The host first configures a job:
 
 - `set pins= base= inv= clk= cand= mask= count= mul= rev= gray= rot=
-  start= skm= skv= avm= avv= quiet= chk= settle= off= on= vcc= gnd=
-  supply=`
+  start= skm= skv= avm= avv= quiet= chk= follow= dclk= settle= off= on=
+  vcc= gnd= supply=`
 - `path`
 - `probe`
 - `ret <crc> <vectors>`
@@ -370,6 +384,13 @@ It then runs one of:
   clocked vector is also read right after the edge and again after the
   probes, and the first 16 vectors where the reads differ are reported.
 - `state`: the signature of the path state.
+
+Every clock step drives its vector with the clock pins low, then raises
+them. With `follow=1`, the pins are read after the first write and every
+read pin is driven at the level it read before the clock rises. With
+`dclk=1`, the clock pins are driven directly by the CPU's PLD_* pins
+instead of through the 1K, and only while the chip is powered; a clock
+pin may not be a VCC or GND pin.
 
 With `avm` set, no write passes through a vector v with v & `avm` = `avv`
 on its way to the next vector, in any of the three port writes; a target

@@ -14,7 +14,14 @@
  * state, does its work, and powers the PLD off again (also on abort).
  *
  * A step with vector v drives v with the clock pins low, then v with the
- * clock pins high: one rising clock edge.
+ * clock pins high: one rising clock edge.  With follow set, the step reads
+ * the pins after the first write and drives every read pin at the level
+ * it read before the clock edge: where the PLD drives a pin, Brutus then
+ * drives the same level instead of fighting it through the 1K, so a pin
+ * the clock turns off keeps its level while the edge is still settling.
+ * With dclk set, the clock pins are driven directly by the CPU's PLD_*
+ * pins (no 1K), for a fast edge; this needs pins the PLD never drives,
+ * such as pin 1 of a GAL.
  *
  * A signature is, for each probe vector p (clock pins low), one read of
  * p, then one read per candidate pin c with only c's drive inverted.  A
@@ -130,6 +137,8 @@ static struct {
     uint32_t  avv;
     uint32_t  quiet;        /* walk: report the signatures only */
     uint32_t  chk;          /* trans: flag x whose state the signature changed */
+    uint32_t  follow;       /* steps: drive the read levels before the edge */
+    uint32_t  dclk;         /* clock pins driven directly, not through 1K */
     uint32_t  vcc;          /* preflight: socket pins jumpered to VCC */
     uint32_t  gnd;          /* preflight: socket pins jumpered to GND */
     uint      supply_mv;    /* preflight: PLD supply (mV), 0 = any */
@@ -162,7 +171,7 @@ const char cmd_pld_capture_help[] =
 "pld capture clear              - reset the job to defaults\n"
 "pld capture set <key>=<value>  - pins base inv clk cand mask count mul rev\n"
 "                                 gray rot start skm skv avm avv quiet chk\n"
-"                                 vcc gnd (hex)\n"
+"                                 follow dclk vcc gnd (hex)\n"
 "                                 settle (usec) off on (msec) supply (mV)\n"
 "pld capture path [+] <v>...    - clocked vectors from power-up to the state\n"
 "pld capture probe [+] <v>...   - probe vectors for signatures\n"
@@ -328,6 +337,7 @@ cap_end(uint status)
 
     cap_flush();
     cap_hw_power(0);
+    cap_hw_direct(0);
     v[0] = cap_done;
     v[1] = cap_pcycles;
     v[2] = cap_ret_ok;
@@ -398,7 +408,16 @@ cap_io(uint32_t v)
 static void
 cap_step(uint32_t v)
 {
-    (void) cap_io(v & ~cap.clk);
+    uint32_t r = cap_io(v & ~cap.clk);
+
+    if (cap.follow) {
+        /* r is masked: the read pins take the level they read */
+        uint32_t f = ((v & ~cap.mask) | r) & ~cap.clk;
+
+        if (f != (v & ~cap.clk))
+            (void) cap_io(f);
+        v = f;
+    }
     (void) cap_io(v | cap.clk);
 }
 
@@ -409,6 +428,7 @@ cap_power_up(uint off_msec)
 
     cap_hw_power(0);
     cap_hw_delay_msec(off_msec);
+    cap_hw_direct(cap.dclk ? cap.clk : 0);
     cap_hw_power(1);                     /* drives every pin low */
     cap_last = 0;
     cap_hw_delay_msec(cap.on_msec);
@@ -850,6 +870,8 @@ cap_set(int argc, char * const *argv)
         { "avv",    &cap.avv,   NULL },
         { "quiet",  &cap.quiet, NULL },
         { "chk",    &cap.chk,   NULL },
+        { "follow", &cap.follow, NULL },
+        { "dclk",   &cap.dclk,  NULL },
         { "vcc",    &cap.vcc,   NULL },
         { "gnd",    &cap.gnd,   NULL },
         { "settle", NULL,       &cap.settle_usec },
@@ -886,6 +908,10 @@ cap_set(int argc, char * const *argv)
     }
     if ((cap.pins & cap.clk) || (cap.inv & (cap.pins | cap.clk))) {
         printf("pins, clk and inv must not overlap\n");
+        return (RC_BAD_PARAM);
+    }
+    if (cap.dclk && (cap.clk & (cap.vcc | cap.gnd))) {
+        printf("dclk: a clock pin is a VCC or GND pin\n");
         return (RC_BAD_PARAM);
     }
     return (RC_SUCCESS);
@@ -964,6 +990,7 @@ cap_show(void)
            "mask=%07lx\ncount=%lx mul=%lx rev=%lx gray=%lx rot=%lx "
            "start=%07lx\n"
            "skm=%07lx skv=%07lx avm=%07lx avv=%07lx quiet=%lx chk=%lx\n"
+           "follow=%lx dclk=%lx\n"
            "settle=%u off=%u on=%u vcc=%07lx gnd=%07lx supply=%u\n",
            (unsigned long) cap.pins, (unsigned long) cap.base,
            (unsigned long) cap.inv, (unsigned long) cap.clk,
@@ -974,7 +1001,8 @@ cap_show(void)
            (unsigned long) cap.start, (unsigned long) cap.skm,
            (unsigned long) cap.skv, (unsigned long) cap.avm,
            (unsigned long) cap.avv, (unsigned long) cap.quiet,
-           (unsigned long) cap.chk, cap.settle_usec, cap.off_msec,
+           (unsigned long) cap.chk, (unsigned long) cap.follow,
+           (unsigned long) cap.dclk, cap.settle_usec, cap.off_msec,
            cap.on_msec, (unsigned long) cap.vcc, (unsigned long) cap.gnd,
            cap.supply_mv);
     cap_show_list("path", cap.path, cap.npath);

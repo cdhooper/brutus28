@@ -409,19 +409,51 @@ pld_init(void)
 
 /*
  * Hardware access for the capture engine ("pld capture", capture.c).
+ *
+ * The cap_hw_direct() pins (the clock with "set dclk=1") are driven by
+ * the CPU's PLD_* pins, which connect to the socket without the 1K, at
+ * the fastest output speed, for a clean clock edge.  They are switched to
+ * outputs only while the PLD is powered, and written before the PLDD_*
+ * pins, so the 1K drive in parallel only follows them.
  */
+static uint32_t cap_direct;
+
+static void
+pld_output_bits(uint32_t mask, uint32_t data)
+{
+    uint32_t set = mask & data;
+    uint32_t clr = mask & ~data;
+
+    GPIO_BSRR(PLD1_PORT) = ((clr & 0xffff) << 16) | (set & 0xffff);
+    GPIO_BSRR(PLD17_PORT) = (((clr >> 16) & 0x0fff) << 16) |
+                            ((set >> 16) & 0x0fff);
+}
+
+void
+cap_hw_direct(uint32_t pins)
+{
+    cap_direct = pins & 0x0fffffff;
+}
+
 void
 cap_hw_power(int on)
 {
-    if (on)
+    if (on) {
         pld_enable();
-    else
-        pld_disable();
+        if (cap_direct != 0) {
+            pld_output_bits(cap_direct, 0);
+            pld_gpio_setmode(cap_direct, GPIO_SETMODE_OUTPUT_PPULL_50);
+        }
+    } else {
+        pld_disable();             /* also the PLD_* pins back to inputs */
+    }
 }
 
 uint32_t
 cap_hw_io(uint32_t value, uint settle_usec)
 {
+    if (cap_direct != 0)
+        pld_output_bits(cap_direct, value);
     pldd_output(value);
     if (settle_usec != 0)
         timer_delay_usec(settle_usec);
