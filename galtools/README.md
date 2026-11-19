@@ -26,8 +26,7 @@ reachable state. The firmware side is the `pld capture` command
 - Brutus-28 firmware with `pld capture`.
 - Optional: a CUPL compiler, used to turn the result into a JED and check it
   (`--cupl`, `$CUPL`, or `cupl` on the PATH). It is run as
-  `cupl -jaxm4 NAME.pld` (`-jaxm0` for a design with latches, see
-  Latches), so WinCUPL's `cupl` or a native build of it
+  `cupl -jaxm4 NAME.pld`, so WinCUPL's `cupl` or a native build of it
   will do.
 
 ## Use
@@ -124,8 +123,10 @@ galre exits with:
   every capture);
 - 1 when the equations or the JED disagree with the captures;
 - 2 when the jumper check failed;
-- 3 when the chip changes state without a clock in a way galre does not
-  model, or has state that no pin shows (see Limits).
+- 3 when galre stops before writing equations: the chip changes state
+  without a clock in a way galre does not model, has state that no pin
+  shows, or is beyond a limit such as `--max-states` (see Limits). The
+  last lines of the report say which.
 
 Options:
 
@@ -136,6 +137,9 @@ Options:
   the GAL drives a held pin.
 - `--survey N` sets how many sample inputs per state are clocked in before
   the full sweeps (default 64).
+- `--max-states N` is where galre gives up on a state machine (default
+  1024). The firmware takes paths of up to 512 clocks and 2048 different
+  states per sweep.
 - `--settle`, `--off` and `--on` set the firmware timing: µs after each
   write, ms with power off during a power cycle, and ms after power on.
 - `--no-jumper-check` powers the socket without checking the jumpers.
@@ -262,7 +266,8 @@ registers (`latch.py`):
 - The inputs are walked in Gray code order from power-up, so one pin
   changes per write and no mix of old and new pin values (see Limits)
   reaches the chip. The walks go in every rotation of the bit order
-  (`rot`), both ways (`rev`), so that every pin changes often and in many
+  (`rot`), both ways (`rev`), and in mixed Gray code orders (`mix`, see
+  Limits), so that every pin changes often and in many
   latch states.
 - The latch pins are the outputs that read differently at the same input
   vector in two walks. Of those, an output that reads as a function of the
@@ -283,7 +288,9 @@ registers (`latch.py`):
   holds it, a product term that holds through the step, so the rebuilt
   latch cannot glitch there.
 - galre then walks from other start vectors until the learned circuit
-  predicts two walks in a row, learning again from those it gets wrong.
+  predicts as many walks in a row as make 16384 steps (at least two, at
+  most 64; mixed Gray code walks), learning again from those it gets
+  wrong.
   Last, it checks that every output is always driven.
 
 The equations read the latch pins, as the original's do:
@@ -293,9 +300,12 @@ The equations read the latch pins, as the original's do:
         # P4 & P17;
 
 The last term changes nothing at rest: it holds the latch while P5
-changes. CUPL's minimiser removes such terms, so galre compiles a design
-with latches without it (`-m0`), and with it only if the design does not
-fit or the JED then disagrees with the captures.
+changes. CUPL's minimiser removes such terms, so the source says not to
+minimise the latches (`MIN [P17, P18] = 0;`). What CUPL needs is all in
+the source: that statement, the device (for a GAL16V8 sometimes its mode,
+`g16v8ma` or `g16v8ms`), and a comment with the command galre used,
+`cupl -jaxm4 NAME.pld`. If the design does not fit with the extra terms,
+galre leaves the statement out and says so.
 
 The rebuilt JED is checked against the walks from the first read where it
 agrees, and in `sim` against the original under random stimulus that
@@ -336,7 +346,9 @@ not the reset term. galre then goes on (`reglatch.py`):
      order, both ways, so that the chip is clocked and reset in many
      places;
    - then walks from other states and start vectors, until the learned
-     circuit predicts two in a row.
+     circuit predicts as many in a row as make 16384 steps (at least
+     two, at most 64), in mixed Gray code order, so pin 1 rises often
+     and in many places.
 3. The outputs that read differently at the same inputs, pin 1 level and
    register state are the latch pins, less those that are a function of
    these and the other latch pins. Every output, enable and register
@@ -399,8 +411,8 @@ Estimated board time is based on the simulator's count of operations
 | A 22V10 ROM-board controller from the field | 19 | 6 | about 6 min, 377 power cycles |
 | `designs/latch22v10` (three latches), pins 13-19 held | 11 | 24 walks | about 2 s |
 
-The three extra power-up walks take up to a minute of that on a GAL22V10,
-mostly USB transfer. Reading the clocked vector twice in the transition
+The six extra power-up walks take up to two minutes of that on a GAL22V10,
+mostly USB transfer, and every other state is walked twice. Reading the clocked vector twice in the transition
 sweeps adds about 5 µs per vector. An asynchronous reset term takes up to
 two walks per enumerated pin to learn (about a second each with 19 pins),
 and the states in which it fires are walked twice.
@@ -435,9 +447,27 @@ needed about 3 million power cycles.
   It takes a design for latches when the power-up walk reads differently
   in another order. Tried in simulation on set/reset and transparent
   latches with their inputs on every pair of pins, and on set-only bits,
-  the three extra orders together show every latch that can leave its
-  power-up value. No two of them do. A latch in a registered design that
-  acts only in other states shows when reading a new state changes it.
+  the three counting orders (descending, bit-reversed, both) together
+  show every latch that can leave its power-up value. No two of them do.
+  In a counting order, though, a pin never rises alone: every faster pin
+  falls with it. A latch that holds only while another signal keeps
+  still (`!P14 = !P8 # !P14 & !P13`, from a graphics card's GAL) never
+  holds then, and the chip reads as combinational. So the power-up state
+  is also walked in Gray code order and in two mixed Gray code orders,
+  and every other state once in a mixed one, from the vector the path
+  left it at; these must read the same as the counting walk. A latch in
+  a registered design that acts only in other states also shows when
+  reading a new state changes it.
+
+  A mixed Gray code changes one pin per vector like the usual one, but
+  is walked as one half, one pin's change, the other half, and each half
+  again so, with the pin that splits each part chosen by a hash (`mix`).
+  The usual Gray code changes its lowest pin at every second vector and
+  its highest once. In a mixed one, which pins change often differs from
+  part to part, so most pins change about equally often, and a few
+  values of `mix` cover them all. What a latch does when a pin changes
+  depends on where the other pins and latches stand, so this shows much
+  more of it per walk.
 
   galre stops with exit code 3 before writing equations when:
   - the chip has state that no pin shows (a register whose output is
@@ -480,8 +510,8 @@ The supply is measured only when the pins match the job's `vcc=` and
 The host first configures a job:
 
 - `set pins= base= inv= clk= cand= mask= count= mul= rev= gray= rot=
-  start= skm= skv= avm= avv= quiet= chk= pre= follow= dclk= settle= off=
-  on= vcc= gnd= supply=`
+  mix= start= skm= skv= avm= avv= quiet= chk= pre= follow= dclk= settle=
+  off= on= vcc= gnd= supply=`
 - `path`
 - `probe`
 - `ret <crc> <vectors>`
@@ -497,7 +527,8 @@ It then runs one of:
   x = (i * `mul`) mod 2^n, or the i-th Gray code with `gray=1`, rotated
   left by `rot` bits within its n bits. Bit b of x drives the b-th
   enumerated pin from the lowest socket pin up, or from the highest down
-  with `rev=1`. Every vector is XORed with `start`.
+  with `rev=1`. With `mix` not 0 (and `gray=1`) the order is the mixed
+  Gray code that `mix` selects. Every vector is XORed with `start`.
   Vectors v with v & `skm` = `skv` are skipped (read as 0). The
   enumerated pins may include the clock pins: after the path, the walk
   then drives them like any other pin, and clocks the chip when it raises

@@ -7,13 +7,15 @@ pin 1, starting from power-up.  Every signal pin is driven weakly (1K), so
 a pin the GAL does not drive reads back its drive.
 
     walk(V, base, path, mul=1, rev=0, probes=(), cand=(), gray=0, start=0,
-         skip=None, avoid=None, data=True, rot=0)
+         skip=None, avoid=None, data=True, rot=0, mix=0)
         From the path state, for every assignment x of the enumerated pins V
         (bit b of x = pin V[b]; the other pins at base, pin 1 low) read every
         pin, and again with every pin outside V inverted, except pin 1 and
         the pins given in base (held inputs keep their value).  The i-th
         vector is x = (i * mul) mod 2^n (mul odd), or the i-th Gray code
-        with gray (one pin changes per vector), rotated left by rot bits (bit
+        with gray (one pin changes per vector; with mix not 0, of another
+        Gray code that mix selects, in which most pins change about
+        equally often: mix_bits), rotated left by rot bits (bit
         0 then drives V[rot]), bit-reversed with rev (V[-1] then changes
         fastest), then XORed with start.  Vectors in the skip
         cube (a drive dict, pin -> 0/1) are not driven and read as 0.
@@ -83,7 +85,7 @@ SUPPLY_MV = 5000                    # GAL16V8 and GAL22V10 are 5 V parts
 SUPPLY_TOLERANCE = 16               # percent, as fw/capture.c
 
 # Firmware limits (fw/capture.c)
-MAX_PATH, MAX_PROBES, MAX_CAND, MAX_RET, MAX_RET_LEN = 48, 8, 12, 32, 16
+MAX_PATH, MAX_PROBES, MAX_CAND, MAX_RET, MAX_RET_LEN = 512, 8, 12, 32, 16
 
 
 def popcount(x):
@@ -120,12 +122,52 @@ def walk_x(i, n, mul=1, rev=0, gray=0, start=0, rot=0):
     return (bitrev(x, n) if rev else x) ^ start
 
 
-def gray_order(n, rot=0, rev=0, start=0):
+def _mix_hash(seed, level, part):
+    """cap_mix_hash in fw/capture.c."""
+    h = (seed ^ (part * 0x9e3779b1) ^ ((level + 1) * 0x85ebca6b)) & 0xffffffff
+    h ^= h >> 15
+    h = (h * 0x2c1b3c6d) & 0xffffffff
+    h ^= h >> 12
+    h = (h * 0x297a2d39) & 0xffffffff
+    return h ^ (h >> 15)
+
+
+def mix_bits(n, mix):
+    """The bit that changes at each step of the mixed Gray code that mix
+    selects (fw/capture.c, cap_mix_next): the cube is walked as one half,
+    one bit's change, the other half, and each half again so, with the
+    bit that splits a part chosen by a hash of mix and the part's place.
+    Every vector comes once.  The bit that splits the whole walk changes
+    once, and the next one or two rarely; the others change about equally
+    often.  Another mix makes other bits the rare ones."""
+    rem = [None] * n
+    split = [0] * n
+
+    def enter(level, i):
+        for k in range(level - 1, -1, -1):
+            if k + 1 < n:
+                rem[k] = [b for b in rem[k + 1] if b != split[k + 1]]
+            split[k] = rem[k][((_mix_hash(mix, k, i >> (k + 1)) >> 16) * (k + 1)) >> 16]
+    if n:
+        rem[n - 1] = list(range(n))
+    enter(n, 0)
+    for i in range(1, 1 << n):
+        level = (i & -i).bit_length() - 1
+        yield split[level]
+        enter(level, i)
+
+
+def gray_order(n, rot=0, rev=0, start=0, mix=0):
     """The vectors of a Gray code walk in the order written: walk_x(i, n,
-    gray=1, ...) for i = 0, 1, ..."""
+    gray=1, ...) for i = 0, 1, ...; with mix, of the mixed Gray code."""
     pos = [1 << (n - 1 - (g + rot) % n if rev else (g + rot) % n) for g in range(n)]
     x = start
     yield x
+    if mix:
+        for b in mix_bits(n, mix):
+            x ^= pos[b]
+            yield x
+        return
     for i in range(1, 1 << n):
         x ^= pos[(i & -i).bit_length() - 1]
         yield x
@@ -134,14 +176,14 @@ def gray_order(n, rot=0, rev=0, start=0):
 _orders = {}
 
 
-def gray_arrays(n, rot=0, rev=0, start=0):
+def gray_arrays(n, rot=0, rev=0, start=0, mix=0):
     """(order, where): gray_order as an array, and for each vector the
     step at which it is written.  The last few are kept: a walk is
     decoded, followed and checked in the same order."""
-    key = (n, rot, rev, start)
+    key = (n, rot, rev, start, mix)
     hit = _orders.get(key)
     if hit is None:
-        order = array("I", gray_order(n, rot, rev, start))
+        order = array("I", gray_order(n, rot, rev, start, mix))
         where = array("I", bytes(4 << n))
         for i, x in enumerate(order):
             where[x] = i
@@ -286,13 +328,13 @@ class SimRig:
         return ext
 
     def walk(self, V, base, path, mul=1, rev=0, probes=(), cand=(), gray=0, start=0,
-             skip=None, avoid=None, data=True, rot=0):
+             skip=None, avoid=None, data=True, rot=0, mix=0):
         if not self.fw and CLOCK in V and self.q0:
             self._firmware()          # the walk clocks the registers
         if self.fw:
             return self.fw.walk(V, base, path, mul=mul, rev=rev, probes=probes, cand=cand,
                                 gray=gray, start=start, skip=skip, avoid=avoid, data=data,
-                                rot=rot)
+                                rot=rot, mix=mix)
         self._replay(path)
         n = len(V)
         full, v1 = litmasks(n)
@@ -396,7 +438,7 @@ class SimRig:
             ops["power_cycles"] += k
             ops["clocks"] += k * len(path)
             ops["io"] += k * (2 * len(path) + nsig)
-        ops["bytes"] += popcount(sel) * (5 if pre else 1) + 4 * nsig * (len(out) + 1)
+        ops["bytes"] += popcount(sel) * (6 if pre else 2) + 4 * nsig * (len(out) + 1)
         if pre:
             return out, [], {p: before[p] & sel for p in self.pins}
         return out, []
@@ -520,7 +562,7 @@ class BrutusRig:
 
     def _job(self, V, base, path, probes, cand, inv=0, count=None, mul=1, returns=(), rev=0,
              gray=0, start=0, skip=None, avoid=None, quiet=False, chk=False, rot=0,
-             ignore=(), pre=False):
+             ignore=(), pre=False, mix=0):
         if list(V) != sorted(V):
             raise ValueError("enumerated pins must be in ascending order")
         if len(cand) > MAX_CAND:
@@ -537,6 +579,8 @@ class BrutusRig:
         if gray or start or rot:
             extra.append("gray=%x rot=%x start=%x" % (gray, rot, self._mask(
                 [p for b, p in enumerate(V) if start >> b & 1])))
+        if mix:
+            extra.append("mix=%x" % mix)
         for name, cube in (("sk", skip), ("av", avoid)):
             if cube:
                 extra.append("%sm=%x %sv=%x" % (name, self._mask(cube), name,
@@ -578,7 +622,7 @@ class BrutusRig:
             raise CaptureError("pld capture %s: %d of %d vectors" % (what, cap.done, cap.count))
         return cap
 
-    def _bitsets(self, data, step, offset, n, mul=1, rev=0, gray=0, start=0, rot=0):
+    def _bitsets(self, data, step, offset, n, mul=1, rev=0, gray=0, start=0, rot=0, mix=0):
         """pin -> bitset over x of the reads data[offset::step], where the
         i-th read is of vector walk_x(i, n, mul, rev, gray, start, rot), as
         walk() orders them."""
@@ -587,7 +631,12 @@ class BrutusRig:
         try:
             import numpy as np
             a = np.frombuffer(bytes(data), dtype="<u4")[offset::step]
-            if mul != 1 or rev or gray or start or rot:
+            if gray and mix:
+                idx = np.frombuffer(gray_arrays(n, rot, rev, start, mix)[0], dtype=np.uint32)
+                ordered = np.empty_like(a)
+                ordered[idx] = a
+                a = ordered
+            elif mul != 1 or rev or gray or start or rot:
                 u = np.uint64
                 idx = np.arange(N, dtype=u)
                 idx = idx ^ (idx >> u(1)) if gray else (idx * u(mul)) & u(N - 1)
@@ -614,7 +663,7 @@ class BrutusRig:
             if mul != 1 or rev or gray or start or rot:
                 if gray and N > 1:
                     # the read of vector x is the where[x]-th
-                    reads = array("I", itemgetter(*gray_arrays(n, rot, rev, start)[1])(reads))
+                    reads = array("I", itemgetter(*gray_arrays(n, rot, rev, start, mix)[1])(reads))
                 else:
                     ordered = array("I", bytes(4 * N))
                     for i, r in enumerate(reads):
@@ -640,11 +689,11 @@ class BrutusRig:
         return o
 
     def walk(self, V, base, path, mul=1, rev=0, probes=(), cand=(), gray=0, start=0,
-             skip=None, avoid=None, data=True, rot=0):
+             skip=None, avoid=None, data=True, rot=0, mix=0):
         inv = self._mask([p for p in self.pins
                           if p not in V and p != CLOCK and p not in base]) if data else 0
         self._job(V, base, path, probes, cand, inv=inv, mul=mul, rev=rev, gray=gray,
-                  start=start, skip=skip, avoid=avoid, quiet=not data, rot=rot)
+                  start=start, skip=skip, avoid=avoid, quiet=not data, rot=rot, mix=mix)
         cap = self._run("walk")
         n = len(V)
         reads = 2 if inv else 1             # no second read when nothing is inverted
@@ -659,8 +708,8 @@ class BrutusRig:
         self.ops["clocks"] += len(path)
         if not data:
             return None, None, sigs
-        la = self._bitsets(cap.data, reads, 0, n, mul, rev, gray, start, rot)
-        lb = self._bitsets(cap.data, 2, 1, n, mul, rev, gray, start, rot) if inv else dict(la)
+        la = self._bitsets(cap.data, reads, 0, n, mul, rev, gray, start, rot, mix)
+        lb = self._bitsets(cap.data, 2, 1, n, mul, rev, gray, start, rot, mix) if inv else dict(la)
         return la, lb, sigs
 
     def transitions(self, V, base, path, probes, cand, count=None, mul=1, returns=(),
@@ -677,8 +726,8 @@ class BrutusRig:
         before = bytearray(4 * N) if pre else None
         pos = 0
         for i in range(cap.count):
-            k = data[pos]
-            pos += 1
+            k = data[pos] | data[pos + 1] << 8
+            pos += 2
             if k == len(defs):
                 reads = struct.unpack_from("<%dI" % nsig, data, pos)
                 pos += 4 * nsig
@@ -751,12 +800,12 @@ class RecordingRig:
         self.f.close()
 
     def walk(self, V, base, path, mul=1, rev=0, probes=(), cand=(), gray=0, start=0,
-             skip=None, avoid=None, data=True, rot=0):
+             skip=None, avoid=None, data=True, rot=0, mix=0):
         la, lb, sigs = self.rig.walk(V, base, path, mul=mul, rev=rev, probes=probes, cand=cand,
                                      gray=gray, start=start, skip=skip, avoid=avoid, data=data,
-                                     rot=rot)
+                                     rot=rot, mix=mix)
         rec = {"key": _key("walk", V, base, path, probes, cand, None, mul, rev=rev, gray=gray,
-                           start=start, skip=skip, avoid=avoid, data=data, rot=rot)}
+                           start=start, skip=skip, avoid=avoid, data=data, rot=rot, mix=mix)}
         if data:
             rec["la"], rec["lb"] = _enc(la), _enc(lb)
         if sigs is not None:
@@ -804,10 +853,10 @@ class ReplayRig:
         self.ops = Ops()
 
     def walk(self, V, base, path, mul=1, rev=0, probes=(), cand=(), gray=0, start=0,
-             skip=None, avoid=None, data=True, rot=0):
+             skip=None, avoid=None, data=True, rot=0, mix=0):
         rec = self.db.get(_key("walk", V, base, path, probes, cand, None, mul, rev=rev,
                                gray=gray, start=start, skip=skip, avoid=avoid, data=data,
-                               rot=rot))
+                               rot=rot, mix=mix))
         if rec is None:
             raise CaptureError("walk not in the recording; rerun on the board")
         sigs = tuple(_dec_obs(o) for o in rec["sigs"]) if "sigs" in rec else None

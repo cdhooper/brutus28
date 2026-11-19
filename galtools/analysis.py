@@ -56,6 +56,11 @@ class AsyncDesign(Exception):
     does not model."""
 
 
+class Limit(RuntimeError):
+    """The chip is beyond what the analysis can do, or the setup is wrong;
+    the message says how."""
+
+
 class LatchSuspected(AsyncDesign):
     """The power-up walk depends on its order, as latches built from
     combinational feedback make it (latch.LatchAnalysis takes over).
@@ -156,6 +161,12 @@ def _cube(c, name):
     return " & ".join(("" if v else "!") + name(p) for p, v in sorted(c.items()))
 
 
+HOW = ("/* Recovered by galre from captures of the chip.\n"
+       "   Compile with: cupl -jaxm4 %s.pld */")
+KEEP = ("/* A latch has product terms that only hold it while an input changes.\n"
+        "   Minimising would remove them. */")
+
+
 class Table:
     """One state's exhaustive walk: per pin, driven and value bitsets over
     the x in care[p].  A walk that skipped the x outside `care` knows
@@ -180,7 +191,7 @@ class Table:
 
 
 class Analysis:
-    def __init__(self, rig, device, fixed=None, survey=64, max_states=64, log=print):
+    def __init__(self, rig, device, fixed=None, survey=64, max_states=1024, log=print):
         self.rig, self.device, self.dev, self.log = rig, device, DEV[device], log
         self.pins = rig.pins
         self.fixed = dict(fixed or {})
@@ -212,7 +223,7 @@ class Analysis:
         t = self._power_up[self.clock_in_v]
         for p in sorted(self.fixed):
             if t.value[p] != (full if self.fixed[p] else 0):
-                raise RuntimeError("pin %d is held at %d, but the GAL drives it; do not hold "
+                raise Limit("pin %d is held at %d, but the GAL drives it; do not hold "
                                    "it (--fix)" % (p, self.fixed[p]))
         self.comb0, self.cand = [], []
         for p in self.dev["io"]:
@@ -252,7 +263,16 @@ class Analysis:
     # latches with their inputs on every pair of pins, and on set-only bits,
     # together they show every latch that can leave its power-up value;
     # no two of them do.
-    ORDERS = (("descending", -1, 0), ("bit-reversed", 1, 1), ("bit-reversed descending", -1, 1))
+    # In all of these, a pin rises together with every faster pin falling
+    # (or the reverse), so a latch that holds only while another signal
+    # stays as it is never gets to hold: in a GAL from a graphics card,
+    # !P14 = !P8 # !P14 & !P13 held only if pin 8 rose alone.  Gray code
+    # orders change one pin at a time; the mixed ones do so with most
+    # pins changing often (rig.mix_bits).
+    ORDERS = (("descending", dict(mul=-1)), ("bit-reversed", dict(rev=1)),
+              ("bit-reversed descending", dict(mul=-1, rev=1)),
+              ("Gray code", dict(gray=1)), ("mixed Gray code", dict(gray=1, mix=1)),
+              ("another mixed Gray code", dict(gray=1, mix=2)))
 
     def _check_order(self, V, la, lb):
         """Walk the power-up state again in other orders.  A clocked chip
@@ -263,8 +283,11 @@ class Analysis:
         if n < 2:
             return
         found, pins = None, set()
-        for order, mul, rev in self.ORDERS:
-            la2, lb2, _ = self.rig.walk(V, self.base, [], mul=mul & ((1 << n) - 1), rev=rev)
+        for order, kw in self.ORDERS:
+            kw = dict(kw)
+            if "mul" in kw:
+                kw["mul"] &= (1 << n) - 1
+            la2, lb2, _ = self.rig.walk(V, self.base, [], **kw)
             d = {p: (la[p] ^ la2[p]) | (lb[p] ^ lb2[p]) for p in la if p not in self.hist}
             d = {p: v for p, v in d.items() if v}
             if d and found is None:
@@ -416,7 +439,8 @@ class Analysis:
             d = t.driven[r] & ~self.ar_set
             if d and not any(d >> x & 1 for x in self.probe_x):
                 if len(self.probe_x) == MAX_PROBES:
-                    raise RuntimeError("more than %d probe vectors needed" % MAX_PROBES)
+                    raise Limit("more than %d probe vectors needed to tell the states apart" %
+                                MAX_PROBES)
                 self.probe_x.append(lowest(d))
                 added = True
         return added
@@ -451,7 +475,8 @@ class Analysis:
         without its inputs."""
         if path not in self._walks:
             if len(path) > MAX_PATH:
-                raise RuntimeError("state needs a path of %d clocks" % len(path))
+                raise Limit("a state is %d clocks from power-up, more than the firmware's "
+                            "%d" % (len(path), MAX_PATH))
             care = None
             if path and self.probe_x:
                 drives = self.drives(path)
@@ -466,12 +491,39 @@ class Analysis:
                         self._disturbed(path, sigs, around=True)
                     care = self.full ^ self.ar_set
                     self.ar_paths.add(path)
+                self._one_at_a_time(path, la, lb, care)
             else:
                 la, lb, _ = self.rig.walk(self.V, self.base, self.drives(path))
                 if not path:
                     self._raw0 = la, lb
             self._walks[path] = Table(self.V, la, lb, self.full, self.v1, care)
         return self._walks[path]
+
+    def _one_at_a_time(self, path, la, lb, care):
+        """Walk the state once more, in a mixed Gray code order from the
+        vector the path left the chip at, so one pin changes at a time.
+        It must read as in counting order: a latch that holds only while
+        the other pins keep still shows here (see ORDERS).  The power-up
+        state gets this in _check_order."""
+        n = len(self.V)
+        if n < 2:
+            return
+        kw = dict(skip=self.ar, avoid=self.ar) if care is not None else dict(avoid=self.ar)
+        la2, lb2, _ = self.rig.walk(self.V, self.base, self.drives(path), gray=1,
+                                    mix=1 + len(path), start=path[-1], **kw)
+        m = self.full if care is None else care
+        pins = sorted(p for p in la if p not in self.hist and p != CLOCK
+                      and ((la[p] ^ la2[p]) | (lb[p] ^ lb2[p])) & m)
+        if pins:
+            x = lowest(reduce(lambda a, b: a | b,
+                              (((la[p] ^ la2[p]) | (lb[p] ^ lb2[p])) & m for p in pins)))
+            self._history_dependent(pins, AsyncDesign(
+                "%s read differently in the state %d clocks from power-up when one input "
+                "changes at a time (the first at %s): the chip holds state without a "
+                "clock there" % (_pins(pins), len(path), self._inputs(x))))
+
+    def _history_dependent(self, pins, err):
+        raise err
 
     def _returns(self, s):
         """(observation, drives) routes from known states back to s."""
@@ -559,7 +611,7 @@ class Analysis:
             self.states[s2] = (p2, t)
             queue.append(s2)
             if len(self.states) > self.max_states:
-                raise RuntimeError("more than %d states" % self.max_states)
+                raise Limit("more than %d states (--max-states)" % self.max_states)
         return True
 
     def _explore_once(self):
@@ -607,7 +659,7 @@ class Analysis:
                 self.log("round %d: a new state drives a pin no probe enables; %d probes "
                          "now, exploring again" % (rnd + 1, len(self.probe_x)))
         else:
-            raise RuntimeError("probe set did not converge")
+            raise Limit("the probe vectors that tell the states apart did not settle")
         self.inputs, self.reg, self.comb = [], [], list(self.comb0)
         for i, r in enumerate(self.cand):
             sigs = {sig[i] for sig in self.states}
@@ -741,19 +793,57 @@ class Analysis:
                 if s[i] in (0, 1):
                     seen[r].add(s[i])
         self.W = {}
+        free = {}                       # state -> registers whose value nothing shows
         for s in self.states:
             w = []
-            for r, i in zip(regs, idx):
+            for k, (r, i) in enumerate(zip(regs, idx)):
                 v = s[i]
                 if v in (0, 1):
                     w.append(v)
                 elif len(seen[r]) == 1:
                     w.append(1 - next(iter(seen[r])))
                 else:
-                    raise RuntimeError("register on pin %d is hidden in state %s" % (r, s))
+                    w.append(None)
+                    free.setdefault(s, []).append(k)
             self.W[s] = tuple(w)
+        if free:
+            self._assign_hidden(regs, free)
         if len(set(self.W.values())) != len(self.W):
-            raise RuntimeError("two states have the same register values")
+            raise Limit("two states show the same register values: the chip has state that "
+                        "no pin shows")
+
+    def _assign_hidden(self, regs, free):
+        """A register that shows both values elsewhere does not reach its
+        pin in some state (its enable is off whatever the inputs).  The
+        exploration found nothing there that depends on it: the same
+        clocks always led to the same states.  So any value will do, as
+        long as the register input loads that value on the way in, which
+        the equations then say.  Take the value it has when cleared
+        (after power-up), or the other if a state with that value and the
+        same other registers exists."""
+        s0 = self.power_up_state
+        pv = [0 if self.W[s0][k] is None else self.W[s0][k] for k in range(len(regs))]
+        taken = {w for w in self.W.values() if None not in w}
+        for s, ks in free.items():
+            for m in range(1 << len(ks)):
+                w = list(self.W[s])
+                for t, k in enumerate(ks):
+                    w[k] = pv[k] ^ (m >> t & 1)
+                if tuple(w) not in taken:
+                    break
+            else:
+                raise Limit("the register%s on %s do%s not show in state %s, and every value "
+                            "is another state's" % (
+                                "s" if len(ks) > 1 else "", _pins([regs[k] for k in ks]),
+                                "" if len(ks) > 1 else "es", _state(s)))
+            self.W[s] = tuple(w)
+            taken.add(tuple(w))
+        hid = sorted({regs[k] for ks in free.values() for k in ks})
+        self.log("the register%s on %s do%s not show in %d states (output not enabled there, "
+                 "whatever the inputs), and nothing seen depends on %s there: taken as %s" % (
+                     "s" if len(hid) > 1 else "", _pins(hid), "" if len(hid) > 1 else "es",
+                     len(free), "them" if len(hid) > 1 else "it",
+                     "cleared where no other state has those values"))
 
     # 4. equations -------------------------------------------------------------
     def functions(self):
@@ -881,8 +971,8 @@ class Analysis:
                     break
                 extra = [i for i in range(len(self.EV) + len(self.cvars)) if i not in sup]
                 if not extra:
-                    raise RuntimeError("pin %d %s is not a function of the inputs and "
-                                       "registers" % (p, kind))
+                    raise Limit("pin %d %s is not a function of the inputs and "
+                                "registers" % (p, kind))
                 sup = sorted(sup + [extra[-1]])
             k = len(sup)
             pos = sop(on, off, k)
@@ -981,6 +1071,10 @@ class Analysis:
                 lits = rest
         return " & ".join(t for t, _ in lits)
 
+    def _latch_names(self):
+        """The outputs CUPL must not minimise (reglatch: the latches)."""
+        return []
+
     def _hazards(self, p, kind, sup, pos, neg, on, off):
         """The two covers of a function, with whatever its kind needs
         beyond covering (reglatch: a latch must not glitch)."""
@@ -1060,7 +1154,7 @@ class Analysis:
         clocked = bool(regs) and not self.clock_in_v
         lines = ["Name %s; Partno x; Date x; Revision 1; Designer galre; Company x; "
                  "Assembly x; Location x;" % title,
-                 "Device %s;" % self.dev["cupl"], ""]
+                 "Device %s;" % self.dev["cupl"], "", HOW % title, ""]
         if clocked:
             lines.append("Pin 1 = CLK;")
         for p in sorted(set(self.EV) | set(self.reg) | set(self.comb)):
@@ -1071,6 +1165,9 @@ class Analysis:
                 continue
             lines.append("Pin %d = %s;" % (p, self.name(p)))
         lines.append("")
+        latches = self._latch_names()
+        if latches:
+            lines += [KEEP, "MIN [%s] = 0;" % ", ".join(latches), ""]
         for p, kind, inv, expr, n in self.eqs:
             if self.device == "GAL16V8" and clocked and p in regs and kind == "oe":
                 continue

@@ -15,9 +15,10 @@ import termios
 import time
 import zlib
 
+VERSION = 2                 # CAP_VERSION in fw/capture.c
 MARKER = b"---- CAPTURE ----\r\n"
 PROMPT = b"CMD> "
-STATUS = {0: "ok", 1: "aborted", 2: "more than 255 different signatures",
+STATUS = {0: "ok", 1: "aborted", 2: "more than 2048 different signatures",
           3: "could not get back to the path state"}
 
 
@@ -39,6 +40,10 @@ class Capture:
          self.count, self.pins, self.base, self.inv, self.clk, self.cand,
          self.mask, self.mul) = struct.unpack("<BcBBIIIIIIIII", p)
         self.kind = kind.decode()
+        if self.version != VERSION:
+            raise CaptureError("the firmware's captures are version %d, galtools reads version "
+                               "%d: install the firmware from the same commit" % (
+                                   self.version, VERSION))
 
     def _end(self, p):
         (self.status, self.done, self.power_cycles, self.ret_ok,

@@ -36,7 +36,16 @@
  *        the lowest socket pin, or with rev set from the highest, so the
  *        pin that changes fastest becomes the one that changes slowest.
  *        With gray set, x runs in Gray code order instead (one pin changes
- *        per vector).  With rot set, x is rotated left by rot bits first,
+ *        per vector).  The usual Gray code changes its lowest bit at every
+ *        second vector and its highest once.  With mix set (not 0, and
+ *        gray), the order is another Gray code that mix decides: the
+ *        cube of all vectors is walked as one half, one pin's change, the
+ *        other half, and each half again so, down to single pins, with
+ *        the pin that splits a part chosen by a hash of mix and the
+ *        part's place (cap_mix_next).  The pin that splits the whole walk
+ *        still changes once, but which pins change often differs from
+ *        part to part, so most pins change about equally often, and
+ *        another mix makes another pin the rare one.  With rot set, x is rotated left by rot bits first,
  *        so bit 0 of the order drives the rot-th enumerated pin.  Every
  *        vector is XORed with start, so a Gray walk from the path's last
  *        vector changes one pin at a time from where the path left the
@@ -58,8 +67,8 @@
  *        with x, read the signature, and get back to S.  Nothing to do if
  *        the signature is S's; otherwise clock along the return path the
  *        host gave for that signature (and check S's signature), else
- *        power-cycle and replay the path.  One byte per x: the index of
- *        its signature.  The first occurrence of a signature is followed
+ *        power-cycle and replay the path.  Two bytes per x (low byte
+ *        first): the index of its signature.  The first occurrence of a signature is followed
  *        by its reads.  x runs over (i * mul) mod 2^n for i < count.
  *        With chk set, x is also read right after the clock edge (clock
  *        pins low) and again after the signature; if the two reads
@@ -108,14 +117,14 @@
 #include <string.h>
 #include "capture.h"
 
-#define CAP_VERSION      1
-#define CAP_MAX_PATH     48
+#define CAP_VERSION      2
+#define CAP_MAX_PATH     512
 #define CAP_MAX_PROBES   8
 #define CAP_MAX_CAND     12
 #define CAP_MAX_READS    (CAP_MAX_PROBES * (1 + CAP_MAX_CAND))
 #define CAP_MAX_RET      32
 #define CAP_MAX_RET_LEN  16
-#define CAP_MAX_SIGS     255
+#define CAP_MAX_SIGS     2048
 #define CAP_MAX_WALK     24      /* enumerated pins for a walk */
 #define CAP_MAX_FLAGS    16
 #define CAP_SOCKET_PINS  0x0fffffff
@@ -144,6 +153,7 @@ static struct {
     uint32_t  mul;          /* trans, walk: x = i * mul (odd) */
     uint32_t  rev;          /* walk: bit 0 of x is the highest pin */
     uint32_t  gray;         /* walk: Gray code order */
+    uint32_t  mix;          /* walk: which Gray code (0: the usual one) */
     uint32_t  rot;          /* walk: x rotated left by this many bits */
     uint32_t  start;        /* walk: vectors XORed with this */
     uint32_t  skm;          /* walk: skip vectors with (v & skm) == skv */
@@ -188,7 +198,8 @@ static uint32_t cap_pre;             /* the read before the last clock edge */
 const char cmd_pld_capture_help[] =
 "pld capture clear              - reset the job to defaults\n"
 "pld capture set <key>=<value>  - pins base inv clk cand mask count mul rev\n"
-"                                 gray rot start skm skv avm avv quiet chk\n"
+"                                 gray mix rot start skm skv avm avv quiet\n"
+"                                 chk\n"
 "                                 pre follow dclk vcc gnd (hex)\n"
 "                                 settle (usec) off on (msec) supply (mV)\n"
 "pld capture path [+] <v>...    - clocked vectors from power-up to the state\n"
@@ -629,6 +640,66 @@ cap_jumpers(void)
     return (RC_SUCCESS);
 }
 
+/* -- mixed Gray code ----------------------------------------------------- */
+
+/*
+ * A part of the walk at level k covers 2^(k+1) vectors that differ in the
+ * k+1 bits of mix_rem[k].  It walks half of them, changes its split bit
+ * mix_split[k], and walks the other half; the halves are parts at level
+ * k-1 over the other k bits, each with a split bit of its own.  The part
+ * at level k that vector number i lies in is number i >> (k+1).
+ */
+static uint8_t mix_rem[CAP_MAX_WALK][CAP_MAX_WALK];
+static uint8_t mix_split[CAP_MAX_WALK];
+
+static uint32_t
+cap_mix_hash(uint32_t seed, uint level, uint32_t part)
+{
+    uint32_t h = seed ^ (part * 0x9e3779b1UL) ^ ((level + 1) * 0x85ebca6bUL);
+
+    h ^= h >> 15;
+    h *= 0x2c1b3c6dUL;
+    h ^= h >> 12;
+    h *= 0x297a2d39UL;
+    h ^= h >> 15;
+    return (h);
+}
+
+/* Choose the split bits of the parts at the levels below `level` that
+ * vector number i lies in (level nbits: of all parts, for i = 0) */
+static void
+cap_mix_enter(uint nbits, uint level, uint32_t i)
+{
+    uint k;
+    uint j;
+
+    if (level == nbits)
+        for (j = 0; j < nbits; j++)
+            mix_rem[nbits - 1][j] = j;
+    for (k = level; k-- > 0; ) {
+        uint pick;
+        uint n = 0;
+
+        if (k + 1 < nbits)
+            for (j = 0; j < k + 2; j++)        /* the part above, less its split bit */
+                if (mix_rem[k + 1][j] != mix_split[k + 1])
+                    mix_rem[k][n++] = mix_rem[k + 1][j];
+        pick = ((cap_mix_hash(cap.mix, k, i >> (k + 1)) >> 16) * (k + 1)) >> 16;
+        mix_split[k] = mix_rem[k][pick];
+    }
+}
+
+/* The bit that changes from vector number i - 1 to i (i not 0) */
+static uint
+cap_mix_next(uint nbits, uint32_t i)
+{
+    uint level = __builtin_ctz(i);
+    uint bit = mix_split[level];
+
+    cap_mix_enter(nbits, level, i);
+    return (bit);
+}
+
 /* -- runs ---------------------------------------------------------------- */
 
 static rc_t
@@ -656,8 +727,14 @@ cap_walk(void)
         printf("walk: rot must be below the number of enumerated pins\n");
         return (RC_BAD_PARAM);
     }
+    if ((cap.mix != 0) && !cap.gray) {
+        printf("walk: mix needs gray\n");
+        return (RC_BAD_PARAM);
+    }
     if ((rc = cap_preflight()) != RC_SUCCESS)
         return (rc);
+    if (cap.mix != 0)
+        cap_mix_enter(nbits, nbits, 0);
     cap_begin('W', cap.quiet ? 0 : cap.inv ? 2 : 1, sig_reads, nbits,
               1UL << nbits);
     cap_power_up(cap.off_msec);
@@ -693,7 +770,10 @@ cap_walk(void)
             break;
         }
         i = (i + 1) & xmask;
-        x = cap.gray ? (i ^ (i >> 1)) : ((x + cap.mul) & xmask);
+        if (cap.gray && (cap.mix != 0))
+            x = (i == 0) ? 0 : (x ^ (1UL << cap_mix_next(nbits, i)));
+        else
+            x = cap.gray ? (i ^ (i >> 1)) : ((x + cap.mul) & xmask);
         r = x;
         if (cap.rot != 0)
             r = ((x << cap.rot) | (x >> (nbits - cap.rot))) & xmask;
@@ -754,7 +834,7 @@ cap_trans(void)
         uint32_t pre;
         uint32_t crc;
         uint     k;
-        uint8_t  idx;
+        uint8_t  idx[2];
 
         cap_step(w);
         pre = cap_pre;
@@ -777,8 +857,9 @@ cap_trans(void)
             status = CAP_STATUS_TOO_MANY;
             break;
         }
-        idx = k;
-        cap_put('D', &idx, 1);
+        idx[0] = k;
+        idx[1] = k >> 8;
+        cap_put('D', idx, 2);
         if (k == nsigs) {
             /* First occurrence: the reads follow the index */
             cap_sigs[nsigs++] = crc;
@@ -895,6 +976,7 @@ cap_set(int argc, char * const *argv)
         { "mul",    &cap.mul,   NULL },
         { "rev",    &cap.rev,   NULL },
         { "gray",   &cap.gray,  NULL },
+        { "mix",    &cap.mix,   NULL },
         { "rot",    &cap.rot,   NULL },
         { "start",  &cap.start, NULL },
         { "skm",    &cap.skm,   NULL },
@@ -1021,7 +1103,7 @@ cap_show(void)
     uint k;
 
     printf("pins=%07lx base=%07lx inv=%07lx clk=%07lx cand=%07lx "
-           "mask=%07lx\ncount=%lx mul=%lx rev=%lx gray=%lx rot=%lx "
+           "mask=%07lx\ncount=%lx mul=%lx rev=%lx gray=%lx mix=%lx rot=%lx "
            "start=%07lx\n"
            "skm=%07lx skv=%07lx avm=%07lx avv=%07lx quiet=%lx chk=%lx\n"
            "pre=%lx follow=%lx dclk=%lx\n"
@@ -1031,7 +1113,7 @@ cap_show(void)
            (unsigned long) cap.cand, (unsigned long) cap.mask,
            (unsigned long) cap.count, (unsigned long) cap.mul,
            (unsigned long) cap.rev, (unsigned long) cap.gray,
-           (unsigned long) cap.rot,
+           (unsigned long) cap.mix, (unsigned long) cap.rot,
            (unsigned long) cap.start, (unsigned long) cap.skm,
            (unsigned long) cap.skv, (unsigned long) cap.avm,
            (unsigned long) cap.avv, (unsigned long) cap.quiet,

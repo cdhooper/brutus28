@@ -75,7 +75,7 @@ def _check_events(a, rig, notes=None):
     for w in a.lwalks:
         if w.order is None:
             continue
-        s, rot, rev, start, mode = w.cfg
+        s, rot, rev, start, mode, mix = w.cfg
         path = a.states[a.S[s]][0]
         kw = {}
         if mode == a.AROUND:
@@ -83,9 +83,9 @@ def _check_events(a, rig, notes=None):
         elif mode == a.AVOID:
             kw = dict(avoid=a.ar)
         la, lb, _ = rig.walk(a.Vc, a.base, a.drives(path), gray=1, rot=rot, rev=rev,
-                             start=start, **kw)
-        name = "walk from state %s rot=%d rev=%d start=%x" % (
-            "".join(map(str, a.S[s])), rot, rev, start)
+                             start=start, mix=mix, **kw)
+        name = "walk from state %s rot=%d rev=%d start=%x mix=%d" % (
+            "".join(map(str, a.S[s])), rot, rev, start, mix)
         diff = 0
         for p in la:
             diff |= (la[p] ^ w.la[p]) | (lb[p] ^ w.lb[p])
@@ -112,10 +112,10 @@ def _check_walks(a, jed, notes=None):
     rig = SimRig(jed)
     bad = []
     for w in a.walks:
-        rot, rev, start = w.cfg
-        la, _, _ = rig.walk(a.V, a.wbase, [], gray=1, rot=rot, rev=rev, start=start)
+        rot, rev, start, mix = w.cfg
+        la, _, _ = rig.walk(a.V, a.wbase, [], gray=1, rot=rot, rev=rev, start=start, mix=mix)
         got = {p: _to_bytes(la[p], a.n) for p in a.outputs}
-        name = "walk rot=%d rev=%d start=%x" % w.cfg
+        name = "walk rot=%d rev=%d start=%x mix=%d" % w.cfg
         same = [all(got[p][x] == w.levels[p][x] for p in a.outputs) for x in w.xs]
         if True not in same:
             bad.append((name, "never agrees"))

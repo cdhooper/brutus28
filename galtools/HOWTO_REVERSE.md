@@ -36,8 +36,9 @@ This guide covers what to do and how to read the result.
 - A CUPL compiler, optional but recommended: galre then builds the JED and
   checks it against every capture. WinCUPL's `cupl` or a native build of it
   will do. galre finds it through `--cupl`, `$CUPL`, or `cupl` on the PATH,
-  and runs it as `cupl -jaxm4 NAME.pld` (`-jaxm0` for a design with
-  latches).
+  and runs it as `cupl -jaxm4 NAME.pld`. The `.pld` says so in a comment,
+  and carries what else CUPL needs (the device mode, and a `MIN` statement
+  for latches).
 - To build and install the firmware: `arm-none-eabi-gcc`, `make` and
   `dfu-util`.
 
@@ -131,8 +132,9 @@ this:
    Brutus drives every pin weakly, through 1K, so a pin the GAL drives
    reads the GAL's value instead of Brutus's. This finds the
    combinational outputs and the candidates for registers. The power-up
-   state is then walked in three more orders. A clocked design reads the
-   same in all four.
+   state is then walked in six more orders, three of them with one pin
+   changing at a time. A clocked design reads the same in all seven.
+   Every other state is also walked a second time, one pin at a time.
 3. **Clocked designs.** galre clocks every input combination into every
    state it finds, walks each new state, and returns to the state under
    test by a clocked path or by power-cycling. If a state falls back to
@@ -297,8 +299,8 @@ clock is high, with an output of the latch on pin 20:
 - The latch's equation may have more product terms than the original.
   The extra ones (here `CLK & P4 & P22`) keep it from glitching when an
   input changes; they do not change what it does. CUPL's minimiser would
-  remove them, so galre compiles a design with latches with `-m0`. If
-  you compile the `.pld` yourself, do the same.
+  remove them, so the `.pld` has a `MIN` statement for the latch pins;
+  compile it with the command in its first comment.
 
 ## 7. Check the result on a real chip
 

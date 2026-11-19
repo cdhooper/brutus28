@@ -47,9 +47,9 @@ pair races there); verify compares walks from the first read where the
 rebuilt chip agrees.
 """
 
-from analysis import DEV, AsyncDesign, _cube_set, popcount, sop, swap
+from analysis import DEV, HOW, KEEP, AsyncDesign, _cube_set, popcount, sop, swap
 from bitsim import litmasks
-from rig import bitrev, survey_mul, walk_x
+from rig import bitrev, gray_order, survey_mul
 
 _BITS = bytes.maketrans(b"\x00\x01", b"01")
 _ONES = bytes.maketrans(b"\x00\x01\x02", b"001")
@@ -153,27 +153,35 @@ class LatchAnalysis:
         self.log("latch model: inputs %s, outputs %s" % (self.V, self.outputs))
 
     def configs(self):
-        """(rot, rev, start) of the walks to learn from: every rotation,
-        spread out, both ways, from power-up."""
+        """(rot, rev, start, mix) of the walks to learn from, all from
+        power-up: every rotation of the usual Gray code, spread out, both
+        ways, and some mixed Gray codes, in which most pins change often
+        (rig.mix_bits)."""
         n = self.n
         nb = max(1, (n - 1).bit_length())
         rots = sorted(range(n), key=lambda r: (bitrev(r, nb), r))
-        return [(r, v, 0) for r in rots for v in (0, 1)]
+        return [(r, v, 0, 0) for r in rots for v in (0, 1)] + [(0, 0, 0, k) for k in (1, 2, 3, 4)]
 
     def checks(self):
-        """Walks to check the model with: from other start vectors."""
+        """Walks to check the model with: mixed Gray codes from other start
+        vectors."""
         n, m = self.n, (1 << self.n) - 1
         mul = survey_mul(n)
         k = 0
         while True:
             k += 1
-            yield ((k * 3) % n, k & 1, (k * mul) & m)
+            yield ((k * 3) % n, k & 1, (k * mul) & m, 100 + k)
+
+    def need(self):
+        """How many check walks in a row the model must predict: confirm,
+        or as many as make 16384 steps (at most 64)."""
+        return max(self.confirm, min(64, -(-16384 >> self.n)))
 
     def _walk(self, cfg):
-        rot, rev, start = cfg
-        la, _, _ = self.rig.walk(self.V, self.wbase, [], gray=1, rot=rot, rev=rev, start=start)
-        xs = [walk_x(i, self.n, gray=1, rot=rot, rev=rev, start=start)
-              for i in range(1 << self.n)]
+        rot, rev, start, mix = cfg
+        la, _, _ = self.rig.walk(self.V, self.wbase, [], gray=1, rot=rot, rev=rev, start=start,
+                                 mix=mix)
+        xs = list(gray_order(self.n, rot, rev, start, mix))
         return _Walk(cfg, xs, {p: _to_bytes(la[p], self.n) for p in self.outputs})
 
     # learning ---------------------------------------------------------------
@@ -445,9 +453,10 @@ class LatchAnalysis:
         self.walks = [self._walk(c) for c in self.configs()]
         self.learn()
         self._tables()
-        good = 0
+        good, need = 0, self.need()
+        limit = len(self.walks) + max(self.max_walks, 3 * need)
         for c in self.checks():
-            if good >= self.confirm or len(self.walks) >= self.max_walks:
+            if good >= need or len(self.walks) >= limit:
                 break
             w = self._walk(c)
             self.walks.append(w)
@@ -456,8 +465,8 @@ class LatchAnalysis:
                 good += 1
                 continue
             good = 0
-            self.log("walk with rot=%d rev=%d start=%x: step %d (%s) %s; learning again "
-                     "from %d walks" % (
+            self.log("walk with rot=%d rev=%d start=%x mix=%d: step %d (%s) %s; learning "
+                     "again from %d walks" % (
                          c + (miss[0], self._inputs(miss[1]),
                               "does not settle" if miss[2] is None else
                               "pin %d reads %d, predicted %d" % miss[2:], len(self.walks))))
@@ -466,9 +475,9 @@ class LatchAnalysis:
         bad = self.check_equations()
         if bad:
             raise AsyncDesign("the latch model does not predict the walks: %s" % bad[:3])
-        if good < self.confirm:
+        if good < need:
             raise AsyncDesign("the latch model did not predict %d walks in a row within %d "
-                              "walks" % (self.confirm, self.max_walks))
+                              "walks" % (need, len(self.walks)))
         self._check_driven()
         self.log("latch model: latch pins %s, combinational %s, from %d walks" % (
             self.L, [p for p in self.outputs if p not in self.L], len(self.walks)))
@@ -515,10 +524,10 @@ class LatchAnalysis:
     def cupl(self, title="galre"):
         lines = ["Name %s; Partno x; Date x; Revision 1; Designer galre; Company x; "
                  "Assembly x; Location x;" % title,
-                 "Device %s;" % self.dev["cupl"], ""]
+                 "Device %s;" % self.dev["cupl"], "", HOW % title, ""]
         for p in sorted(set(self.V) | set(self.outputs)):
             lines.append("Pin %d = %s;" % (p, self.name(p)))
-        lines.append("")
+        lines += ["", KEEP, "MIN [%s] = 0;" % ", ".join(self.name(p) for p in self.L), ""]
         for p, _, inv, expr, _ in self.eqs:
             lines.append("%s%s = %s;" % ("!" if inv else "", self.name(p), expr))
         return "\n".join(lines) + "\n"

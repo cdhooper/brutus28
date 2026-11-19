@@ -66,10 +66,12 @@ def vectors(pld, jed, steps=400, seed=3):
     ext = {p: 0 for p in sig}
     free = [p for p in order if not (p == 1 and clocked)]
     lines = []
-    for _ in range(steps):
+    for step in range(steps):
         ext = dict(ext)
         clk = "0"
-        if clocked and rnd.random() < 0.35:
+        if step == 0:
+            pass        # every pin low, as the chips above were powered up: csim starts unknown
+        elif clocked and rnd.random() < 0.35:
             clk = "C"                               # one clock pulse
         else:
             p = rnd.choice(free)

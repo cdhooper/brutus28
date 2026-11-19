@@ -189,6 +189,29 @@ class SimulatedChip(unittest.TestCase):
             "oeread22v10": [],
             "buried22v10": ["combinational feedback through pin 22"]})
 
+    def test_mixed_gray_order(self):
+        """A mixed Gray code visits every vector once and changes one bit
+        per step.  All but the bits that split the walk first change
+        often, and over a few values of mix every bit does."""
+        from rig import mix_bits
+        for n in (1, 2, 5, 11):
+            for mix in (1, 2, 0x1234):
+                order = list(gray_order(n, 0, 0, 5 % (1 << n), mix))
+                self.assertEqual(sorted(order), list(range(1 << n)))
+                self.assertTrue(all(bin(a ^ b).count("1") == 1
+                                    for a, b in zip(order, order[1:])))
+        total = [0] * 11
+        for mix in (1, 2, 7):
+            flips = [0] * 11
+            for b in mix_bits(11, mix):
+                flips[b] += 1
+                total[b] += 1
+            self.assertGreater(sorted(flips)[3], 2047 // 11 // 2)
+            self.assertLess(max(flips), 2047 // 11 * 3)
+        self.assertGreater(min(total), 2047 // 11 // 2)
+        self.assertNotEqual(list(gray_order(6, mix=1)), list(gray_order(6, mix=2)))
+        self.assertNotEqual(list(gray_order(6, mix=1)), list(gray_order(6)))
+
     def test_gray_order(self):
         for n, rot, rev, start in ((1, 0, 0, 0), (4, 0, 0, 0), (5, 2, 0, 9), (5, 3, 1, 30),
                                    (6, 5, 1, 0)):
@@ -287,7 +310,7 @@ class SimulatedChip(unittest.TestCase):
                     pld = os.path.join(out, name + ".pld")
                     with open(pld, "w") as f:
                         f.write(a.cupl(name))
-                    built[name] = pld, galre.compile_cupl(CUPL, pld, quiet, minimise=0)
+                    built[name] = pld, galre.compile_cupl(CUPL, pld, quiet)
                     n, unknown, bad = csimcheck.check(csim, *built[name], steps=300)
                     self.assertEqual((n, bad), (300, []))
                     if name == "latch16v8":
@@ -323,7 +346,7 @@ class SimulatedChip(unittest.TestCase):
                     with open(pld, "w") as f:
                         f.write(a.cupl(name))
                     latches = name in LATCH_CASES or name in MIXED_CASES
-                    rebuilt = galre.compile_cupl(CUPL, pld, quiet, minimise=0 if latches else 4)
+                    rebuilt = galre.compile_cupl(CUPL, pld, quiet)
                     self.assertEqual(rebuilt, os.path.join(out, name + ".jed"))
                     notes = []
                     self.assertEqual(verify.check_captures(a, rebuilt, notes), [])
@@ -331,12 +354,17 @@ class SimulatedChip(unittest.TestCase):
                     d, first, _ = verify.compare_jeds(jed(name), rebuilt, 5000, fixed=fixed,
                                                       sic=latches)
                     self.assertEqual(d, {}, first)
-            # without CUPL's minimisation, a latch keeps the product term
-            # that only holds it through a step (CLK & P4 & P22)
+            # The source says not to minimise the latch (MIN), so it keeps
+            # the product term that only holds it through a step
+            # (CLK & P4 & P22); without that statement CUPL removes it.
             pld = os.path.join(out, "reglatch22v10.pld")
-            for level, terms in ((0, 4), (4, 3)):
-                g = GAL(galre.compile_cupl(CUPL, pld, quiet, minimise=level))
-                self.assertEqual(len(g._olmc(21).live), terms)
+            src = open(pld).read()
+            self.assertIn("MIN [P21] = 0;", src)
+            self.assertIn("Compile with: cupl -jaxm4 reglatch22v10.pld", src)
+            self.assertEqual(len(GAL(galre.compile_cupl(CUPL, pld, quiet))._olmc(21).live), 4)
+            with open(pld, "w") as f:
+                f.write(src.replace("MIN [P21] = 0;", ""))
+            self.assertEqual(len(GAL(galre.compile_cupl(CUPL, pld, quiet))._olmc(21).live), 3)
         finally:
             shutil.rmtree(out)
 
@@ -680,6 +708,29 @@ class Firmware(unittest.TestCase):
         _, flags = rig.transitions([2, 3, 4], {}, [{2: 1}], [{}], [21, 22, 23], chk=True)
         self.assertEqual(flags, [])
 
+    def test_mixed_gray_walk(self):
+        """The firmware walks a mixed Gray code in the order rig.gray_order
+        gives: a combinational chip reads the same at every vector as in
+        counting order, also rotated, reversed and from another vector."""
+        t = self.transport("comb16v8", "dip20")
+        rig = BrutusRig(t, "GAL16V8", log=quiet)
+        V = [p for p in rig.pins if p < 12]
+        base = {}
+        la0, lb0, _ = rig.walk(V, base, [])
+        for kw in (dict(mix=1), dict(mix=0xbeef, rot=3), dict(mix=2, rev=1, start=0x155)):
+            with self.subTest(**kw):
+                la, lb, _ = rig.walk(V, base, [], gray=1, **kw)
+                self.assertEqual((la, lb), (la0, lb0))
+        self.assertIn("mix needs gray", t.command("pld capture set mix=1 gray=0") or
+                      self._walk_error(t))
+
+    def _walk_error(self, t):
+        try:
+            t.capture("pld capture walk")
+        except CaptureError as e:
+            return str(e)
+        return ""
+
     def test_gray_skip_quiet_walks(self):
         """Gray code walks from a start vector, with skipped vectors, decode
         to the counting walk (skipped vectors read 0); a quiet walk
@@ -736,12 +787,14 @@ class Firmware(unittest.TestCase):
         probes, cand = [{4: 1}, {}], [21, 22, 23]
         ref = sim.walk(V, base, path, probes=probes, cand=cand)
         self.assertEqual(ref[2][0], ref[2][1])
-        for name, mul, rev in Analysis.ORDERS + (("scattered", 0x35, 0),):
+        for name, kw in Analysis.ORDERS + (("scattered", dict(mul=0x35)),):
+            kw = dict(kw)
+            if "mul" in kw:
+                kw["mul"] &= 0x7f
             for numpy in (True, False):
                 with self.subTest(order=name, numpy=numpy):
                     with mock.patch.dict(sys.modules, {} if numpy else {"numpy": None}):
-                        got = rig.walk(V, base, path, mul=mul & 0x7f, rev=rev,
-                                       probes=probes, cand=cand)
+                        got = rig.walk(V, base, path, probes=probes, cand=cand, **kw)
                     self.assertEqual(got, ref)
 
     def test_walk_without_second_read(self):

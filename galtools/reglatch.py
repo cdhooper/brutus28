@@ -65,14 +65,45 @@ for inputs that change one at a time, and the latches' level at power-up
 is not modelled.
 """
 
+import sys
 from array import array
 
-from analysis import Analysis, AsyncDesign, _Restart, _pins, _state, lowest, swap
+from analysis import Analysis, AsyncDesign, Limit, _Restart, _pins, _state, lowest, swap
 from bitsim import litmasks
 from latch import LatchAnalysis, _ONES, _ZEROS, _from_bytes
 from rig import CLOCK, bitrev, cube_set, gray_arrays, survey_mul
 
 _T01 = bytes.maketrans(b"01", b"\x00\x01")
+
+
+def _cells(mask, N):
+    """A bitset over N vectors as a number with 16 bits per vector (0/1)."""
+    ba = bytearray(2 * N)
+    ba[0::2] = _b01(mask, N)
+    return int.from_bytes(ba, "little")
+
+
+def _states(acc, N):
+    """An array with a 16 bit number per vector from such a number."""
+    a = array("H")
+    a.frombytes(acc.to_bytes(2 * N, "little"))
+    if sys.byteorder != "little":
+        a.byteswap()
+    return a
+
+
+def _where(sid, v):
+    """The vectors (as a bitset) at which the array of 16 bit numbers
+    sid is v."""
+    if sys.byteorder != "little":
+        sid = array("H", sid)
+        sid.byteswap()
+    raw = sid.tobytes()
+    lo, hi = bytearray(b"0" * 256), bytearray(b"0" * 256)
+    lo[v & 255] = hi[v >> 8] = 49
+    a = raw[0::2].translate(bytes(lo))
+    b = raw[1::2].translate(bytes(hi))
+    return int(a[::-1], 2) & int(b[::-1], 2) if a else 0
 
 
 def _b01(bits, N):
@@ -123,7 +154,7 @@ class _Flat:
 class RegLatchAnalysis(Analysis):
     PLAIN, AROUND, AVOID = 0, 1, 2      # how a walk treats the reset term
 
-    def __init__(self, rig, device, fixed=None, survey=64, max_states=64, log=print,
+    def __init__(self, rig, device, fixed=None, survey=64, max_states=1024, log=print,
                  hist=(), max_checks=48, confirm=2):
         super().__init__(rig, device, fixed=fixed, survey=survey, max_states=max_states,
                          log=log)
@@ -150,6 +181,9 @@ class RegLatchAnalysis(Analysis):
                  "outputs of latches, and exploring the registers again without" % (
                      _pins(new), "it" if len(new) == 1 else "them"))
         raise _Restart()
+
+    def _history_dependent(self, pins, err):
+        self._history(pins, err)
 
     def _flagged(self, path, x, pins=()):
         try:
@@ -217,8 +251,8 @@ class RegLatchAnalysis(Analysis):
         for s in self.S:
             acc = 0
             for s2, xs in self.trans[s].items():
-                acc += (self.sidx[s2] + 1) * int.from_bytes(_b01(xs, N), "little")
-            self.nxt.append(acc.to_bytes(N, "little"))
+                acc += (self.sidx[s2] + 1) * _cells(xs, N)
+            self.nxt.append(_states(acc, N))
         self.fire, self.arb = bytes(len(self.S)), None
         if self.ar:
             self._ar_term()
@@ -256,20 +290,31 @@ class RegLatchAnalysis(Analysis):
         return w
 
     def _configs(self):
-        """(state index, rot, rev, start, mode) of the walks to learn from."""
+        """(state index, rot, rev, start, mode, mix) of the walks to learn
+        from: from every state two with pin 1 changing slowest, and one in
+        a mixed Gray code (most pins, pin 1 too, change often:
+        rig.mix_bits); from power-up every other rotation, and more mixed
+        ones."""
         n1 = self.n1
         out = []
         for s, (path, _) in self.states.items():
             a = self.sidx[s]
             start = (path[-1] << 1 | 1) if path else 0
             mode = self.AROUND if path and self.fire[a] else self.PLAIN
-            out += [(a, 1, 0, start, mode), (a, 0, 1, start, mode)]     # pin 1 slowest
+            out += [(a, 1, 0, start, mode, 0), (a, 0, 1, start, mode, 0)]     # pin 1 slowest
+            out.append((a, 0, 0, start, self.AVOID if self.ar and path else self.PLAIN, 1 + a))
         nb = max(1, (n1 - 1).bit_length())
         for r in sorted(range(n1), key=lambda r: (bitrev(r, nb), r)):
             for v in (0, 1):
                 if (r, v) not in ((1, 0), (0, 1)):
-                    out.append((self.s0, r, v, 0, self.PLAIN))
+                    out.append((self.s0, r, v, 0, self.PLAIN, 0))
+        out += [(self.s0, 0, 0, 0, self.PLAIN, 0x1000 + k) for k in (1, 2, 3)]
         return out
+
+    def _need(self):
+        """How many check walks in a row the learned circuit must predict:
+        confirm, or as many as make 16384 steps (at most 64)."""
+        return max(self.confirm, min(64, -(-16384 >> self.n1)))
 
     def _checks(self):
         """Walks to check the learned circuit with: from every state in
@@ -283,9 +328,10 @@ class RegLatchAnalysis(Analysis):
             path = self.states[self.S[a]][0]
             start = (k * mul) & mask
             start = start | 1 if path else start & ~1
-            yield (a, (k * 3) % n1, k & 1, start, self.AVOID if self.ar and path else self.PLAIN)
+            yield (a, (k * 3) % n1, k & 1, start,
+                   self.AVOID if self.ar and path else self.PLAIN, 0x2000 + k)
 
-    def _event(self, a, rot, rev, start, mode):
+    def _event(self, a, rot, rev, start, mode, mix=0):
         path = self.states[self.S[a]][0]
         kw = {}
         if mode == self.AROUND:
@@ -293,9 +339,10 @@ class RegLatchAnalysis(Analysis):
         elif mode == self.AVOID:
             kw = dict(avoid=self.ar)
         la, lb, _ = self.rig.walk(self.Vc, self.base, self.drives(path), gray=1, rot=rot,
-                                  rev=rev, start=start, **kw)
-        w = _Walk((a, rot, rev, start, mode), la, lb)
+                                  rev=rev, start=start, mix=mix, **kw)
+        w = _Walk((a, rot, rev, start, mode, mix), la, lb)
         self._let_go(w)
+        self._late_outputs(w)
         self._interpret(w)
         self._check_registers(w)
         return w
@@ -318,6 +365,27 @@ class RegLatchAnalysis(Analysis):
                                                   1 << self.n1)
             wn.append(t[x << 1])
         return self.widx.get(tuple(wn))
+
+    def _late_outputs(self, w):
+        """An enumerated pin that the exploration took for an input (never
+        driven with pin 1 low) is not at the level it is driven to
+        somewhere in this walk: the GAL drives it, with an enable that
+        reads pin 1.  It is an output from now on, and the analysis starts
+        over."""
+        new = []
+        for b, p in enumerate(self.Vc):
+            if p in self.dev["io"] and p not in self.O and p not in self.reg \
+                    and (w.la[p] ^ self.cv1[b]) & self.cfull:
+                new.append(p)
+        if new:
+            for p in new:
+                self.late_comb[p] = True
+            self.log("%s %s driven in a walk with pin 1 high, and never with pin 1 low: "
+                     "taking %s for %s too, and starting again" % (
+                         _pins(new), "is" if len(new) == 1 else "are",
+                         "it" if len(new) == 1 else "them",
+                         "an output" if len(new) == 1 else "outputs"))
+            raise _Again()
 
     def _let_go(self, w):
         """A pin that changes without a clock and is not enumerated must
@@ -349,14 +417,14 @@ class RegLatchAnalysis(Analysis):
         the next edge corrects an edge taken on trust: that register
         loaded the other value, the edge is kept in self.rise, and the
         walk is followed again from it."""
-        a0, rot, rev, start, mode = w.cfg
+        a0, rot, rev, start, mode, mix = w.cfg
         n1 = self.n1
         N = 1 << n1
         path = self.states[self.S[a0]][0]
         skipb = None
         if mode == self.AROUND:
             skipb = _b01(cube_set(self.ar, self.Vc, self.base, self.cfull, self.cv1), N)
-        vecs = gray_arrays(n1, rot, rev, start)[0]
+        vecs = gray_arrays(n1, rot, rev, start, mix)[0]
         if skipb:
             vecs = [xp for xp in vecs if not skipb[xp]]
         key = self._pack(w.la, N)
@@ -368,7 +436,7 @@ class RegLatchAnalysis(Analysis):
         want = [[self.W[s][i] for i, _ in regs] for s in self.S]
         nr = range(len(regs))
         nxt, fire, arb, s0, prek = self.nxt, self.fire, self.arb, self.s0, self.prek
-        sid = bytearray(N)
+        sid = array("H", bytes(2 * N))
         clean = bytearray(len(vecs))
         fix = {}              # step of an edge -> [state it led to, registers corrected]
         trust = []            # edges taken on trust: [step, state, pins, last_ok, edge]
@@ -484,11 +552,7 @@ class RegLatchAnalysis(Analysis):
                             self._inputs(xp >> 1), _state(self.S[b]), _state(self.S[old]),
                             _state(self.S[f[0]])))
         w.order, w.clean, w.sid = array("I", vecs[:n]), clean[:n], sid
-        w.smask = {}
-        for b in set(sid) - {0}:
-            tbl = bytearray(b"0" * 256)
-            tbl[b] = 49
-            w.smask[b - 1] = _from_bytes(sid, bytes(tbl))
+        w.smask = {b - 1: _where(sid, b) for b in set(sid) - {0}}
 
     def _cinputs(self, xp):
         return " ".join("%s=%d" % (self.name(p), xp >> i & 1) for i, p in enumerate(self.Vc))
@@ -858,8 +922,10 @@ class RegLatchAnalysis(Analysis):
             self.lwalks.append(self._event(*cfg))
         self._solve()
         good = checks = 0
+        need = self._need()
+        limit = max(self.max_checks, 3 * need)
         for cfg in self._checks():
-            if good >= self.confirm or checks >= self.max_checks:
+            if good >= need or checks >= limit:
                 break
             checks += 1
             w = self._event(*cfg)
@@ -872,13 +938,13 @@ class RegLatchAnalysis(Analysis):
                 good += 1
                 continue
             good = 0
-            self.log("walk from state %s with rot=%d rev=%d start=%x: %s; learning again from "
-                     "%d walks" % ((_state(self.S[cfg[0]]),) + cfg[1:4]
-                                   + (miss, len(self.lwalks) - len(self.S))))
+            self.log("walk from state %s with rot=%d rev=%d start=%x mix=%d: %s; learning "
+                     "again from %d walks" % ((_state(self.S[cfg[0]]),) + cfg[1:4] + (cfg[5],)
+                                              + (miss, len(self.lwalks) - len(self.S))))
             self._solve()
-        if good < self.confirm:
+        if good < need:
             raise AsyncDesign("the model of registers and latches did not predict %d walks in "
-                              "a row within %d walks" % (self.confirm, self.max_checks))
+                              "a row within %d walks" % (need, limit))
         cut = [w for w in self.lwalks if w.cut]
         latches = [p for p in self.L if p not in self.readpins]
         self.log("latch model: latch pins %s, other outputs %s, from %d walks with pin 1 "
@@ -1013,7 +1079,7 @@ class RegLatchAnalysis(Analysis):
             return super().equations()
         try:
             return super().equations()
-        except RuntimeError as e:
+        except Limit as e:
             raise AsyncDesign("%s, pin 1 and the latch pins %s" % (e, self.L))
 
     def _hold_pairs(self, j, sup):
@@ -1058,6 +1124,9 @@ class RegLatchAnalysis(Analysis):
                             if bits:
                                 pairs.add((c & ~bit, c | bit, level))
         return pairs
+
+    def _latch_names(self):
+        return [self.name(p) for p in self.L] if self.mixed else []
 
     def _hazards(self, p, kind, sup, pos, neg, on, off):
         if kind or p not in self.L:

@@ -18,6 +18,7 @@ every captured state and input vector.
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -25,7 +26,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from analysis import AsyncDesign, LatchSuspected            # noqa: E402
+from analysis import AsyncDesign, LatchSuspected, Limit     # noqa: E402
 from capture import CaptureError, SerialTransport          # noqa: E402
 from latch import LatchAnalysis                            # noqa: E402
 from reglatch import RegLatchAnalysis                      # noqa: E402
@@ -33,12 +34,13 @@ from rig import BrutusRig, RecordingRig, ReplayRig, SimRig  # noqa: E402
 import verify                                              # noqa: E402
 
 
-def analyse(rig, device, fixed=None, survey=64, log=print):
+def analyse(rig, device, fixed=None, survey=64, log=print, max_states=1024):
     """Run the analysis of a clocked design (which goes on to latches in
     it, if the chip changes state without a clock), or of latches alone
     when the power-up walk shows them; returns the RegLatchAnalysis or
     LatchAnalysis.  Raises AsyncDesign when none models the chip."""
-    a = RegLatchAnalysis(rig, device, fixed=fixed, survey=survey, log=log)
+    a = RegLatchAnalysis(rig, device, fixed=fixed, survey=survey, log=log,
+                         max_states=max_states)
     try:
         a.run()
         return a
@@ -54,7 +56,8 @@ def analyse(rig, device, fixed=None, survey=64, log=print):
                 raise                     # pin 1 is held: no walks with it
             log("not latches alone: %s" % e2)
             log("trying registers and latches together")
-            c = RegLatchAnalysis(rig, device, fixed=fixed, survey=survey, log=log, hist=e.pins)
+            c = RegLatchAnalysis(rig, device, fixed=fixed, survey=survey, log=log, hist=e.pins,
+                                 max_states=max_states)
             try:
                 c.run()
             except LatchSuspected:
@@ -131,6 +134,8 @@ def main(argv=None):
     ap.add_argument("--fix", help="pins held and not enumerated, e.g. 6-9=0,13=1")
     ap.add_argument("--survey", type=int,
                     help="inputs sampled per state before the full sweeps (default 64)")
+    ap.add_argument("--max-states", type=int, default=1024,
+                    help="give up beyond this many states (default 1024)")
     ap.add_argument("--settle", type=int, default=1, help="usec after each write")
     ap.add_argument("--off", type=int, default=20, help="msec power off per power cycle")
     ap.add_argument("--on", type=int, default=2, help="msec after power on")
@@ -206,11 +211,16 @@ def main(argv=None):
 
         t0 = time.time()
         try:
-            a = analyse(rig, device, fixed=fixed, survey=survey, log=log)
+            a = analyse(rig, device, fixed=fixed, survey=survey, log=log,
+                        max_states=args.max_states)
         except AsyncDesign as e:
             log("asynchronous behaviour: %s" % e)
             log("galre models clocked designs, the GAL22V10's asynchronous reset term, and "
                 "latches, alone or in a clocked design; no equations written.")
+            return 3
+        except Limit as e:
+            log("galre stops: %s" % e)
+            log("no equations written.")
             return 3
         finally:
             if isinstance(rig, RecordingRig):
@@ -239,40 +249,53 @@ def main(argv=None):
         if not args.cupl:
             log("no CUPL compiler (--cupl or $CUPL): %s not compiled" % pld)
             return 0 if not bad else 1
-        # A latch's cover has product terms that only hold it through a
-        # step.  CUPL's minimiser takes them out again, so a design with
-        # latches is compiled without it, if it fits that way.  A GAL16V8
-        # without registers may need its mode named: CUPL takes the simple
-        # mode unless an output has an enable, and that mode cannot read
-        # pins 15 and 16.
-        tries = [(None, m) for m in ([0, 4] if latches or mixed else [4])]
+        # What CUPL needs to know is in the source: the MIN statement for
+        # the latches, whose covers have product terms that only hold them
+        # through a step (CUPL's minimiser would remove them), and the
+        # device.  If the design does not fit with those terms, they go.
+        # A GAL16V8 without registers may need its mode named: CUPL takes
+        # the simple mode unless an output has an enable, and that mode
+        # cannot read pins 15 and 16.
+        keep = "\nMIN [" in src
+        tries = [(None, k) for k in ([True, False] if keep else [False])]
         if device == "GAL16V8" and not a.reg:
-            tries += [(d, m) for d in ("g16v8ma", "g16v8ms") for _, m in tries]
-        jed, said = None, []
-        for dev, level in tries:
+            tries += [(d, k) for d in ("g16v8ma", "g16v8ms") for _, k in tries]
+        jed, said, best, first = None, [], None, []
+        for dev, kept in tries:
+            text = src if kept or not keep else re.sub(
+                r"/\* A latch has.*?\*/\nMIN \[.*?\] = 0;\n\n", "", src, flags=re.S)
             if dev:
-                with open(pld, "w") as f:
-                    f.write(src.replace("Device %s;" % a.dev["cupl"], "Device %s;" % dev))
+                text = text.replace("Device %s;" % a.dev["cupl"], "Device %s;" % dev)
+            with open(pld, "w") as f:
+                f.write(text)
             said = []
-            j = compile_cupl(args.cupl, pld, said.append, minimise=level)
-            if not j:
+            jed = compile_cupl(args.cupl, pld, said.append)
+            first = first or said
+            if not jed:
                 continue
             notes = []
-            diff = verify.check_captures(a, j, notes)
-            jed = j
+            diff = verify.check_captures(a, jed, notes)
+            if best is None or not diff:
+                best = dev, kept, text, diff, notes
             if not diff:
                 break
-        if not jed:
-            for msg in said:
+        if best is None:
+            with open(pld, "w") as f:
+                f.write(src)
+            for msg in first:
                 log(msg)
             return 1
+        dev, kept, text, diff, notes = best
+        if not jed or diff:
+            # a later try did not compile, or was no better: back to the best one
+            with open(pld, "w") as f:
+                f.write(text)
+            jed = compile_cupl(args.cupl, pld, log)
         if dev:
             log("compiled for %s (CUPL does not choose that mode by itself)" % dev)
-        if (latches or mixed) and not diff:
-            log("compiled without CUPL's minimisation (-m0), which would remove the product "
-                "terms that hold the latches through a step" if level == 0 else
-                "compiled with CUPL's minimisation: it does not fit without (the latches "
-                "lose the product terms that hold them through a step)")
+        if keep and not kept and not diff:
+            log("it does not fit with the product terms that hold the latches through a step: "
+                "compiled without them (no MIN statement in %s)" % os.path.basename(pld))
         log("%s against the captures (%s x %d input vectors%s): %s" % (
             os.path.basename(jed),
             "%d walks" % len(a.walks) if latches else "%d states" % len(a.states),
