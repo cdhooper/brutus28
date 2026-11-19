@@ -9,7 +9,10 @@ them, and reports where the two disagree.
 
 The stimulus changes one pin per vector, or pulses the clock.  A pin the
 GAL drives is expected at its level (H, L); one it lets go is driven (0,
-1), or expected open (Z) if nothing reads it.
+1), or expected open (Z) if nothing reads it.  csim applies a vector's
+drives before its clock pulse, so a pin that the GAL still drives then,
+and lets go with the clock, is neither driven nor tested in that vector
+(X): driving it would change what the registers load.
 
 csim knows three levels: a latch that nothing has set since power-up is
 unknown, and so is what depends on it, also a register that loaded from
@@ -66,6 +69,7 @@ def vectors(pld, jed, steps=400, seed=3):
     ext = {p: 0 for p in sig}
     free = [p for p in order if not (p == 1 and clocked)]
     lines = []
+    before = set()                  # the pins some chip drove after the vector before
     for step in range(steps):
         ext = dict(ext)
         clk = "0"
@@ -87,6 +91,8 @@ def vectors(pld, jed, steps=400, seed=3):
             inv = pins[p][0]
             if p == 1 and clocked:
                 row.append(clk)
+            elif clk == "C" and p in before and not any(p in r[1] for r in res):
+                row.append("X")             # let go by this clock edge
             elif any(p in r[1] for r in res):
                 same = all(r[0][p] == lv[p] and (p in r[1]) == (p in drv) and p not in r[2]
                            for r in res)
@@ -96,6 +102,7 @@ def vectors(pld, jed, steps=400, seed=3):
             else:
                 row.append(str(ext[p] ^ inv))
         lines.append("".join(row))
+        before = {p for r in res for p in r[1]}
     with open(os.path.splitext(pld)[0] + ".si", "w") as f:
         f.write("%s\nORDER: %s;\n\nVECTORS:\n%s\n" % (
             head, ", ".join(pins[p][1] for p in order), "\n".join(lines)))
