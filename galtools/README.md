@@ -44,15 +44,19 @@ run:
 galre first checks the jumpers (`pld capture jumpers`):
 
 1. The board finds the socket pins jumpered to VCC and GND without
-   connecting the PLD supply. With both PLD rails off, it drives each pin
-   high through its 1K resistor and keeps the pins that lift the rails.
-   It then switches on only the GND rail, which connects no supply, and
-   drives those pins again: a pin on the VCC jumper charges the VCC rail,
-   and a pin on the GND jumper stays low. The chip only ever sees the
-   1K-limited drives.
+   connecting the PLD supply. It switches on only the GND rail, which
+   connects no supply, and drives one pin at a time high through its 1K
+   resistor for 30 ms, after draining the VCC rail. A pin on the GND
+   jumper is held low, and the VCC rail stays near 0 V. A pin on the VCC
+   jumper charges the VCC rail, even when the chip draws so much current
+   that the pin itself reads low (an A4091 U304 pulled it to 713 mV). The
+   chip's other pins charge it too, through the chip's input protection,
+   but lower (on the first board, an ATF22V10's pins reached 22 mV at
+   most, the VCC pin 1691 mV), so the VCC pins are those within 250 mV of
+   the highest reading. The chip only ever sees the 1K-limited drives.
 2. Only if those pins are right does it switch the supply on to measure
-   it: the VCC rail on and the GND rail open for 10 ms, as `pld check`
-   does. It must be within 16% of 5 V.
+   it: both rails on for 10 ms, as for a capture, so the reading is what
+   the chip gets. It must be within 16% of 5 V.
 
 If the jumpers do not suit the device and socket, galre stops before any
 capture and says what it expected, what it found, and the board's
@@ -61,13 +65,13 @@ readings:
     jumper check: the jumpers do not suit a GAL22V10 in the dip24 socket
       expected: VCC on socket pin 28, GND on socket pin 12, supply 5 V
       detected: VCC on socket pin 24, GND on socket pin 12, supply not measured (only once VCC and GND are right)
-      board: jumpers: rails off, Pin12 high: VCC rail ... mV, GND rail ... mV
+      board: jumpers: GND rail on, Pin12 high: VCC rail ... mV, pin reads 0: GND
       board: ...
 
-The firmware checks the same way before every run it is sent, and drives
-the VCC pin high and the GND pin low in every vector. The detection's
-thresholds and timing have not yet been checked on a board, with or
-without a GAL in the socket; its readings go into the report. If it gets
+The firmware checks the same way before every run it is sent (about 2 s
+with a chip in the socket), and drives the VCC pin high and the GND pin
+low in every vector. The detection has been checked on one board, with an
+ATF22V10 in the PLCC socket; its readings go into the report. If it gets
 the jumpers wrong, `--no-jumper-check` turns off both checks.
 
 This writes:
