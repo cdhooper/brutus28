@@ -351,10 +351,18 @@ class BrutusRig:
     The firmware finds the VCC and GND pins without connecting the supply,
     and switches the supply on to measure it only when those pins are
     right.
+
+    dclk: drive the clock pin directly, without its 1K.  Through the 1K
+    the edge is slow, and a GAL22V10 then takes some transitions wrongly:
+    its registers do not all switch at the same moment, and one can catch
+    another's new value through the feedback.  follow: before each clock
+    edge, drive every pin at the level it reads, so no pin the GAL drives
+    is fought through its 1K at the edge.  Both need firmware that knows
+    "set follow= dclk=".
     """
 
     def __init__(self, transport, device, socket=None, settle_us=1, off_ms=20,
-                 on_ms=2, log=print, jumper_check=True):
+                 on_ms=2, log=print, jumper_check=True, follow=True, dclk=True):
         self.socket = socket or DEFAULT_SOCKET[device]
         npins, vcc, gnd, smap = SOCKETS[self.socket]
         if npins != {"GAL16V8": 20, "GAL22V10": 24}[device]:
@@ -362,6 +370,7 @@ class BrutusRig:
         self.t, self.device, self.log = transport, device, log
         self.settle_us, self.off_ms, self.on_ms = settle_us, off_ms, on_ms
         self.jumper_check = jumper_check
+        self.follow, self.dclk = follow, dclk
         self.pins = [p for p in range(1, npins + 1) if p not in (vcc, gnd)]
         self.sbit = {p: 1 << (smap(p) - 1) for p in range(1, npins + 1)}
         self.vcc_bit, self.gnd_bit = self.sbit[vcc], self.sbit[gnd]
@@ -410,6 +419,7 @@ class BrutusRig:
         """The setup, for the recording."""
         meta = {"device": self.device, "socket": self.socket, "settle_us": self.settle_us,
                 "off_ms": self.off_ms, "on_ms": self.on_ms, "jumper_check": self.jumper_check,
+                "follow": self.follow, "dclk": self.dclk,
                 "firmware": self.t.command("version").strip()}
         if self.detected:
             vcc, gnd, mv = self.detected
@@ -458,6 +468,10 @@ class BrutusRig:
             if cube:
                 extra.append("%sm=%x %sv=%x" % (name, self._mask(cube), name,
                                                 self._mask([p for p, v in cube.items() if v])))
+        if self.follow:
+            extra.append("follow=1")
+        if self.dclk:
+            extra.append("dclk=1")
         if quiet:
             extra.append("quiet=1")
         if chk:

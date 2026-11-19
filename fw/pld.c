@@ -409,19 +409,51 @@ pld_init(void)
 
 /*
  * Hardware access for the capture engine ("pld capture", capture.c).
+ *
+ * The cap_hw_direct() pins (the clock with "set dclk=1") are driven by
+ * the CPU's PLD_* pins, which connect to the socket without the 1K, at
+ * the fastest output speed, for a clean clock edge.  They are switched to
+ * outputs only while the PLD is powered, and written before the PLDD_*
+ * pins, so the 1K drive in parallel only follows them.
  */
+static uint32_t cap_direct;
+
+static void
+pld_output_bits(uint32_t mask, uint32_t data)
+{
+    uint32_t set = mask & data;
+    uint32_t clr = mask & ~data;
+
+    GPIO_BSRR(PLD1_PORT) = ((clr & 0xffff) << 16) | (set & 0xffff);
+    GPIO_BSRR(PLD17_PORT) = (((clr >> 16) & 0x0fff) << 16) |
+                            ((set >> 16) & 0x0fff);
+}
+
+void
+cap_hw_direct(uint32_t pins)
+{
+    cap_direct = pins & 0x0fffffff;
+}
+
 void
 cap_hw_power(int on)
 {
-    if (on)
+    if (on) {
         pld_enable();
-    else
-        pld_disable();
+        if (cap_direct != 0) {
+            pld_output_bits(cap_direct, 0);
+            pld_gpio_setmode(cap_direct, GPIO_SETMODE_OUTPUT_PPULL_50);
+        }
+    } else {
+        pld_disable();             /* also the PLD_* pins back to inputs */
+    }
 }
 
 uint32_t
 cap_hw_io(uint32_t value, uint settle_usec)
 {
+    if (cap_direct != 0)
+        pld_output_bits(cap_direct, value);
     pldd_output(value);
     if (settle_usec != 0)
         timer_delay_usec(settle_usec);
@@ -873,92 +905,98 @@ pld_report_gnd_and_vcc_jumpers(int verbose, uint32_t *vcc_p, uint32_t *gnd_p)
  *
  * cap_hw_jumper_pins() finds the socket pins jumpered to VCC and GND
  * without ever connecting the PLD supply, so that a PLD in a wrongly
- * jumpered socket is not powered.  pld_report_gnd_and_vcc_jumpers() tells
- * VCC from GND by switching both rails on; this switches on only the GND
- * rail, which connects no supply, and drives each candidate pin high
- * through its 1K: a pin jumpered to VCC charges the VCC rail (22uF,
- * through the 1K and the 2K ADC divider, about 15 ms), a pin jumpered to
- * GND is held low.  The thresholds have not yet been checked on a board;
- * with verbose set, every reading is printed.
+ * jumpered socket is not powered.  It switches on only the GND rail,
+ * which connects no supply, and drives one pin at a time high through its
+ * 1K, with the other pins floating:
+ *
+ * - a pin jumpered to GND is held low by the GND rail: it reads 0, and the
+ *   VCC rail stays at 0;
+ * - a pin jumpered to VCC charges the VCC rail (22uF, through the 1K
+ *   against the 2K ADC divider, a time constant of about 15 ms).  A PLD
+ *   that draws much current from its VCC pin with its GND pin grounded
+ *   (a GAL22V10 pulled the rail to 713 mV) may hold that pin low enough
+ *   to read 0, but the rail still rises;
+ * - with a PLD inserted, its other pins charge the VCC rail too, through
+ *   the PLD's input protection diodes, but a diode drop lower;
+ * - without a PLD, the other pins do not reach the VCC rail.
+ *
+ * So the GND pins are those that read 0 with the VCC rail below
+ * JUMPER_GND_MAX_MV, and the VCC pins those that lift the VCC rail
+ * highest, within JUMPER_DIODE_MV of the highest reading.  A wrong jumper
+ * always shows up as an extra VCC or GND pin, so leakage can only make
+ * the check refuse.
+ * Before each pin, every pin is driven low until the VCC rail has drained,
+ * so each reading is that pin's alone.  The thresholds have not yet been
+ * checked on many boards; with verbose set, every reading is printed.
  *
  * cap_hw_supply() measures the selected supply.  capture.c calls it only
- * once the VCC and GND pins are known to suit the PLD.  As in
- * pld_report_5v_3p3v_jumper(), the VCC rail is switched on with the GND
- * rail open, so an inserted PLD draws almost nothing and the reading is
- * the supply rather than the supply less the drop across the current
- * limit (R13/R14).
+ * once the VCC and GND pins are known to suit the PLD, so it powers the
+ * PLD as a capture does (both rails on, every pin low through its 1K) and
+ * reads the VCC rail: the supply less the drop across the current limit
+ * (R13/R14), which is what the PLD gets.  Unlike
+ * pld_report_5v_3p3v_jumper(), it keeps the GND rail on: with the GND
+ * rail open, the 22uF across the rails and an inserted PLD lift the GND
+ * rail, which goes to an ADC input without a divider, above the CPU's
+ * supply, and the VCC reading comes out high (about 6 V for 5 V).
  */
-#define JUMPER_MIN_MV       500    /* a jumpered pin lifts the rails this far */
-#define JUMPER_DRAIN_MSEC   100    /* VCC rail drain, about 7 time constants */
-#define JUMPER_CHARGE_MSEC  60     /* VCC rail charge, about 4 time constants */
+#define JUMPER_DRAIN_MSEC   100    /* VCC rail drain, at most */
+#define JUMPER_DRAINED_MV   100    /* the VCC rail counts as drained */
+#define JUMPER_CHARGE_MSEC  30     /* VCC rail charge, 2 time constants */
 #define JUMPER_VCC_MIN_MV   300    /* VCC rail reading for a VCC pin */
 #define JUMPER_GND_MAX_MV   150    /* VCC rail reading for a GND pin */
+#define JUMPER_DIODE_MV     250    /* VCC pins read within this of the top */
 
 int
 cap_hw_jumper_pins(uint32_t *vcc_pins, uint32_t *gnd_pins, int verbose)
 {
-    uint     voltage_vcc[28];
-    uint     voltage_gnd[28];
-    uint32_t cand = 0;
-    uint     pin;
-    int      rc = 0;
+    uint rail[28];
+    uint level[28];
+    uint peak = 0;
+    uint pin;
 
     *vcc_pins = 0;
     *gnd_pins = 0;
-    pld_find_jumpered_pins(voltage_vcc, voltage_gnd);
-    for (pin = 0; pin < 28; pin++) {
-        if ((voltage_vcc[pin] < JUMPER_MIN_MV) &&
-            (voltage_gnd[pin] < JUMPER_MIN_MV))
-            continue;
-        cand |= BIT(pin);
-        if (verbose) {
-            printf("jumpers: rails off, Pin%u high: VCC rail %u mV, "
-                   "GND rail %u mV\n", pin + 1, voltage_vcc[pin],
-                   voltage_gnd[pin]);
-        }
-    }
-    if (verbose && (cand == 0))
-        printf("jumpers: rails off, no pin lifts a rail %u mV\n",
-               JUMPER_MIN_MV);
-
+    adc_enable();
     pld_disable();
     pld_gnd_enable();
     for (pin = 0; pin < 28; pin++) {
-        uint rail_vcc;
         uint rail_gnd;
-        uint level;
+        uint t;
 
-        if ((cand & BIT(pin)) == 0)
-            continue;
-
-        /* Drain the VCC rail through the candidates' 1K */
+        /* Drain the VCC rail through every pin's 1K */
         pldd_output(0);
-        pldd_gpio_setmode(cand, GPIO_SETMODE_OUTPUT_PPULL_2);
-        timer_delay_msec(JUMPER_DRAIN_MSEC);
-        pldd_gpio_setmode(cand & ~BIT(pin), GPIO_SETMODE_INPUT);
+        pldd_gpio_setmode(0x0fffffff, GPIO_SETMODE_OUTPUT_PPULL_2);
+        for (t = 0; t < JUMPER_DRAIN_MSEC; t++) {
+            if (adc_get_pld_readings(&rail_gnd) < JUMPER_DRAINED_MV)
+                break;
+            timer_delay_msec(1);
+        }
+        pldd_gpio_setmode(0x0fffffff & ~BIT(pin), GPIO_SETMODE_INPUT);
 
         pldd_output(BIT(pin));
         timer_delay_msec(JUMPER_CHARGE_MSEC);
-        rail_vcc = adc_get_pld_readings(&rail_gnd);
-        level = (pld_input() & BIT(pin)) ? 1 : 0;
+        rail[pin] = adc_get_pld_readings(&rail_gnd);
+        level[pin] = (pld_input() & BIT(pin)) ? 1 : 0;
         pldd_output(0);
-        pldd_gpio_setmode(BIT(pin), GPIO_SETMODE_INPUT);
-
-        if (rail_vcc >= JUMPER_VCC_MIN_MV)
-            *vcc_pins |= BIT(pin);
-        else if ((rail_vcc <= JUMPER_GND_MAX_MV) && (level == 0))
-            *gnd_pins |= BIT(pin);
-        else
-            rc = -1;
-        if (verbose) {
-            printf("jumpers: GND rail on, Pin%u high: VCC rail %u mV, "
-                   "pin reads %u: %s\n", pin + 1, rail_vcc, level,
-                   (*vcc_pins & BIT(pin)) ? "VCC" :
-                   (*gnd_pins & BIT(pin)) ? "GND" : "unclear");
-        }
+        if (peak < rail[pin])
+            peak = rail[pin];
     }
     pld_disable();
-    return (rc);
+
+    for (pin = 0; pin < 28; pin++) {
+        if ((level[pin] == 0) && (rail[pin] < JUMPER_GND_MAX_MV))
+            *gnd_pins |= BIT(pin);
+        else if ((rail[pin] >= JUMPER_VCC_MIN_MV) &&
+                 (rail[pin] + JUMPER_DIODE_MV >= peak))
+            *vcc_pins |= BIT(pin);
+        if (verbose) {
+            printf("jumpers: GND rail on, Pin%u high: VCC rail %u mV, "
+                   "pin reads %u%s\n", pin + 1, rail[pin], level[pin],
+                   (*vcc_pins & BIT(pin)) ? ": VCC" :
+                   (*gnd_pins & BIT(pin)) ? ": GND" : "");
+        }
+    }
+    return (0);
 }
 
 int
@@ -967,15 +1005,9 @@ cap_hw_supply(uint *rail_mv)
     uint rail_gnd;
 
     pld_disable();
-    pld_gnd_enable();
-    timer_delay_msec(1);
-    pld_gnd_disable();
-    pld_vcc_enable();
+    pld_enable();
     timer_delay_msec(10);
     *rail_mv = adc_get_pld_readings(&rail_gnd);
-    pld_vcc_disable();
-    pld_gnd_enable();
-    timer_delay_msec(10);
     pld_disable();
     return (0);
 }

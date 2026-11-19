@@ -68,6 +68,10 @@ def describe(meta):
     if "settle_us" in meta:
         lines.append("timing: settle %s us, power off %s ms, on %s ms" % (
             meta["settle_us"], meta["off_ms"], meta["on_ms"]))
+    if "follow" in meta:
+        lines.append("clock edge: %s, %s" % (
+            "pins follow the GAL" if meta["follow"] else "pins as enumerated",
+            "clock driven directly" if meta["dclk"] else "clock through 1K"))
     j = meta.get("jumpers")
     if j:
         lines.append("jumpers: VCC on socket %s, GND on socket %s, supply %s mV" % (
@@ -114,6 +118,12 @@ def main(argv=None):
     ap.add_argument("--no-jumper-check", action="store_true",
                     help="power the socket without checking the VCC, GND and supply "
                          "jumpers (board)")
+    ap.add_argument("--no-dclk", dest="dclk", action="store_false",
+                    help="clock through the 1K like the other pins, instead of directly "
+                         "(board; the slow edge can make the GAL take wrong transitions)")
+    ap.add_argument("--no-follow", dest="follow", action="store_false",
+                    help="keep driving the enumerated levels at the clock edge, against "
+                         "the pins the GAL drives (board)")
     ap.add_argument("--cupl", default=os.environ.get("CUPL") or shutil.which("cupl"))
     ap.add_argument("--steps", type=int, default=30000,
                     help="random steps to compare with the original (sim)")
@@ -153,7 +163,8 @@ def main(argv=None):
                 ap.error("board needs --device and --port")
             t = SerialTransport(args.port)
             brutus = BrutusRig(t, args.device, args.socket, args.settle, args.off, args.on,
-                               log, jumper_check=not args.no_jumper_check)
+                               log, jumper_check=not args.no_jumper_check,
+                               follow=args.follow, dclk=args.dclk)
             if brutus.jumper_check:
                 try:
                     brutus.preflight()

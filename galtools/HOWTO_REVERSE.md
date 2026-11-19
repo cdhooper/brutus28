@@ -16,11 +16,13 @@ works as well as an open one. It recovers:
 [README.md](README.md) explains how each part works and lists every limit.
 This guide covers what to do and how to read the result.
 
-> **Status:** the firmware commands have run only on the host, against the
-> GAL simulator (the test suite builds `fw/capture.c` for the host). They
-> have not yet been run on a Brutus-28 board. Keep the recording
-> (`capture.jsonl`) of every board run: with it, the analysis can be redone
-> and problems can be found without the chip.
+> **Status:** first board run on 2026-11-18: an ATF22V10 in the PLCC
+> socket, a ROM-board state machine (19 pins enumerated, 6 states), came
+> out the same as the analysis of its original JED, equation for equation.
+> The asynchronous reset and latch paths have run only on the host, against
+> the GAL simulator (the test suite builds `fw/capture.c` for the host).
+> Keep the recording (`capture.jsonl`) of every board run: with it, the
+> analysis can be redone and problems can be found without the chip.
 
 ## 1. What you need
 
@@ -60,7 +62,7 @@ This builds `fw/objs/fw.bin`. To install it over USB:
 The board's serial port is `/dev/ttyACM0` or similar on Linux, and
 `/dev/cu.usbmodemXXXX` on macOS. To check the firmware, type
 `pld capture ?` on the board's console: the keys listed under `set` must
-include `gray rot start skm skv avm avv quiet chk`.
+include `gray rot start skm skv avm avv quiet chk follow dclk`.
 
 ## 3. Put the chip in
 
@@ -77,8 +79,9 @@ Set the jumpers:
 Set the supply jumper to 5 V.
 
 Before the first capture, galre checks the jumpers without switching the
-supply on. It drives each socket pin high through its 1K resistor, finds
-the pins jumpered to VCC and GND, and only then measures the supply. If the
+supply on. With only the GND rail switched on, it drives each socket pin
+high through its 1K resistor, finds the pins jumpered to VCC and GND, and
+only then measures the supply. If the
 jumpers do not suit the chip, it stops with exit code 2 and prints what it
 expected and what it found. The chip only ever sees 1K-limited drives
 until the jumpers are right.
@@ -294,10 +297,10 @@ designs in `designs/`, with the pins the tests hold:
 ## 10. When galre stops
 
 **Exit code 2, jumper check.** Set the jumpers as printed under
-"expected". The detection's thresholds have not been checked on a board
-yet. If you are sure the jumpers are right and the detection is wrong,
-`--no-jumper-check` turns the check off, both in galre and in the
-firmware.
+"expected". The detection has been checked on one board only; the report
+lists its readings for every pin. If you are sure the jumpers are right
+and the detection is wrong, `--no-jumper-check` turns the check off, both
+in galre and in the firmware.
 
 **A traceback ending in `CaptureError: pld capture set ...: Invalid ...`.**
 The firmware is older than galtools. Install the firmware from the same

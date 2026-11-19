@@ -20,6 +20,8 @@
  */
 void     cap_hw_power(int on);            /* PLD power and PLDD drivers */
 uint32_t cap_hw_io(uint32_t value, uint settle_usec);  /* drive, wait, read */
+void     cap_hw_direct(uint32_t pins);    /* pins cap_hw_io drives without
+                                             the 1K from the next power-up */
 void     cap_hw_delay_msec(uint msec);
 int      cap_hw_abort(void);              /* ^C or abort button */
 int      cap_hw_output(const void *buf, uint len);     /* 0 = sent */
@@ -32,6 +34,9 @@ int      cap_hw_supply(uint *rail_mv);      /* 0 = measured */
  * this order (pldd_output in pld.c): socket pins 1-16, 17-24, then 25-28.
  * In between, the PLD sees the new values on the groups written so far
  * and the old values on the rest.  cap_hw_power(1) drives every pin low.
+ * The cap_hw_direct() pins are written first, directly by the CPU's PLD_*
+ * pins, then again with the rest through the 1K; cap_hw_power(0) stops
+ * driving them.
  */
 #define CAP_PORT_GROUPS { 0x000ffff, 0x0ff0000, 0xf000000 }
 

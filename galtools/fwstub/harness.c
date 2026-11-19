@@ -21,6 +21,7 @@ static supply_cb_t    supply_cb;
 static unsigned char *out;
 static size_t         out_len;
 static size_t         out_cap;
+static uint32_t       direct_seen;
 
 static void
 out_put(const void *p, size_t n)
@@ -63,6 +64,22 @@ cap_hw_io(uint32_t value, uint settle_usec)
 {
     (void) settle_usec;
     return (io_cb(value));
+}
+
+void
+cap_hw_direct(uint32_t pins)
+{
+    direct_seen |= pins;
+}
+
+/* The pins driven directly (dclk) since the last call */
+uint32_t
+harness_direct(void)
+{
+    uint32_t seen = direct_seen;
+
+    direct_seen = 0;
+    return (seen);
 }
 
 void
