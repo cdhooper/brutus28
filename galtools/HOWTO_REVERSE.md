@@ -364,6 +364,7 @@ designs in `designs/`, with the pins the tests hold:
 | `chain16v8` | three latches that set each other off in one step, an output with an enable | `8-9=0,11-14=0,19=0` |
 | `clklatch22v10` | no registers: a latch that is open while pin 1 is high and looks like a register when clocked | `7-11=0,13-20=0` |
 | `oelatch16v8` | registered GAL16V8 with a latch, pin 11 not held: a register with a constant input, an output that shows a register | `6-9=0,12=0,14=0` |
+| `routelatch22v10` | a register that loads only with a latch set on the way to the state: explored by registers and latch level together | `5-11=0,13-20=0` |
 | `osc16v8` | an output that feeds back inverted and oscillates: galre stops | `5-9=0,11-16=0,19=0` |
 | `buried22v10` | a register that never reaches its pin: galre stops | `5-11=0,13-21=0` |
 
@@ -389,8 +390,8 @@ commit (section 2).
 | "the same walk read differently twice on ..." | A pin reads differently on the same inputs: a bad contact in the socket, or an output that oscillates. Reseat the chip. |
 | "... is 1 once and 0 once: not a circuit of latches on those pins" | Not latches alone. galre goes on to try registers and latches together; this is the reason only if that fails too. |
 | "the registers do not follow the transitions the sweeps and the walks showed" | The registers go another way than learned, and no latch explains it: state that no pin shows, or readings that do not repeat. |
-| "... led to state ..., but the same clocks from power-up lead to ..." | The same: a register that never reaches a pin, or readings that do not repeat (reseat the chip). |
-| "... leads to a state the sweeps did not find" | A state that is reached only while a latch is set, which galre does not explore. |
+| "... led to state ..., but the same clocks from power-up lead to ..." | The same: a register that never reaches a pin, or readings that do not repeat (reseat the chip). In a design with latches galre first explores again by the registers and the latch levels together ("exploring again by the registers and the levels of ..."); this is the reason only if it shows again after that. |
+| "... leads to a state the sweeps did not find (...): no sequence of clocked vectors leads there" | A state that is reached only with a latch at a level that it has after inputs changed without a clock. galre explores by registers and latch levels, but every state by clocked vectors. |
 | "... is 1 once and 0 once: the pin oscillates there ..., or it is not a circuit of registers and latches on those pins" | The same point was seen with two outcomes. galre first tries again with every output pin as a signal of its own ("trying again with every output pin ..."); this is the reason only if that fails too. Then: an output that oscillates, or state that no pin shows. |
 | "N steps are not explained by one circuit of latches (the first: pins ... change at ...)", "latch pins ... change together at ..., in no order that agrees with the other walks" or "checking the steps against the learned circuit keeps adding to it" | A step whose outcome depends on more than the levels galre sees, such as a race that the chip's delays decide. |
 | "the model of registers and latches did not predict ..." | Latches in a clocked design that behave in a way galre's model does not cover. |
@@ -423,6 +424,6 @@ for example `--settle 5` (default 1 µs). If it persists, keep
   register and is written as one. It behaves the same on the pins.
 - For latches: inputs changing at the same moment, and the state at
   power-up. In a clocked design also: a state that is reached only with
-  a latch at a level the transition sweeps never had.
+  a latch at a level that no sequence of clocked vectors leaves it at.
 
 See the Limits section of [README.md](README.md) for the full list.

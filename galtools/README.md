@@ -415,6 +415,27 @@ not the reset term. galre then goes on (`reglatch.py`):
    a register as long as the chip is only clocked. galre then takes the
    pin for a latch that reads pin 1 and starts again
    (`designs/clklatch22v10`).
+
+   Where a clock edge leads may depend on a latch, and the latch on the
+   way the chip came to the state: two ways to the same register values
+   leave it at different levels. The sweeps, which take one path to each
+   register state, then miss states, or the same clocks lead to two
+   states. When a walk meets a state that the sweeps did not find, when
+   a state's path does not lead back to it, or when the latches' circuit
+   does not come out, galre explores again by the register values and
+   the levels of the latch pins together (`designs/routelatch22v10`):
+   - A state's observation ends with the levels of the pins that change
+     without a clock, so two states with the same registers and another
+     latch level are two states, each with its own path, table and
+     sweeps.
+   - The reads of an observation move the inputs, and so the latches.
+     So the firmware follows power-up and every clocked step, in a path
+     as in a sweep, with the same reads (`psig`): then a path leaves the
+     latches as the sweep did, and leads to the state that the sweep
+     saw.
+   - Afterwards a state is the register values again. The first state
+     found with them stands for it; the sweeps of the others say where
+     its clock edges go with the latches at other levels.
 3. The outputs that read differently at the same inputs, pin 1 level and
    register state are the latch pins, less those that are a function of
    these and the other latch pins. Every output, enable and register
@@ -588,9 +609,10 @@ needed about 3 million power cycles.
   galre stops with exit code 3 before writing equations when:
   - the chip has state that no pin shows (a register whose output is
     never enabled): the same clocks then lead to different states;
-  - a state is reached only with a latch at a level that the sweeps never
-    had at that clock edge, or a clock edge goes another way because of a
-    latch and no registered pin shows it before the next edge;
+  - a state is reached only with a latch at a level that no sequence of
+    clocked vectors leaves it at, or a clock edge goes another way
+    because of a latch and no registered pin shows it before the next
+    edge;
   - a latch reacts only to several inputs changing at once;
   - an output oscillates (it feeds back inverted, as in a ring
     oscillator, `designs/osc16v8`): its level when read is then
@@ -631,8 +653,8 @@ The supply is measured only when the pins match the job's `vcc=` and
 The host first configures a job:
 
 - `set pins= base= inv= clk= cand= mask= count= mul= rev= gray= rot=
-  mix= start= skm= skv= avm= avv= quiet= chk= pre= follow= dclk= settle=
-  off= on= vcc= gnd= supply=`
+  mix= start= skm= skv= avm= avv= quiet= chk= chkm= psig= pre= follow=
+  dclk= settle= off= on= vcc= gnd= supply=`
 - `path`
 - `probe`
 - `ret <crc> <vectors>`
@@ -659,10 +681,18 @@ It then runs one of:
 - `trans`: the clock transitions from the path state. With `chk=1`, the
   clocked vector is also read right after the edge and again after the
   probes, and the first 16 vectors where the reads differ are reported,
-  each with the pins that differ. Pins left out of `mask` do not count.
+  each with the pins that differ. Pins left out of `mask` do not count,
+  nor do pins outside `chkm`, if it is set.
   With `pre=1`, every vector's record is followed by the read of all
   pins just before its clock edge.
 - `state`: the signature of the path state.
+
+With `psig=1` (which needs probe vectors), power-up and every clocked
+step, of the path, of a return path and of `trans`, are followed by the
+same writes: the step's vector with the clock low, the signature, the
+vector again, the signature again. The second signature is the state's:
+`walk`, `trans` and `state` report it without reading again, and `trans`
+with `chk=1` flags the vectors whose two reads of the vector differ.
 
 Every clock step drives its vector with the clock pins low, then raises
 them. With `follow=1`, the pins are read after the first write and every
