@@ -98,21 +98,26 @@ def _cube_set(care, val, k, full, v1):
     return s
 
 
-def sop(on, off, k):
+def sop(on, off, k, order=None):
     """Greedy cover of the minterm bitset `on` avoiding `off` over k
-    variables; [(care, val)] cubes."""
+    variables; [(care, val)] cubes.  A cube grown from a minterm drops
+    the variable that takes in most of what is not covered yet; of
+    several that take in as much, the first in order (default: the
+    lowest)."""
     if not on:
         return []
     full, v1 = litmasks(k)
     if not off:
         return [(0, 0)]
     unc, cubes = on, []
+    if order is None:
+        order = range(k)
     while unc:
         m = (unc & -unc).bit_length() - 1
         care, val, cur = (1 << k) - 1, m, 1 << m
         while True:
             best = None
-            for b in range(k):
+            for b in order:
                 if not care >> b & 1:
                     continue
                 c2 = care & ~(1 << b)
@@ -1186,10 +1191,15 @@ class Analysis:
                 # known only where the walks went: of the covers that agree
                 # with it, a smaller one if this one does not fit
                 limit = self._budget(p, kind)
+                order = self._drop_first(p, kind, sup)
                 if len(pos) > limit:
-                    pos = fewer(pos, on, off, k)
+                    pos = min(pos, sop(on, off, k, order), key=len)
+                    if len(pos) > limit:
+                        pos = fewer(pos, on, off, k)
                 if len(neg) > limit:
-                    neg = fewer(neg, off, on, k)
+                    neg = min(neg, sop(off, on, k, order), key=len)
+                    if len(neg) > limit:
+                        neg = fewer(neg, off, on, k)
                 # ... and claim no more than that
                 own = self._own(p, kind, sup)
                 pos, neg = tight(pos, on, k, own), tight(neg, off, k, own)
@@ -1237,6 +1247,12 @@ class Analysis:
 
     # product terms of a GAL22V10's macrocells, pins 23 down to 14
     TERMS22 = (8, 10, 12, 14, 16, 16, 14, 12, 10, 8)
+
+    def _drop_first(self, p, kind, sup):
+        """The order in which a cube of pin p's cover drops variables that
+        take in equally much, for a second cover when the first does not
+        fit (None: as they come)."""
+        return None
 
     def _budget(self, p, kind):
         """The product terms a function of pin p may have.  A GAL16V8 or

@@ -65,6 +65,7 @@ for inputs that change one at a time, and the latches' level at power-up
 is not modelled.
 """
 
+from itertools import combinations
 import sys
 from array import array
 from functools import reduce
@@ -1253,6 +1254,20 @@ class RegLatchAnalysis(Analysis):
         v = self.n1 + len(self.reg) + self.L.index(p)
         return sup.index(v) if v in sup else None
 
+    def _drop_first(self, p, kind, sup):
+        """Other latches' pins first, then the inputs and registers, the
+        latch's own pin last.  At rest a latch pin often reads the same
+        as an input (a P15 that follows P6), and the walks cannot tell
+        which of them a product term reads.  One that reads the input
+        also holds on the way, while the latch pin has not followed yet,
+        where the other needs further terms; and what holds a latch reads
+        its own pin."""
+        first = self.n1 + len(self.reg)
+        own = self._own(p, kind, sup)
+        lat = [i for i, v in enumerate(sup) if v >= first and i != own]
+        return (lat[::-1] + [i for i, v in enumerate(sup) if v < first]
+                + ([own] if own is not None else []))
+
     def _hazards(self, p, kind, sup, pos, neg, on, off):
         if kind or p not in self.L:
             return pos, neg
@@ -1385,6 +1400,12 @@ class RegLatchAnalysis(Analysis):
                 return True
             for rec in unknown:
                 key, e, lp, lcm, rel, u = rec[:6]
+                first = self._first_movers(rec)
+                if first:
+                    for j in first:
+                        self.extra[(j, e)] = lcm >> j & 1
+                    added = True
+                    continue
                 if key not in self.split and k <= 4 and key in self._multi:
                     self.split.add(key)
                     added = True
@@ -1406,6 +1427,29 @@ class RegLatchAnalysis(Analysis):
             "at %s in state %s): what happens there depends on more than the levels seen" % (
                 self.unexplained, [self.L[j] for j in range(m) if (lp0 ^ lc) >> j & 1],
                 self._cinputs(xp), _state(self.S[a])))
+
+    def _first_movers(self, rec):
+        """For a step of which the learned circuit knows nothing: the
+        fewest of the latches that changed which, moved first, let the
+        circuit do the rest (two latches fall, and the two that read them
+        follow, as they are known to from shorter steps).  None if only
+        all of them will do."""
+        key, e, lp, lcm, rel, u = rec[:6]
+        xp, pxp, a, lp0, lc = key
+        m = len(self.L)
+        ch = [j for j in range(m) if (lp ^ lcm) >> j & 1 and not u >> j & 1]
+        if len(ch) < 2 or len(ch) > 8 or any(
+                (j, e) in self.extra or self.g[j][e] for j in ch):
+            return None
+        for size in range(1, len(ch)):
+            for sub in combinations(ch, size):
+                lv = lp
+                for j in sub:
+                    lv ^= 1 << j
+                path, rests = self._trace(lv, a, xp, xp)
+                if rests and path[-1] == lc and len(path) <= m + self.SYNC + 1:
+                    return sub
+        return None
 
     def _hold_first(self, rec, path):
         """For a step at which the learned latches do not settle: the
