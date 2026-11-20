@@ -32,7 +32,7 @@ def check_captures(a, jed, notes=None):
             if (sigs[0] != sigs[1]) != active:
                 bad.append(("asynchronous reset", s))
         la, lb, _ = rig.walk(a.V, a.base, drives, skip=a.ar if active else None,
-                             avoid=a.ar if path else None)
+                             avoid=a.ar if path else None, **a._wctx())
         t2 = Table(a.V, la, lb, a.full, a.v1, a.full ^ a.ar_set if active else None)
         for p in a.pins:
             if (p == 1 and not a.clock_in_v) or p in hist:
@@ -42,10 +42,10 @@ def check_captures(a, jed, notes=None):
                 bad.append(("pin %d" % p, s))
         if s in a.trans and not a.clock_in_v and a.probe_x:
             res = rig.transitions(a.V, a.base, drives, a.probes(), a.cand, avoid=a.ar,
-                                  ignore=hist, pre=a.mixed)
+                                  pre=a.mixed, **a._tctx())
             m = {}
             for o, xs in res[0].items():
-                s2 = a._sig_obs(o)
+                s2 = a._reg(a._sig_obs(o))
                 m[s2] = m.get(s2, 0) | xs
             if not a.mixed:
                 if m != a.trans[s]:
@@ -82,6 +82,7 @@ def _check_events(a, rig, notes=None):
             kw = dict(skip=a.ar, avoid=a.ar)
         elif mode == a.AVOID:
             kw = dict(avoid=a.ar)
+        kw.update(a._wctx())
         la, lb, _ = rig.walk(a.Vc, a.base, a.drives(path), gray=1, rot=rot, rev=rev,
                              start=start, mix=mix, **kw)
         name = "walk from state %s rot=%d rev=%d start=%x mix=%d" % (

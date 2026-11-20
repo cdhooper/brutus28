@@ -120,6 +120,13 @@ MIXED_CASES = {
         (23, "oe"): "P2"}),
 }
 
+# a register input that reads a latch which must have been set on the way
+# to the state: the pins held, and what galre must find
+ROUTELATCH = ("5-11=0,13-20=0", {
+    (21, ""): "P2 & !P3\n    # !P3 & P21",
+    (22, "d"): "!P2 & !P3 & !P4 & P23 & P21\n    # !P3 & P22",
+    (23, "d"): "P4"})
+
 # a registered GAL16V8 with a latch that the register input reads: the
 # pins held, and what galre must find.  Pin 11 is not held: while it is
 # high no register shows on its pin
@@ -401,6 +408,31 @@ class SimulatedChip(unittest.TestCase):
             (22, "d"): "P3 & P19 & !P23\n    # P4 & P22",
             (23, "d"): "P2"})
 
+    def test_state_reached_only_with_a_latch_set(self):
+        """Q1 loads a one only while the latch is set and its set input
+        is low again.  Clocked from one path per register state, it never
+        does, and passes for a constant.  galre then explores by the
+        registers and the latch level together: every clocked step is
+        followed by the same reads, so that each of the six states is
+        reached by its own path, and the four register states come out
+        with the latch as an input of Q1."""
+        fix, eqs = ROUTELATCH
+        logs = []
+        a = galre.analyse(SimRig(jed("routelatch22v10")), "GAL22V10",
+                          fixed=galre.parse_fixed(fix), log=logs.append)
+        self.assertIsInstance(a, RegLatchAnalysis)
+        self.assertTrue(a.composite)
+        self.assertEqual(a.lsig, (21,))
+        self.assertIn("6 states by registers and latch levels (pin 21), 4 by the registers "
+                      "alone", logs)
+        self.assertEqual(len(a.states), 4)
+        self.assertEqual(sorted(a.reg), [22, 23])
+        self.assertEqual(a.Lh, [21])
+        self.assertFalse(a.deep)
+        self.assertEqual({(p, kind): "!" * inv + expr for p, kind, inv, expr, _ in a.eqs}, eqs)
+        self.assertEqual(a.check_equations(), [])
+        self.assertEqual(verify.check_captures(a, jed("routelatch22v10")), [])
+
     def test_skipped_vectors_are_not_driven_pins(self):
         """A walk around the reset term skips vectors, which read as 0.
         An enumerated I/O pin that the design does not use (19) is not
@@ -498,7 +530,8 @@ class SimulatedChip(unittest.TestCase):
                   for name, (device, fix, _, _, _) in LATCH_CASES.items()]
         cases += [(name, c[0], galre.parse_fixed(c[1])) for name, c in MIXED_CASES.items()]
         cases += [("racelatch16v8", "GAL16V8", galre.parse_fixed("6-9=0,11-14=0,18-19=0")),
-                  ("oelatch16v8", "GAL16V8", galre.parse_fixed(OELATCH[0]))]
+                  ("oelatch16v8", "GAL16V8", galre.parse_fixed(OELATCH[0])),
+                  ("routelatch22v10", "GAL22V10", galre.parse_fixed(ROUTELATCH[0]))]
         try:
             for name, device, fixed in cases:
                 with self.subTest(design=name):
@@ -797,6 +830,43 @@ class Firmware(unittest.TestCase):
         finally:
             shutil.rmtree(out)
 
+    def test_latch_levels_board_and_replay(self):
+        """galre board explores by registers and latch levels together
+        (psig, also) through the host-built firmware as sim does, and
+        replay finds every such job in the recording."""
+        out = tempfile.mkdtemp(prefix="galre")
+        name, fix = "routelatch22v10", ROUTELATCH[0]
+
+        def galre_main(*argv):
+            with contextlib.redirect_stdout(io.StringIO()):
+                r = galre.main(list(argv) + ["--cupl", ""])
+            with open(os.path.join(argv[argv.index("-o") + 1], "report.txt")) as f:
+                return r, f.read()
+        try:
+            pld = {}
+            r, report = galre_main("sim", jed(name), "-o", os.path.join(out, "sim"),
+                                   "--fix", fix, "-t", name)
+            self.assertEqual(r, 0)
+            dev = fwsim.SocketDevice(jed(name), "dip24")
+            board = os.path.join(out, "board")
+            with mock.patch.object(galre, "SerialTransport",
+                                   lambda port: fwsim.HarnessTransport(self.lib, dev)):
+                r, report = galre_main("board", "-p", "-", "-d", "GAL22V10", "-o", board,
+                                       "--fix", fix, "-t", name)
+            self.assertEqual(r, 0)
+            self.assertIn("6 states by registers and latch levels (pin 21), 4 by the registers "
+                          "alone", report)
+            r, report = galre_main("replay", os.path.join(board, "capture.jsonl"),
+                                   "-o", os.path.join(out, "replay"))
+            self.assertEqual(r, 0)
+            for d in ("sim", "board", "replay"):
+                with open(os.path.join(out, d, name + ".pld")) as f:
+                    pld[d] = f.read()
+            self.assertEqual(pld["board"], pld["sim"])
+            self.assertEqual(pld["replay"], pld["sim"])
+        finally:
+            shutil.rmtree(out)
+
     def test_c_model(self):
         """fwstub/galmodel.c, the chip SimRig puts in the socket, reads the
         same as galsim.py's GAL in fwsim.SocketDevice after every write:
@@ -868,6 +938,57 @@ class Firmware(unittest.TestCase):
         rig = BrutusRig(self.transport("fsm22v10", "dip24"), "GAL22V10", log=quiet)
         _, flags = rig.transitions([2, 3, 4], {}, [{2: 1}], [{}], [21, 22, 23], chk=True)
         self.assertEqual(flags, [])
+
+    def test_reads_after_every_step(self):
+        """With psig, power-up and every clocked step are followed by the
+        signature reads, so a path leads to the state that a sweep saw,
+        latches included: the sweep's observation of a vector is the one
+        before a walk from the path with that vector, and it ends with
+        the level of the pins given as also."""
+        rig = BrutusRig(self.transport("routelatch22v10", "dip24"), "GAL22V10", log=quiet)
+        V = [2, 3, 4]
+        base = {p: 0 for p in rig.pins if p not in V and p != 1}
+        kw = dict(psig=True, also=(21,))
+        def drive(x):
+            d = dict(base)
+            d.update((p, x >> b & 1) for b, p in enumerate(V))
+            return d
+        out, flags = rig.transitions(V, base, [], [drive(0)], [22, 23], chk=True,
+                                     nochk=[21], **kw)
+        self.assertEqual(flags, [])
+        seen = {}
+        for o, xs in out.items():
+            for x in range(8):
+                if xs >> x & 1:
+                    seen[x] = o
+        # S and D: Q0 set and the latch set; D alone: Q0 set, the latch not
+        self.assertEqual(seen[5][-1], (1,))
+        self.assertEqual(seen[4][-1], (0,))
+        self.assertEqual(seen[5][:-1], seen[4][:-1])
+        for x in (4, 5):
+            _, _, sigs = rig.walk(V, base, [drive(x)], probes=[drive(0)], cand=[22, 23],
+                                  data=False, **kw)
+            self.assertEqual(sigs[0], seen[x])
+        # from the state with the latch set, every input low sets Q1; without, not
+        q1 = {}
+        for x in (4, 5):
+            out, _ = rig.transitions(V, base, [drive(x)], [drive(0)], [22, 23], **kw)
+            q1[x] = [o[0][0] for o, xs in out.items() if xs & 1][0]
+        self.assertEqual(q1, {4: (0, 0), 5: (1, 1)})
+        # chkm: reglatch22v10's latch pins change when a state is read
+        rig = BrutusRig(self.transport("reglatch22v10", "dip24"), "GAL22V10", log=quiet)
+        V = [2, 3, 4, 5, 6]
+        base = {p: 0 for p in rig.pins if p not in V and p != 1}
+        job = (V, base, [drive(9)], [drive(12)], [20, 21, 22, 23])
+        _, flags = rig.transitions(*job, chk=True, avoid={5: 0})
+        self.assertIn((10, (21,)), flags)
+        self.assertTrue(all(set(pins) <= {20, 21} for _, pins in flags))
+        _, flags = rig.transitions(*job, chk=True, avoid={5: 0}, nochk=[20, 21])
+        self.assertEqual(flags, [])
+        t = self.transport("cnt16v8", "dip20")
+        t.command("pld capture clear")
+        t.command("pld capture set pins=6 clk=1 psig=1")
+        self.assertIn("psig needs probe vectors", self._walk_error(t))
 
     def test_mixed_gray_walk(self):
         """The firmware walks a mixed Gray code in the order rig.gray_order

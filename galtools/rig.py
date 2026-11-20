@@ -8,7 +8,7 @@ pin 1, starting from power-up.  Every signal pin is driven weakly (1K), so
 a pin the GAL does not drive reads back its drive.
 
     walk(V, base, path, mul=1, rev=0, probes=(), cand=(), gray=0, start=0,
-         skip=None, avoid=None, data=True, rot=0, mix=0)
+         skip=None, avoid=None, data=True, rot=0, mix=0, psig=False, also=())
         From the path state, for every assignment x of the enumerated pins V
         (bit b of x = pin V[b]; the other pins at base, pin 1 low) read every
         pin, and again with every pin outside V inverted, except pin 1 and
@@ -31,7 +31,8 @@ a pin the GAL does not drive reads back its drive.
         the level it begins at), and the chip is clocked whenever the walk
         raises it.
     transitions(V, base, path, probes, cand, count=None, mul=1, returns=(),
-                avoid=None, chk=False, ignore=(), pre=False)
+                avoid=None, chk=False, ignore=(), pre=False, psig=False,
+                also=(), nochk=())
         For each x (all, or (i * mul) mod 2^n for i < count): from the path
         state, clock x in and observe the new state: for each probe drive
         (pin 1 low), per candidate pin c, (level of c, level of c with only
@@ -50,6 +51,15 @@ a pin the GAL does not drive reads back its drive.
 avoid (a cube, like skip) makes every write go around it: no momentary mix
 of old and new pin values on the way to a vector lies in it (fw/capture.c,
 Avoid).  The analysis passes the asynchronous reset term's inputs.
+
+psig: where a clock edge leads may depend on a latch, and the latch on the
+writes since the edge before, which the reads of a state's observation are
+part of.  With psig (and probes), power-up and every clocked step, of a
+path as of a sweep, are followed by the same reads (fw/capture.c, psig),
+so that a path leads to the state that the sweep saw.  also: pins whose
+levels at the end of those reads are added to every observation, as one
+more tuple (the latches: they tell states with the same registers apart).
+nochk: pins that do not flag a vector, though they are read.
 
 SimRig simulates a JED; BrutusRig drives a real Brutus-28.  Both count
 the board work in .ops.
@@ -330,13 +340,13 @@ class SimRig:
         return ext
 
     def walk(self, V, base, path, mul=1, rev=0, probes=(), cand=(), gray=0, start=0,
-             skip=None, avoid=None, data=True, rot=0, mix=0):
-        if not self.fw and CLOCK in V and self.q0:
+             skip=None, avoid=None, data=True, rot=0, mix=0, psig=False, also=()):
+        if not self.fw and (psig or CLOCK in V and self.q0):
             self._firmware()          # the walk clocks the registers
         if self.fw:
             return self.fw.walk(V, base, path, mul=mul, rev=rev, probes=probes, cand=cand,
                                 gray=gray, start=start, skip=skip, avoid=avoid, data=data,
-                                rot=rot, mix=mix)
+                                rot=rot, mix=mix, psig=psig, also=also)
         self._replay(path)
         n = len(V)
         full, v1 = litmasks(n)
@@ -371,11 +381,14 @@ class SimRig:
         return la, lb, sigs
 
     def transitions(self, V, base, path, probes, cand, count=None, mul=1, returns=(),
-                    avoid=None, chk=False, ignore=(), pre=False):
+                    avoid=None, chk=False, ignore=(), pre=False, psig=False, also=(),
+                    nochk=()):
+        if psig and not self.fw:
+            self._firmware()
         if self.fw:
             return self.fw.transitions(V, base, path, probes, cand, count=count, mul=mul,
                                        returns=returns, avoid=avoid, chk=chk, ignore=ignore,
-                                       pre=pre)
+                                       pre=pre, psig=psig, also=also, nochk=nochk)
         self._replay(path)
         q0 = dict(self.q)
         n = len(V)
@@ -564,7 +577,7 @@ class BrutusRig:
 
     def _job(self, V, base, path, probes, cand, inv=0, count=None, mul=1, returns=(), rev=0,
              gray=0, start=0, skip=None, avoid=None, quiet=False, chk=False, rot=0,
-             ignore=(), pre=False, mix=0):
+             ignore=(), pre=False, mix=0, psig=False, nochk=()):
         if list(V) != sorted(V):
             raise ValueError("enumerated pins must be in ascending order")
         if len(cand) > MAX_CAND:
@@ -599,6 +612,17 @@ class BrutusRig:
             extra.append("pre=1")
         if extra:
             self._cmd("pld capture set " + " ".join(extra))
+        new = []
+        if psig:
+            new.append("psig=1")
+        if nochk:
+            new.append("chkm=%x" % (self.readmask & ~self._mask(ignore) & ~self._mask(nochk)))
+        if new:
+            try:
+                self._cmd("pld capture set " + " ".join(new))
+            except CaptureError as e:
+                raise CaptureError("%s\n(this firmware does not read a state after every "
+                                   "clocked step: install the one from the same commit)" % e)
         self._list("path", [self._vec(d) for d in path], MAX_PATH)
         self._list("probe", [self._vec(d) for d in probes], MAX_PROBES)
         nret = 0
@@ -680,22 +704,26 @@ class BrutusRig:
                 out[p] = int(s[::-1], 2) if s else 0
         return out
 
-    def _obs(self, reads, probes, cand):
-        """The observation of a signature's reads; remembers its CRC."""
+    def _obs(self, reads, probes, cand, also=()):
+        """The observation of a signature's reads; remembers its CRC.
+        also: pins whose levels at the last read are one more tuple."""
         per = 1 + len(cand)
         o = tuple(tuple((int((reads[i * per] & self.sbit[c]) != 0),
                          int((reads[i * per + 1 + j] & self.sbit[c]) != 0))
                         for j, c in enumerate(cand))
                   for i in range(len(probes)))
+        if also:
+            o += (tuple(int((reads[-1] & self.sbit[c]) != 0) for c in also),)
         self.crcs.setdefault(o, set()).add(zlib.crc32(struct.pack("<%dI" % len(reads), *reads)))
         return o
 
     def walk(self, V, base, path, mul=1, rev=0, probes=(), cand=(), gray=0, start=0,
-             skip=None, avoid=None, data=True, rot=0, mix=0):
+             skip=None, avoid=None, data=True, rot=0, mix=0, psig=False, also=()):
         inv = self._mask([p for p in self.pins
                           if p not in V and p != CLOCK and p not in base]) if data else 0
         self._job(V, base, path, probes, cand, inv=inv, mul=mul, rev=rev, gray=gray,
-                  start=start, skip=skip, avoid=avoid, quiet=not data, rot=rot, mix=mix)
+                  start=start, skip=skip, avoid=avoid, quiet=not data, rot=rot, mix=mix,
+                  psig=psig)
         cap = self._run("walk")
         n = len(V)
         reads = 2 if inv else 1             # no second read when nothing is inverted
@@ -705,8 +733,10 @@ class BrutusRig:
         if probes:
             if len(cap.sigs) != 2:
                 raise CaptureError("walk returned %d signatures, not 2" % len(cap.sigs))
-            sigs = tuple(self._obs(list(r), probes, cand) for r in cap.sigs)
+            sigs = tuple(self._obs(list(r), probes, cand, also) for r in cap.sigs)
         self.ops["io"] += 2 * len(path) + (reads << n) + 2 * cap.sig_reads
+        if psig:
+            self.ops["io"] += (1 + len(path)) * (2 + 2 * cap.sig_reads) - cap.sig_reads
         self.ops["clocks"] += len(path)
         if not data:
             return None, None, sigs
@@ -715,13 +745,14 @@ class BrutusRig:
         return la, lb, sigs
 
     def transitions(self, V, base, path, probes, cand, count=None, mul=1, returns=(),
-                    avoid=None, chk=False, ignore=(), pre=False):
+                    avoid=None, chk=False, ignore=(), pre=False, psig=False, also=(),
+                    nochk=()):
         n = len(V)
         self._job(V, base, path, probes, cand, count=count, mul=mul, returns=returns,
-                  avoid=avoid, chk=chk, ignore=ignore, pre=pre)
+                  avoid=avoid, chk=chk, ignore=ignore, pre=pre, psig=psig, nochk=nochk)
         cap = self._run("trans")
         nsig = cap.sig_reads
-        self._obs(cap.sigs[0], probes, cand)          # the path state itself
+        self._obs(cap.sigs[0], probes, cand, also)    # the path state itself
         data = cap.data
         N = 1 << n
         defs, maps = [], []
@@ -733,7 +764,7 @@ class BrutusRig:
             if k == len(defs):
                 reads = struct.unpack_from("<%dI" % nsig, data, pos)
                 pos += 4 * nsig
-                defs.append(self._obs(list(reads), probes, cand))
+                defs.append(self._obs(list(reads), probes, cand, also))
                 maps.append(bytearray((N + 7) // 8))
             x = (i * mul) & (N - 1)
             maps[k][x >> 3] |= 1 << (x & 7)
@@ -743,7 +774,7 @@ class BrutusRig:
         out = {}
         for o, bm in zip(defs, maps):
             out[o] = out.get(o, 0) | int.from_bytes(bm, "little")
-        self.ops["io"] += cap.count * (2 + nsig + (2 if chk else 0))
+        self.ops["io"] += cap.count * (2 + nsig + (2 + nsig if psig else 2 if chk else 0))
         self.ops["clocks"] += cap.count
         flags = [(x, tuple(p for p in self.pins if d & self.sbit[p])) for x, d in cap.flags]
         if pre:
@@ -764,7 +795,10 @@ def _enc(v):
 
 
 def _dec_obs(o):
-    return tuple(tuple((int(a, 16), int(b, 16)) for a, b in pr) for pr in o)
+    """An observation: per probe the candidates' (level, level with the
+    drive inverted); with also, one more tuple of plain levels."""
+    return tuple(tuple(int(a, 16) for a in pr) if pr and isinstance(pr[0], str)
+                 else tuple((int(a, 16), int(b, 16)) for a, b in pr) for pr in o)
 
 
 def _key(op, V, base, path, probes=(), cand=(), count=None, mul=1, **opts):
@@ -802,12 +836,13 @@ class RecordingRig:
         self.f.close()
 
     def walk(self, V, base, path, mul=1, rev=0, probes=(), cand=(), gray=0, start=0,
-             skip=None, avoid=None, data=True, rot=0, mix=0):
+             skip=None, avoid=None, data=True, rot=0, mix=0, psig=False, also=()):
         la, lb, sigs = self.rig.walk(V, base, path, mul=mul, rev=rev, probes=probes, cand=cand,
                                      gray=gray, start=start, skip=skip, avoid=avoid, data=data,
-                                     rot=rot, mix=mix)
+                                     rot=rot, mix=mix, psig=psig, also=also)
         rec = {"key": _key("walk", V, base, path, probes, cand, None, mul, rev=rev, gray=gray,
-                           start=start, skip=skip, avoid=avoid, data=data, rot=rot, mix=mix)}
+                           start=start, skip=skip, avoid=avoid, data=data, rot=rot, mix=mix,
+                           psig=psig, also=list(also))}
         if data:
             rec["la"], rec["lb"] = _enc(la), _enc(lb)
         if sigs is not None:
@@ -817,12 +852,15 @@ class RecordingRig:
         return la, lb, sigs
 
     def transitions(self, V, base, path, probes, cand, count=None, mul=1, returns=(),
-                    avoid=None, chk=False, ignore=(), pre=False):
+                    avoid=None, chk=False, ignore=(), pre=False, psig=False, also=(),
+                    nochk=()):
         res = self.rig.transitions(V, base, path, probes, cand, count=count, mul=mul,
-                                   returns=returns, avoid=avoid, chk=chk, ignore=ignore, pre=pre)
+                                   returns=returns, avoid=avoid, chk=chk, ignore=ignore, pre=pre,
+                                   psig=psig, also=also, nochk=nochk)
         out, flags = res[0], res[1]
         rec = {"key": _key("trans", V, base, path, probes, cand, count, mul, avoid=avoid,
-                           chk=chk, ignore=list(ignore), pre=pre),
+                           chk=chk, ignore=list(ignore), pre=pre, psig=psig, also=list(also),
+                           nochk=list(nochk)),
                "out": [[_enc(o), "%x" % xs] for o, xs in out.items()]}
         if flags:
             rec["flags"] = _enc(flags)
@@ -867,10 +905,10 @@ class ReplayRig:
         return recs[min(k, len(recs) - 1)]
 
     def walk(self, V, base, path, mul=1, rev=0, probes=(), cand=(), gray=0, start=0,
-             skip=None, avoid=None, data=True, rot=0, mix=0):
+             skip=None, avoid=None, data=True, rot=0, mix=0, psig=False, also=()):
         rec = self._next(_key("walk", V, base, path, probes, cand, None, mul, rev=rev,
                                gray=gray, start=start, skip=skip, avoid=avoid, data=data,
-                               rot=rot, mix=mix))
+                               rot=rot, mix=mix, psig=psig, also=list(also)))
         if rec is None:
             raise CaptureError("walk not in the recording; rerun on the board")
         sigs = tuple(_dec_obs(o) for o in rec["sigs"]) if "sigs" in rec else None
@@ -880,9 +918,11 @@ class ReplayRig:
                 {int(p): int(v, 16) for p, v in rec["lb"].items()}, sigs)
 
     def transitions(self, V, base, path, probes, cand, count=None, mul=1, returns=(),
-                    avoid=None, chk=False, ignore=(), pre=False):
+                    avoid=None, chk=False, ignore=(), pre=False, psig=False, also=(),
+                    nochk=()):
         rec = self._next(_key("trans", V, base, path, probes, cand, count, mul, avoid=avoid,
-                               chk=chk, ignore=list(ignore), pre=pre))
+                               chk=chk, ignore=list(ignore), pre=pre, psig=psig,
+                               also=list(also), nochk=list(nochk)))
         if rec is None:
             raise CaptureError("transitions not in the recording; rerun on the board")
         flags = [(int(f, 16), ()) if isinstance(f, str)       # recorded before the pins

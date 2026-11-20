@@ -172,6 +172,8 @@ class RegLatchAnalysis(Analysis):
         self._tabs = {}
         self.deep = False         # every readable output is a variable, not only the latches
         self.oe_held = None       # a registered GAL16V8's pin 11, held low for the walks
+        self.composite = False    # explore by register values and latch levels together
+        self.var = []             # per state: its sweeps with the latches at other levels
 
     # 1. exploration without the pins that change without a clock ------------
     def _history(self, pins, err):
@@ -191,6 +193,38 @@ class RegLatchAnalysis(Analysis):
 
     def _history_dependent(self, pins, err):
         self._history(pins, err)
+
+    def discover(self):
+        super().discover()
+        self.lsig = tuple(sorted(self.hist)) if self.composite else ()
+
+    def _by_latches(self, msg, sure=True):
+        """Where a clock edge leads depends on a latch, and the latch on
+        the way the chip came to the state: two ways to the same register
+        values leave it at different levels.  Explore again with the
+        latch levels as part of the state (Analysis._wctx), each state
+        reached by its own path.  False if that is how it was explored,
+        or if there are no clocked states to explore.
+
+        Not sure: the latches' circuit does not come out.  A register
+        that loads only with a latch set may never have changed in the
+        sweeps, and passed for a constant output."""
+        if self.composite or not (self.mixed and self.hist and self.probe_x):
+            return False
+        self.composite = True
+        self.deep = False
+        if sure:
+            self.log("asynchronous behaviour: %s" % msg)
+        self.log("%s: exploring again by the registers and the levels of %s together" % (
+            "where a clock edge leads depends on a latch" if sure else
+            "a clock edge may go another way with a latch at another level",
+            _pins(sorted(self.hist))))
+        return True
+
+    def _unrepeatable(self, msg):
+        if self._by_latches(msg):
+            raise _Restart()
+        raise AsyncDesign(msg)
 
     def _no_register(self, r, msg):
         """A pin that the sweeps took for a register does not follow the
@@ -291,6 +325,16 @@ class RegLatchAnalysis(Analysis):
         self.widx = {self.W[s]: i for i, s in enumerate(self.S)}
         # the outputs' levels each x was clocked in with, in each state's sweep
         self.prek = [self._pack(self.pre[s], N) if s in self.pre else None for s in self.S]
+        # and in its sweeps with the latches at other levels: (levels, next states)
+        self.var = [[] for _ in self.S]
+        for s, vs in self.cvar.items():
+            for _, _, tr, pre in vs:
+                if pre is None:
+                    continue
+                acc = 0
+                for s2, xs in tr.items():
+                    acc += (self.sidx[s2] + 1) * _cells(xs, N)
+                self.var[self.sidx[s]].append((self._pack(pre, N), _states(acc, N)))
         self.rise, self._dtab = {}, None
         self.extra, self.split, self.stuck, self._lkey = {}, set(), set(), None
 
@@ -305,9 +349,10 @@ class RegLatchAnalysis(Analysis):
             out.append(acc.to_bytes(N, "little"))
         return out
 
-    def _table_walk(self, s):
+    def _table_walk(self, s, t=None):
         """A state's exhaustive walk (pin 1 low) as resting points."""
-        _, t = self.states[s]
+        if t is None:
+            _, t = self.states[s]
         w = _Walk(("table", self.sidx[s]), {p: _spread(v) for p, v in t.la.items()},
                   {p: _spread(v) for p, v in t.lb.items()})
         w.smask = {self.sidx[s]: _spread(t.walked)}
@@ -323,7 +368,7 @@ class RegLatchAnalysis(Analysis):
         out = []
         for s, (path, _) in self.states.items():
             a = self.sidx[s]
-            start = (path[-1] << 1 | 1) if path else 0
+            start = self._left_at(path)
             mode = self.AROUND if path and self.fire[a] else self.PLAIN
             out += [(a, 1, 0, start, mode, 0), (a, 0, 1, start, mode, 0)]     # pin 1 slowest
             out.append((a, 0, 0, start, self.AVOID if self.ar and path else self.PLAIN, 1 + a))
@@ -334,6 +379,19 @@ class RegLatchAnalysis(Analysis):
                     out.append((self.s0, r, v, 0, self.PLAIN, 0))
         out += [(self.s0, 0, 0, 0, self.PLAIN, 0x1000 + k) for k in (1, 2, 3)]
         return out
+
+    def _left_at(self, path):
+        """The vector (pin 1 and the enumerated pins) at which the chip
+        is before a walk from the state at the end of path: the path's
+        last vector with pin 1 high; or, when every clocked step is
+        followed by the signature reads (_wctx), their last vector, the
+        last probe with the last candidate's drive inverted, pin 1 low."""
+        if self._wctx():
+            x = self.probe_x[-1]
+            if self.cand[-1] in self.V:
+                x ^= 1 << self.V.index(self.cand[-1])
+            return x << 1
+        return (path[-1] << 1 | 1) if path else 0
 
     def _need(self):
         """How many check walks in a row the learned circuit must predict:
@@ -351,7 +409,7 @@ class RegLatchAnalysis(Analysis):
             a = k % len(self.S)
             path = self.states[self.S[a]][0]
             start = (k * mul) & mask
-            start = start | 1 if path else start & ~1
+            start = start | 1 if self._left_at(path) & 1 else start & ~1
             yield (a, (k * 3) % n1, k & 1, start,
                    self.AVOID if self.ar and path else self.PLAIN, 0x2000 + k)
 
@@ -362,6 +420,7 @@ class RegLatchAnalysis(Analysis):
             kw = dict(skip=self.ar, avoid=self.ar)
         elif mode == self.AVOID:
             kw = dict(avoid=self.ar)
+        kw.update(self._wctx())
         la, lb, _ = self.rig.walk(self.Vc, self.base, self.drives(path), gray=1, rot=rot,
                                   rev=rev, start=start, mix=mix, **kw)
         w = _Walk((a, rot, rev, start, mode, mix), la, lb)
@@ -470,7 +529,7 @@ class RegLatchAnalysis(Analysis):
         w.cut, w.unsure, w.surprises = None, 0, 0
         n = len(vecs)
         i, a = 0, a0
-        pxp = (path[-1] << 1 | 1) if path else 0
+        pxp = self._left_at(path)
         last_ok = [-1] * len(regs)
         edge = -1             # the step of the last clock edge
         while i < n:
@@ -498,6 +557,11 @@ class RegLatchAnalysis(Analysis):
                         a2 = nxt[b][x] - 1
                     else:
                         a2 = self.rise.get((b, x, kb))
+                        if a2 is None:
+                            for vk, vn in self.var[b]:
+                                if vn[x] and all(vk[c][x] == kb[c] for c in nk):
+                                    a2 = vn[x] - 1          # as in another sweep of the state
+                                    break
                         if a2 is None:
                             a2 = self._guess(b, x, kb)
                             fix[i] = [a2, set(), self._dtab is not None]
@@ -544,12 +608,25 @@ class RegLatchAnalysis(Analysis):
                     wn[regs[j][0]] = lvl[j][xp]
                 a2 = self.widx.get(tuple(wn))
                 if a2 is None:
-                    raise AsyncDesign(
-                        "clocking %s in from state %s with a latch at another level than in "
-                        "the sweeps leads to a state the sweeps did not find (registers at "
-                        "%s): galre does not explore states that are reached only that "
-                        "way" % (self._inputs(x), _state(self.S[t[4][0]]),
-                                 "".join(map(str, wn))))
+                    # A register that does not show in a state (its enable is
+                    # off there) has an assumed value in it, which the guess
+                    # need not share: the state that agrees in every other
+                    # register, if it is the only one.
+                    seen = {regs[j][0] for j in nr if drv[j][xp]}
+                    hid = [{i for i, r in enumerate(sorted(self.reg))
+                            if s[self.cand.index(r)] == "Z" and i not in seen} for s in self.S]
+                    near = [k for k, s in enumerate(self.S) if hid[k] and all(
+                        v == wn[i] for i, v in enumerate(self.W[s]) if i not in hid[k])]
+                    if len(near) == 1:
+                        a2 = near[0]
+                if a2 is None:
+                    msg = ("clocking %s in from state %s with a latch at another level than in "
+                           "the sweeps leads to a state the sweeps did not find (registers at "
+                           "%s)" % (self._inputs(x), _state(self.S[t[4][0]]),
+                                    "".join(map(str, wn))))
+                    if self._by_latches(msg):
+                        raise _Again()
+                    raise AsyncDesign(msg + ": no sequence of clocked vectors leads there")
                 if f[2]:
                     w.surprises += 1
                 f[0] = a2
@@ -1034,6 +1111,8 @@ class RegLatchAnalysis(Analysis):
         if self.n1 < 3:
             raise AsyncDesign("too few inputs to walk in different orders")
         self.lwalks = [self._table_walk(s) for s in self.states]
+        self.lwalks += [self._table_walk(s, t) for s, vs in self.cvar.items()
+                        for _, t, _, _ in vs]
         for w in self.lwalks:
             self._let_go(w)
         self.log("registers %s; walking pin 1 with the inputs%s" % (
@@ -1050,6 +1129,8 @@ class RegLatchAnalysis(Analysis):
             raise AsyncDesign("with every output pin as a signal of its own: %s" % e)
         except AsyncDesign as e:
             if self.deep or not self._deep_fits():
+                if self._by_latches(str(e)):
+                    raise _Again()
                 raise
             # Not a circuit in which only the latches are signals with a
             # delay.  Every output's pin is one, and other outputs may read
@@ -1066,6 +1147,8 @@ class RegLatchAnalysis(Analysis):
                 raise
             except (AsyncDesign, RuntimeError, OverflowError) as e2:
                 self.log("that does not explain the chip either: %s" % e2)
+                if self._by_latches(str(e), sure=False):
+                    raise _Again()
                 raise e from None
 
     def _converge(self):
@@ -1151,11 +1234,15 @@ class RegLatchAnalysis(Analysis):
     def _dcontexts(self):
         """Clock edges by context: [(state index, latch levels, next state
         index, x)], from the sweeps (with the latch levels each x was
-        clocked in with) and from the walks."""
+        clocked in with; also those taken with the latches left at other
+        levels, cvar) and from the walks."""
         out = []
         lvs = range(1 << len(self.L))
-        for s, m in self.trans.items():
-            a, pre = self.sidx[s], self.pre.get(s)
+        sweeps = [(s, m, self.pre.get(s)) for s, m in self.trans.items()]
+        sweeps += [(s, tr, pre) for s, vs in self.cvar.items()
+                   for _, _, tr, pre in vs if pre is not None]
+        for s, m, pre in sweeps:
+            a = self.sidx[s]
             for s2, xs in m.items():
                 if s in self.ar_dc:
                     xs &= ~self.ar_set            # the reset decides there

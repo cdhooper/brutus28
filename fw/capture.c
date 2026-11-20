@@ -83,6 +83,17 @@
  *        levels that the registers load from, for a register input that
  *        reads a latch.
  * state  Report the signature of the path state.
+ * psig:  Where a clock edge leads may depend on a latch, and the latch on
+ *        the writes since the edge before: the signature reads move the
+ *        inputs.  With psig set, power-up and every clocked step (of the
+ *        path, of a return path, of trans) are followed by the same
+ *        writes: the step's vector with the clock low, the signature,
+ *        the vector again, the signature again.  So a step leaves the
+ *        latches the same way wherever it is taken, and a path leads to
+ *        the state that the sweep saw.  The second signature is the
+ *        state's: trans, walk and state report it without reading again.
+ *        With chk, trans flags the x whose two reads of the vector
+ *        differ; chkm (if not 0) limits that to its pins.
  * Avoid: with avm set, every write takes care never to pass through a
  *        vector v with (v & avm) == avv on the way, although the socket
  *        pins are written in three port writes (CAP_PORT_GROUPS): the
@@ -162,6 +173,8 @@ static struct {
     uint32_t  avv;
     uint32_t  quiet;        /* walk: report the signatures only */
     uint32_t  chk;          /* trans: flag x whose state the signature changed */
+    uint32_t  chkm;         /* trans: the pins that count for chk (0: all read) */
+    uint32_t  psig;         /* steps: followed by the signature reads */
     uint32_t  pre;          /* trans: report the read before the clock edge */
     uint32_t  follow;       /* steps: drive the read levels before the edge */
     uint32_t  dclk;         /* clock pins driven directly, not through 1K */
@@ -199,7 +212,7 @@ const char cmd_pld_capture_help[] =
 "pld capture clear              - reset the job to defaults\n"
 "pld capture set <key>=<value>  - pins base inv clk cand mask count mul rev\n"
 "                                 gray mix rot start skm skv avm avv quiet\n"
-"                                 chk\n"
+"                                 chk chkm psig\n"
 "                                 pre follow dclk vcc gnd (hex)\n"
 "                                 settle (usec) off on (msec) supply (mV)\n"
 "pld capture path [+] <v>...    - clocked vectors from power-up to the state\n"
@@ -452,21 +465,6 @@ cap_step(uint32_t v)
     (void) cap_io(v | cap.clk);
 }
 
-static void
-cap_power_up(uint off_msec)
-{
-    uint i;
-
-    cap_hw_power(0);
-    cap_hw_delay_msec(off_msec);
-    cap_hw_direct(cap.dclk ? cap.clk : 0);
-    cap_hw_power(1);                     /* drives every pin low */
-    cap_last = 0;
-    cap_hw_delay_msec(cap.on_msec);
-    for (i = 0; i < cap.npath; i++)
-        cap_step(cap.path[i]);
-}
-
 static uint
 cap_signature(uint32_t *r)
 {
@@ -482,6 +480,44 @@ cap_signature(uint32_t *r)
             r[n++] = cap_io(w ^ (c & -c));
     }
     return (n);
+}
+
+/*
+ * What follows power-up and every clocked step with psig: v with the
+ * clock low, the signature, v again, the signature again (in cap_cur).
+ * Returns the pins that read differently at v before and after the first
+ * signature.
+ */
+static uint32_t
+cap_after_step(uint32_t v)
+{
+    uint32_t r1 = cap_io(v & ~cap.clk);
+    uint32_t r2;
+
+    (void) cap_signature(cap_cur);
+    r2 = cap_io(v & ~cap.clk);
+    (void) cap_signature(cap_cur);
+    return (r1 ^ r2);
+}
+
+static void
+cap_power_up(uint off_msec)
+{
+    uint i;
+
+    cap_hw_power(0);
+    cap_hw_delay_msec(off_msec);
+    cap_hw_direct(cap.dclk ? cap.clk : 0);
+    cap_hw_power(1);                     /* drives every pin low */
+    cap_last = 0;
+    cap_hw_delay_msec(cap.on_msec);
+    if (cap.psig)
+        (void) cap_after_step(cap.base & ~cap.pins);
+    for (i = 0; i < cap.npath; i++) {
+        cap_step(cap.path[i]);
+        if (cap.psig)
+            (void) cap_after_step(cap.path[i]);
+    }
 }
 
 static uint32_t
@@ -523,9 +559,13 @@ cap_restore(uint32_t crc, uint nreads)
     for (k = 0; k < cap.nret; k++) {
         if (cap.ret[k].crc != crc)
             continue;
-        for (i = 0; i < cap.ret[k].len; i++)
+        for (i = 0; i < cap.ret[k].len; i++) {
             cap_step(cap.ret[k].vec[i]);
-        cap_signature(cap_cur);
+            if (cap.psig)
+                (void) cap_after_step(cap.ret[k].vec[i]);
+        }
+        if (!cap.psig)
+            cap_signature(cap_cur);
         if (memcmp(cap_cur, cap_ref, nreads * 4) == 0) {
             cap_ret_ok++;
             return (0);
@@ -535,7 +575,8 @@ cap_restore(uint32_t crc, uint nreads)
     }
     for (i = 0; i < 2; i++) {
         cap_power_up((i == 0) ? cap.off_msec : cap.off_msec * 10);
-        cap_signature(cap_cur);
+        if (!cap.psig)
+            cap_signature(cap_cur);
         if (memcmp(cap_cur, cap_ref, nreads * 4) == 0) {
             cap_pcycles++;
             return (0);
@@ -731,6 +772,10 @@ cap_walk(void)
         printf("walk: mix needs gray\n");
         return (RC_BAD_PARAM);
     }
+    if (cap.psig && (cap.nprobe == 0)) {
+        printf("walk: psig needs probe vectors\n");
+        return (RC_BAD_PARAM);
+    }
     if ((rc = cap_preflight()) != RC_SUCCESS)
         return (rc);
     if (cap.mix != 0)
@@ -739,7 +784,10 @@ cap_walk(void)
               1UL << nbits);
     cap_power_up(cap.off_msec);
     if (cap.nprobe != 0) {
-        cap_signature(cap_ref);
+        if (cap.psig)
+            memcpy(cap_ref, cap_cur, sig_reads * 4);
+        else
+            cap_signature(cap_ref);
         cap_put_reads('P', cap_ref, sig_reads);
         cap_flush();
     }
@@ -823,7 +871,10 @@ cap_trans(void)
         return (rc);
     cap_begin('T', 0, nreads, nbits, count);
     cap_power_up(cap.off_msec);
-    cap_signature(cap_ref);
+    if (cap.psig)
+        memcpy(cap_ref, cap_cur, nreads * 4);
+    else
+        cap_signature(cap_ref);
     cap_put_reads('P', cap_ref, nreads);
     cap_flush();
 
@@ -838,16 +889,20 @@ cap_trans(void)
 
         cap_step(w);
         pre = cap_pre;
-        if (cap.chk)
-            r1 = cap_io(w & ~cap.clk);
-        cap_signature(cap_cur);
-        if (cap.chk) {
-            uint32_t r2 = cap_io(w & ~cap.clk);
-
-            if ((r2 != r1) && (nflags++ < CAP_MAX_FLAGS)) {
-                cap_put32('F', x);
-                cap_put32('F', r1 ^ r2);
-            }
+        if (cap.psig) {
+            r1 = cap_after_step(w);
+        } else {
+            if (cap.chk)
+                r1 = cap_io(w & ~cap.clk);
+            cap_signature(cap_cur);
+            if (cap.chk)
+                r1 ^= cap_io(w & ~cap.clk);
+        }
+        if (cap.chkm != 0)
+            r1 &= cap.chkm;
+        if (cap.chk && (r1 != 0) && (nflags++ < CAP_MAX_FLAGS)) {
+            cap_put32('F', x);
+            cap_put32('F', r1);
         }
         crc = cap_crc32_words(cap_cur, nreads);
         for (k = 0; k < nsigs; k++)
@@ -896,7 +951,8 @@ cap_state(void)
         return (rc);
     cap_begin('S', 0, nreads, cap_popcount(cap.pins), 1);
     cap_power_up(cap.off_msec);
-    cap_signature(cap_cur);
+    if (!cap.psig)
+        cap_signature(cap_cur);
     cap_put_reads('P', cap_cur, nreads);
     cap_done = 1;
     return (cap_end(CAP_STATUS_OK));
@@ -985,6 +1041,8 @@ cap_set(int argc, char * const *argv)
         { "avv",    &cap.avv,   NULL },
         { "quiet",  &cap.quiet, NULL },
         { "chk",    &cap.chk,   NULL },
+        { "chkm",   &cap.chkm,  NULL },
+        { "psig",   &cap.psig,  NULL },
         { "pre",    &cap.pre,   NULL },
         { "follow", &cap.follow, NULL },
         { "dclk",   &cap.dclk,  NULL },
@@ -1106,7 +1164,7 @@ cap_show(void)
            "mask=%07lx\ncount=%lx mul=%lx rev=%lx gray=%lx mix=%lx rot=%lx "
            "start=%07lx\n"
            "skm=%07lx skv=%07lx avm=%07lx avv=%07lx quiet=%lx chk=%lx\n"
-           "pre=%lx follow=%lx dclk=%lx\n"
+           "chkm=%07lx psig=%lx pre=%lx follow=%lx dclk=%lx\n"
            "settle=%u off=%u on=%u vcc=%07lx gnd=%07lx supply=%u\n",
            (unsigned long) cap.pins, (unsigned long) cap.base,
            (unsigned long) cap.inv, (unsigned long) cap.clk,
@@ -1117,7 +1175,8 @@ cap_show(void)
            (unsigned long) cap.start, (unsigned long) cap.skm,
            (unsigned long) cap.skv, (unsigned long) cap.avm,
            (unsigned long) cap.avv, (unsigned long) cap.quiet,
-           (unsigned long) cap.chk, (unsigned long) cap.pre,
+           (unsigned long) cap.chk, (unsigned long) cap.chkm,
+           (unsigned long) cap.psig, (unsigned long) cap.pre,
            (unsigned long) cap.follow,
            (unsigned long) cap.dclk, cap.settle_usec, cap.off_msec,
            cap.on_msec, (unsigned long) cap.vcc, (unsigned long) cap.gnd,

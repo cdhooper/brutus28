@@ -362,7 +362,9 @@ def _pins(ps):
 
 
 def _state(s):
-    return "".join(map(str, s))
+    """A state as text: the candidates' values, then (after a slash) the
+    levels of the latch pins that are part of it."""
+    return "".join("/" + "".join(map(str, v)) if isinstance(v, tuple) else str(v) for v in s)
 
 
 def _cube(c, name):
@@ -416,6 +418,10 @@ class Analysis:
         self.ar_set = 0           # the x in it
         self.ar_cand = []         # its pins that would be state candidates
         self.oe_const = []        # registers with a constant input (reglatch, pin 11 held)
+        self.lsig = ()            # latch pins whose levels are part of a state (reglatch)
+        self.cvar = {}            # state -> its sweeps with the latches at other levels
+        self.cmap = {}            # state -> the state with latch levels that stands for it
+        self._wsig = {}
         self.ar_on = set()        # states in which it fires
         self.ar_regs = {}         # its register literals, register pin -> value
         self.ar_dc = set()
@@ -531,7 +537,7 @@ class Analysis:
     def _disturbed(self, path, sigs, around=False):
         before, after = (self._sig_obs(o) for o in sigs)
         if (not around and self.ar is None and self.device == "GAL22V10"
-                and after == self.power_up_state):
+                and self._reg(after) == self._reg(self.power_up_state)):
             self._learn_ar(path)
         raise AsyncDesign(
             "walking the inputs in state %s (%d clocks from power-up)%s changed it to %s: the "
@@ -662,17 +668,51 @@ class Analysis:
         return added
 
     # 2. exploration ---------------------------------------------------------
+    # With lsig, a state is the candidates' values and the levels of the
+    # latch pins (RegLatchAnalysis, where a clock edge goes one way or
+    # another by a latch).  The chip is then left the same way after
+    # every clocked step, in a path as in a sweep (rig, psig), and an
+    # observation ends with the latch levels.
+    def _wctx(self):
+        """Options of a walk from a state, with lsig."""
+        if self.lsig and self.probe_x:
+            return dict(probes=self.probes(), cand=self.cand, psig=True, also=self.lsig)
+        return {}
+
+    def _tctx(self):
+        """Options of a sweep: the latch pins are left out of the reads,
+        or with lsig read, without flagging a vector."""
+        if self.lsig and self.probe_x:
+            return dict(psig=True, also=self.lsig, nochk=sorted(self.hist))
+        return dict(ignore=sorted(self.hist))
+
+    def _reg(self, s):
+        """A state without the latch levels."""
+        return s[:len(self.cand)]
+
+    def _robs(self, obs):
+        """An observation without the latch levels."""
+        return obs[:len(self.probe_x)]
+
     def _sig_obs(self, obs):
+        tail = obs[len(self.probe_x):] if self.lsig else ()
         sig = []
         for i, r in enumerate(self.cand):
             v = "Z"
-            for pr in obs:
+            for pr in self._robs(obs) if tail else obs:
                 a, b = pr[i]
                 if a == b:
                     v = a
                     break
             sig.append(v)
-        return tuple(sig)
+        return tuple(sig) + tail
+
+    def _sig_path(self, path, t):
+        """The state at the end of path, from its table and (with lsig)
+        the observation before its walk."""
+        obs = self._wsig.get(path)
+        tail = obs[len(self.probe_x):] if obs and self.lsig else ()
+        return self._sig_table(t) + tail
 
     def _sig_table(self, t):
         sig = []
@@ -696,17 +736,19 @@ class Analysis:
             care = None
             if path and self.probe_x:
                 drives = self.drives(path)
-                la, lb, sigs = self.rig.walk(self.V, self.base, drives, probes=self.probes(),
-                                             cand=self.cand, avoid=self.ar)
-                if sigs[0] != sigs[1]:
-                    if not self.ar or self._sig_obs(sigs[1]) != self.power_up_state:
+                kw = self._wctx() or dict(probes=self.probes(), cand=self.cand)
+                la, lb, sigs = self.rig.walk(self.V, self.base, drives, avoid=self.ar, **kw)
+                if self._robs(sigs[0]) != self._robs(sigs[1]):
+                    if not self.ar or (self._reg(self._sig_obs(sigs[1]))
+                                       != self._reg(self.power_up_state)):
                         self._disturbed(path, sigs)
-                    la, lb, sigs = self.rig.walk(self.V, self.base, drives, probes=self.probes(),
-                                                 cand=self.cand, skip=self.ar, avoid=self.ar)
-                    if sigs[0] != sigs[1]:
+                    la, lb, sigs = self.rig.walk(self.V, self.base, drives, skip=self.ar,
+                                                 avoid=self.ar, **kw)
+                    if self._robs(sigs[0]) != self._robs(sigs[1]):
                         self._disturbed(path, sigs, around=True)
                     care = self.full ^ self.ar_set
                     self.ar_paths.add(path)
+                self._wsig[path] = sigs[0]
                 self._one_at_a_time(path, la, lb, care)
             else:
                 la, lb, _ = self.rig.walk(self.V, self.base, self.drives(path))
@@ -725,6 +767,7 @@ class Analysis:
         if n < 2:
             return
         kw = dict(skip=self.ar, avoid=self.ar) if care is not None else dict(avoid=self.ar)
+        kw.update(self._wctx())
         la2, lb2, _ = self.rig.walk(self.V, self.base, self.drives(path), gray=1,
                                     mix=1 + len(path), start=path[-1], **kw)
         m = self.full if care is None else care
@@ -743,6 +786,7 @@ class Analysis:
 
     def _returns(self, s):
         """(observation, drives) routes from known states back to s."""
+        s = self.cmap.get(s, s)
         hop = {s: None}
         frontier = [s]
         while frontier:
@@ -780,7 +824,7 @@ class Analysis:
                                    self.cand, count=count,
                                    mul=1 if count is None else survey_mul(n),
                                    returns=self._returns(s), avoid=self.ar, chk=True,
-                                   ignore=sorted(self.hist), pre=self.mixed)
+                                   pre=self.mixed, **self._tctx())
         obs, flags = res[0], res[1]
         if self.mixed and count is None:
             self.pre[s] = res[2]              # the pin levels each x was clocked in with
@@ -807,13 +851,13 @@ class Analysis:
                 continue
             p2 = path + (lowest(xs),)
             t = self._walk(p2)
-            st = self._sig_table(t)
+            st = self._sig_path(p2, t)
             if st != s2:
                 if self._add_probes(t):
                     return False
                 late = [r for r, v in zip(self.cand, st) if v == "?"]
                 if not late:
-                    raise AsyncDesign(
+                    self._unrepeatable(
                         "clocking %s in from state %s led to state %s, but the same clocks "
                         "from power-up lead to %s: the chip has state that no pin shows, or "
                         "its readings do not repeat" % (
@@ -831,11 +875,15 @@ class Analysis:
         return True
 
     def _explore_once(self):
-        self._walks = {}
+        self._walks, self._wsig, self.cmap, self.cvar = {}, {}, {}, {}
         self.ar_paths = set()
         t0 = self._walk(())
         self._add_probes(t0)
-        s0 = self._sig_table(t0)
+        if self._wctx():
+            # the power-up state as a sweep leaves it: after the signature reads
+            self._wsig[()] = self.rig.walk(self.V, self.base, [], data=False,
+                                           **self._wctx())[2][0]
+        s0 = self._sig_path((), t0)
         self.power_up_state = s0
         self.states = {s0: ((), t0)}
         self.trans, self.edges, self.obs_of, self.pre = {}, {}, {}, {}
@@ -876,6 +924,7 @@ class Analysis:
                          "now, exploring again" % (rnd + 1, len(self.probe_x)))
         else:
             raise Limit("the probe vectors that tell the states apart did not settle")
+        self._fold()
         for r in self.ar_cand:
             if any(t.driven[r] for _, t in self.states.values()):
                 raise AsyncDesign("the asynchronous reset term reads pin %d, which the chip "
@@ -950,6 +999,38 @@ class Analysis:
                     return True
         return False
 
+    def _unrepeatable(self, msg):
+        """The same clocks led to two states."""
+        raise AsyncDesign(msg)
+
+    def _fold(self):
+        """With lsig, the exploration went by register values and latch
+        levels together.  From here on a state is the register values
+        again: the first state found with them stands for it (its path,
+        table and sweep), and the sweeps of the others are kept as what
+        its clock edges do with the latches at other levels (cvar)."""
+        n = len(self.cand)
+        if not any(len(c) > n for c in self.states):
+            return
+        first = {}
+        for c in self.states:
+            first.setdefault(c[:n], c)
+        states, trans, pre, cvar = {}, {}, {}, {}
+        for c, (path, t) in self.states.items():
+            r, tr = c[:n], {}
+            for c2, xs in self.trans[c].items():
+                tr[c2[:n]] = tr.get(c2[:n], 0) | xs
+            if first[r] == c:
+                states[r], trans[r] = (path, t), tr
+                if c in self.pre:
+                    pre[r] = self.pre[c]
+            else:
+                cvar.setdefault(r, []).append((path, t, tr, self.pre.get(c)))
+        self.log("%d states by registers and latch levels (%s), %d by the registers alone" % (
+            len(self.states), _pins(self.lsig), len(states)))
+        self.states, self.trans, self.pre, self.cvar, self.cmap = states, trans, pre, cvar, first
+        self.power_up_state = self.power_up_state[:n]
+
     def run(self):
         """discover + explore + assign + equations; treats pin 1 as an input
         when clocking never changes anything."""
@@ -995,19 +1076,19 @@ class Analysis:
             return False
         base = dict(self.base)
         base.update(held)
-        ignore = sorted(self.hist)
 
         def look(b, s, path, t):
             kw = dict(skip=self.ar if s in self.ar_on else None,
                       avoid=self.ar if path else None)
+            kw.update(self._wctx())
             la, lb, _ = self.rig.walk(self.V, b, self.drives(path), **kw)
             tr = None
             if self.reg and self.probe_x:
                 obs = self.rig.transitions(self.V, b, self.drives(path), self.probes(),
-                                           self.cand, avoid=self.ar, ignore=ignore)[0]
+                                           self.cand, avoid=self.ar, **self._tctx())[0]
                 tr = {}
                 for o, xs in obs.items():
-                    s2 = self._sig_obs(o)
+                    s2 = self._reg(self._sig_obs(o))
                     tr[s2] = tr.get(s2, 0) | xs
             return la, lb, tr
         found = set()
