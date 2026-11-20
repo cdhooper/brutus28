@@ -142,6 +142,160 @@ def sop(on, off, k):
     return [(c[0], c[1]) for c in cubes]
 
 
+def fewer(cubes, on, off, k, rounds=6):
+    """A cover of `on` that avoids `off`, with fewer cubes if it finds
+    one: reduce every cube to the points that only it covers, expand it
+    again (it may now grow another way and take in a neighbour), drop the
+    cubes the others cover, and again, as the Espresso minimiser does.
+    For a function that is known only in part and has more cubes than its
+    macrocell has product terms: the chip's own cover fits."""
+    full, v1 = litmasks(k)
+
+    def cs(care, val):
+        return _cube_set(care, val, k, full, v1)
+
+    def around(points):
+        care = val = 0
+        for b in range(k):
+            if not points & ~v1[b] & full:
+                care |= 1 << b
+                val |= 1 << b
+            elif not points & v1[b]:
+                care |= 1 << b
+        return care, val
+
+    def lean(F):
+        F.sort(key=lambda c: popcount(c[2] & on))
+        i = 0
+        while i < len(F):
+            others = 0
+            for j, c in enumerate(F):
+                if j != i:
+                    others |= c[2]
+            if F[i][2] & on & ~others:
+                i += 1
+            else:
+                F.pop(i)
+    F = [(c, v, cs(c, v)) for c, v in cubes]
+    best = list(F)
+    for r in range(rounds):
+        F.sort(key=lambda c: -popcount(c[2] & on))
+        i = 0
+        while i < len(F):
+            others = 0
+            for j, c in enumerate(F):
+                if j != i:
+                    others |= c[2]
+            mine = F[i][2] & on & ~others
+            if not mine:
+                F.pop(i)
+                continue
+            c, v = around(mine)
+            F[i] = (c, v, cs(c, v))
+            i += 1
+        F.sort(key=lambda c: popcount(c[2] & on))
+        for i in range(len(F)):
+            care, val, s = F[i]
+            while True:
+                top = None
+                for b in range(k):
+                    if care >> b & 1:
+                        c2 = care & ~(1 << b)
+                        s2 = cs(c2, val & c2)
+                        if s2 & off:
+                            continue
+                        gain = popcount(s2 & on)
+                        if top is None or gain > top[0]:
+                            top = (gain, c2, val & c2, s2)
+                if top is None:
+                    break
+                _, care, val, s = top
+            F[i] = (care, val, s)
+        lean(F)
+        if len(F) < len(best):
+            best = list(F)
+        elif r:
+            break
+    return [(c, v) for c, v, _ in best]
+
+
+def sop_lits(on, off, lits, full):
+    """A greedy cover of on (context -> the x) that avoids off, as
+    products of the literals lits ((text, {context: the x where it is
+    true})): cubes as lists of literal numbers.  From an uncovered
+    point's literals, those are dropped one by one that keep the
+    product out of off, the one first that covers most."""
+    unc = {c: v for c, v in on.items() if v}
+    ctxs = [c for c in set(on) | set(off)]
+
+    def product(cube):
+        out = {}
+        for c in ctxs:
+            v = full
+            for i in cube:
+                v &= lits[i][1].get(c, 0)
+                if not v:
+                    break
+            out[c] = v
+        return out
+    cubes = []
+    while unc:
+        c0 = next(iter(unc))
+        x0 = lowest(unc[c0])
+        cube = [i for i, (_, m) in enumerate(lits) if m.get(c0, 0) >> x0 & 1]
+        while len(cube) > 0:
+            # the products without each literal: before[i] & after[i + 1]
+            k = len(cube)
+            before = [dict.fromkeys(ctxs, full)]
+            for i in cube:
+                m = lits[i][1]
+                before.append({c: before[-1][c] & m.get(c, 0) for c in ctxs})
+            after = [dict.fromkeys(ctxs, full)]
+            for i in reversed(cube):
+                m = lits[i][1]
+                after.append({c: after[-1][c] & m.get(c, 0) for c in ctxs})
+            after.reverse()
+            best = None
+            for t in range(k):
+                gain, ok = 0, True
+                for c in ctxs:
+                    v = before[t][c] & after[t + 1][c]
+                    if v & off.get(c, 0):
+                        ok = False
+                        break
+                    u = unc.get(c)
+                    if u:
+                        gain += popcount(v & u)
+                if ok and (best is None or gain > best[0]):
+                    best = (gain, t)
+            if best is None:
+                break
+            del cube[best[1]]
+        cov = product(cube)
+        for c in list(unc):
+            unc[c] &= ~cov[c]
+            if not unc[c]:
+                del unc[c]
+        cubes.append((cube, cov))
+    # a cube that the others cover between them is not needed
+    i = 0
+    while i < len(cubes):
+        need = False
+        for c, v in on.items():
+            rest = 0
+            for j, (_, cov) in enumerate(cubes):
+                if j != i:
+                    rest |= cov[c]
+            if v & cubes[i][1][c] & ~rest:
+                need = True
+                break
+        if need:
+            i += 1
+        else:
+            cubes.pop(i)
+    return [c for c, _ in cubes]
+
+
 def tight(cubes, on, k, own=None):
     """The cubes, claiming less where the function is known only in part.
 
@@ -1029,7 +1183,14 @@ class Analysis:
             pos = sop(on, off, k)
             neg = sop(off, on, k)
             if self.mixed:
-                # known only where the walks went: claim no more than that
+                # known only where the walks went: of the covers that agree
+                # with it, a smaller one if this one does not fit
+                limit = self._budget(p, kind)
+                if len(pos) > limit:
+                    pos = fewer(pos, on, off, k)
+                if len(neg) > limit:
+                    neg = fewer(neg, off, on, k)
+                # ... and claim no more than that
                 own = self._own(p, kind, sup)
                 pos, neg = tight(pos, on, k, own), tight(neg, off, k, own)
             pos, neg = self._hazards(p, kind, sup, pos, neg, on, off)
@@ -1139,81 +1300,7 @@ class Analysis:
         return out
 
     def _sop_lits(self, on, off, lits):
-        """A greedy cover of on (context -> the x) that avoids off, as
-        products of the literals lits ((text, {context: the x where it is
-        true})): cubes as lists of literal numbers.  From an uncovered
-        point's literals, those are dropped one by one that keep the
-        product out of off, the one first that covers most."""
-        unc = {c: v for c, v in on.items() if v}
-        ctxs = [c for c in set(on) | set(off)]
-        full = self.efull
-
-        def product(cube):
-            out = {}
-            for c in ctxs:
-                v = full
-                for i in cube:
-                    v &= lits[i][1].get(c, 0)
-                    if not v:
-                        break
-                out[c] = v
-            return out
-        cubes = []
-        while unc:
-            c0 = next(iter(unc))
-            x0 = lowest(unc[c0])
-            cube = [i for i, (_, m) in enumerate(lits) if m.get(c0, 0) >> x0 & 1]
-            while len(cube) > 0:
-                # the products without each literal: before[i] & after[i + 1]
-                k = len(cube)
-                before = [dict.fromkeys(ctxs, full)]
-                for i in cube:
-                    m = lits[i][1]
-                    before.append({c: before[-1][c] & m.get(c, 0) for c in ctxs})
-                after = [dict.fromkeys(ctxs, full)]
-                for i in reversed(cube):
-                    m = lits[i][1]
-                    after.append({c: after[-1][c] & m.get(c, 0) for c in ctxs})
-                after.reverse()
-                best = None
-                for t in range(k):
-                    gain, ok = 0, True
-                    for c in ctxs:
-                        v = before[t][c] & after[t + 1][c]
-                        if v & off.get(c, 0):
-                            ok = False
-                            break
-                        u = unc.get(c)
-                        if u:
-                            gain += popcount(v & u)
-                    if ok and (best is None or gain > best[0]):
-                        best = (gain, t)
-                if best is None:
-                    break
-                del cube[best[1]]
-            cov = product(cube)
-            for c in list(unc):
-                unc[c] &= ~cov[c]
-                if not unc[c]:
-                    del unc[c]
-            cubes.append((cube, cov))
-        # a cube that the others cover between them is not needed
-        i = 0
-        while i < len(cubes):
-            need = False
-            for c, v in on.items():
-                rest = 0
-                for j, (_, cov) in enumerate(cubes):
-                    if j != i:
-                        rest |= cov[c]
-                if v & cubes[i][1][c] & ~rest:
-                    need = True
-                    break
-            if need:
-                i += 1
-            else:
-                cubes.pop(i)
-        return [c for c, _ in cubes]
+        return sop_lits(on, off, lits, self.efull)
 
     def _levels(self, y):
         """Where output y is known to be high and low, per context:

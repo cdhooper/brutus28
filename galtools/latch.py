@@ -47,7 +47,8 @@ pair races there); verify compares walks from the first read where the
 rebuilt chip agrees.
 """
 
-from analysis import DEV, HOW, KEEP, AsyncDesign, _cube_set, popcount, sop, swap, tight
+from analysis import (DEV, HOW, KEEP, Analysis, AsyncDesign, _cube_set, popcount, sop,
+                      sop_lits, swap, tight)
 from bitsim import litmasks
 from rig import bitrev, gray_order, survey_mul
 
@@ -445,6 +446,57 @@ class LatchAnalysis:
                                       k, full, v1)
             pos, neg = tight(sop(on, off, k), on, k), tight(sop(off, on, k), off, k)
             self.cover[p] = (neg, True) if len(neg) < len(pos) else (pos, False)
+        self._read_outputs()
+
+    def _budget(self, p):
+        """The product terms pin p's macrocell has for its logic."""
+        return Analysis.TERMS22[23 - p] if self.device == "GAL22V10" else 7
+
+    def _read_outputs(self):
+        """An output that needs more product terms over the inputs and
+        latch pins than its macrocell has, again over those and the pins
+        of the other outputs.  A latch that is held while another output
+        is high (!P13 = ... # P14 & !P13, with pin 14 a decode of nine
+        inputs) needs nine hold terms over the inputs, and one with the
+        pin.  The latch then follows that output a gate delay later, as
+        it does in the chip; whether the walks still come out is checked
+        on the rebuilt JED."""
+        n, m = self.n, len(self.L)
+        k = n + m
+        full, v1 = litmasks(k)
+        self.rcover = {}
+        over = [p for p, (cubes, _) in self.cover.items() if len(cubes) > self._budget(p)]
+        if not over:
+            return
+
+        def covered(p):
+            cubes, inv = self.cover[p]
+            s = 0
+            for care, val in cubes:
+                s |= _cube_set(care, val, k, full, v1)
+            return full ^ s if inv else s
+        names = [self.name(q) for q in self.V] + [self.name(q) for q in self.L]
+        lits = []
+        for b in range(k):
+            lits.append((names[b], {0: v1[b]}))
+            lits.append(("!" + names[b], {0: full ^ v1[b]}))
+        fed = self.dev.get("fed", self.dev["io"])
+        for y in self.outputs:
+            if y not in self.L and y not in over and y in fed:
+                s = covered(y)
+                lits.append((self.name(y), {0: s}))
+                lits.append(("!" + self.name(y), {0: full ^ s}))
+        for p in over:
+            arr = self.g[self.L.index(p)] if p in self.L else self.f[p]
+            on, off = _from_bytes(arr, _ONES), _from_bytes(arr, _ZEROS)
+            pos = sop_lits({0: on}, {0: off}, lits, full)
+            neg = sop_lits({0: off}, {0: on}, lits, full)
+            cubes, inv = (neg, True) if len(neg) < len(pos) else (pos, False)
+            if len(cubes) < len(self.cover[p][0]):
+                self.log("pin %d needs %d product terms over the inputs and latch pins, more "
+                         "than its %d: %d with other outputs' pins" % (
+                             p, len(self.cover[p][0]), self._budget(p), len(cubes)))
+                self.rcover[p] = (cubes, inv, lits)
 
     @staticmethod
     def _hazard_free(cubes, pairs, off, k, full, v1):
@@ -483,7 +535,20 @@ class LatchAnalysis:
         n, m = self.n, len(self.L)
         fulln, v1n = litmasks(n)
         self.tab = {}
+        for p, (cubes, inv, lits) in getattr(self, "rcover", {}).items():
+            full = (1 << (1 << (n + m))) - 1
+            cov = 0
+            for cube in cubes:
+                v = full
+                for i in cube:
+                    v &= lits[i][1][0]
+                cov |= v
+            if inv:
+                cov ^= full
+            self.tab[p] = [_to_bytes(cov >> (lv << n) & fulln, n) for lv in range(1 << m)]
         for p, (cubes, inv) in self.cover.items():
+            if p in self.tab:
+                continue
             per = []
             for lv in range(1 << m):
                 bits = 0
@@ -585,6 +650,13 @@ class LatchAnalysis:
         k = len(names)
         eqs = []
         for p, (cubes, inv) in sorted(self.cover.items()):
+            if p in self.rcover:
+                cubes, inv, lits = self.rcover[p]
+                expr = "\n    # ".join(" & ".join(lits[i][0] for i in c) or "'b'1"
+                                       for c in cubes) if cubes else "'b'0"
+                eqs.append((p, "", inv, expr, len(cubes)))
+                continue
+
             def lit(c):
                 if c[0] == 0:
                     return "'b'1"
