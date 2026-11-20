@@ -839,14 +839,15 @@ class ReplayRig:
 
     def __init__(self, path, device=None):
         self.meta = {}
-        self.db = {}
+        self.db = {}                 # key -> the answers to that job, in the order recorded
+        self.used = {}
         with open(path) as f:
             for line in f:
                 rec = json.loads(line)
                 if "meta" in rec:
                     self.meta.update(rec["meta"])
                 else:
-                    self.db[rec["key"]] = rec
+                    self.db.setdefault(rec["key"], []).append(rec)
         self.device = device or self.meta.get("device")
         if self.device not in PACKAGE:
             raise CaptureError("%s does not name the device; give it" % path)
@@ -854,9 +855,20 @@ class ReplayRig:
                      if p not in PACKAGE[self.device][1:]]
         self.ops = Ops()
 
+    def _next(self, key):
+        """The answer to this job: when the analysis ran the same job
+        again (to see whether the chip reads the same twice), the next
+        one recorded; the last one once they are used up."""
+        recs = self.db.get(key)
+        if not recs:
+            return None
+        k = self.used.get(key, 0)
+        self.used[key] = k + 1
+        return recs[min(k, len(recs) - 1)]
+
     def walk(self, V, base, path, mul=1, rev=0, probes=(), cand=(), gray=0, start=0,
              skip=None, avoid=None, data=True, rot=0, mix=0):
-        rec = self.db.get(_key("walk", V, base, path, probes, cand, None, mul, rev=rev,
+        rec = self._next(_key("walk", V, base, path, probes, cand, None, mul, rev=rev,
                                gray=gray, start=start, skip=skip, avoid=avoid, data=data,
                                rot=rot, mix=mix))
         if rec is None:
@@ -869,7 +881,7 @@ class ReplayRig:
 
     def transitions(self, V, base, path, probes, cand, count=None, mul=1, returns=(),
                     avoid=None, chk=False, ignore=(), pre=False):
-        rec = self.db.get(_key("trans", V, base, path, probes, cand, count, mul, avoid=avoid,
+        rec = self._next(_key("trans", V, base, path, probes, cand, count, mul, avoid=avoid,
                                chk=chk, ignore=list(ignore), pre=pre))
         if rec is None:
             raise CaptureError("transitions not in the recording; rerun on the board")

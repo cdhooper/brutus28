@@ -72,7 +72,7 @@ from functools import reduce
 from analysis import Analysis, AsyncDesign, Limit, _Restart, _pins, _state, lowest, swap
 from bitsim import litmasks
 from latch import LatchAnalysis, _ONES, _ZEROS, _from_bytes
-from rig import CLOCK, bitrev, cube_set, gray_arrays, survey_mul
+from rig import CLOCK, bitrev, cube_set, gray_arrays, popcount, survey_mul
 
 _T01 = bytes.maketrans(b"01", b"\x00\x01")
 
@@ -683,37 +683,8 @@ class RegLatchAnalysis(Analysis):
         if not m:
             return
 
-        def put(j, i, v):
-            old = g[j][i]
-            if old == 0:
-                g[j][i] = v + 1
-            elif old != v + 1:
-                raise AsyncDesign(
-                    "the excitation of pin %d at %s in state %s with latch pins %s at %s is "
-                    "%d once and %d once: the pin oscillates there (an output that feeds "
-                    "back inverted), or it is not a circuit of registers and latches on "
-                    "those pins" % (self.L[j], self._cinputs(i & (N - 1)),
-                              _state(self.S[i >> n1 & ((1 << (nn - n1)) - 1)]), self.L,
-                              "".join(str(i >> (nn + q) & 1) for q in range(m)), old - 1, v))
-
-        def hold(a, b, lv, moving=()):
-            """Neighbouring points at both of which the latches not moving
-            are excited to stay as they are."""
-            d = a ^ b
-            if not d or d & (d - 1):
-                return
-            var = d.bit_length() - 1
-            if n1 <= var < nn:
-                return
-            lo = a & ~d
-            for j in range(m):
-                if j not in moving:
-                    arr = self.hz[j].get(var)
-                    if arr is None:
-                        arr = self.hz[j][var] = bytearray(size + 7 >> 3)
-                    arr[lo >> 3] |= 1 << (lo & 7)
-
-        multi, late = [], []
+        put, hold = self._put, self._hold
+        multi, late = {}, []
         rm = range(m)
         for w in self.lwalks:
             lvl = [_b01(w.la[p], N) for p in self.L]
@@ -785,28 +756,81 @@ class RegLatchAnalysis(Analysis):
                                 late.append((e, xx | (lp ^ rel) << nn, lcm, lc, q))
                             else:
                                 put(q, e, lcm >> q & 1)
-                        elif ch and key in self.split:
-                            multi.append((pxx, xx, lp, lcm, rel, lc))
+                        elif ch:
+                            multi[key] = (pxx, xx, lp, lcm, rel, lc)
                 prev = (xx, lc, u, xp)
+        # as the walks give it; _apply adds what checking the steps found
+        self._late, self._multi = late, multi
+        self._base = ([bytes(b) for b in g], [{k: bytes(v) for k, v in h.items()} for h in self.hz])
+        self._apply()
+
+    def _put(self, j, i, v):
+        g = self.g
+        old = g[j][i]
+        if old == 0:
+            g[j][i] = v + 1
+        elif old != v + 1:
+            n1, nn, m = self.n1, self.nn, len(self.L)
+            raise AsyncDesign(
+                "the excitation of pin %d at %s in state %s with latch pins %s at %s is "
+                "%d once and %d once: the pin oscillates there (an output that feeds "
+                "back inverted), or it is not a circuit of registers and latches on "
+                "those pins" % (self.L[j], self._cinputs(i & ((1 << n1) - 1)),
+                                _state(self.S[i >> n1 & ((1 << (nn - n1)) - 1)]), self.L,
+                                "".join(str(i >> (nn + q) & 1) for q in range(m)), old - 1, v))
+
+    def _hold(self, a, b, lv, moving=()):
+        """Neighbouring points at both of which the latches not moving
+        are excited to stay as they are."""
+        n1, nn, m = self.n1, self.nn, len(self.L)
+        d = a ^ b
+        if not d or d & (d - 1):
+            return
+        var = d.bit_length() - 1
+        if n1 <= var < nn:
+            return
+        lo = a & ~d
+        for j in range(m):
+            if j not in moving:
+                arr = self.hz[j].get(var)
+                if arr is None:
+                    arr = self.hz[j][var] = bytearray((1 << (nn + m)) + 7 >> 3)
+                arr[lo >> 3] |= 1 << (lo & 7)
+
+    def _apply(self):
+        """The excitations as the walks give them (_learn), with what
+        checking the steps against the learned circuit has added (_refine):
+        single excitations (self.extra), and steps split into rounds
+        (self.split)."""
+        bg, bh = self._base
+        self.g = g = [bytearray(b) for b in bg]
+        self.hz = [{k: bytearray(v) for k, v in h.items()} for h in bh]
+        put, hold = self._put, self._hold
+        m, n1, nn = len(self.L), self.n1, self.nn
+        rm = range(m)
         # A step in which the GAL lets go of a pin and a latch flips: the
         # latch reacted to the step with the pin still at its level (at e),
         # or only to the pin's move to its drive (at e2).  Whichever the
         # other samples allow; if both, the first.
-        todo = late
+        todo, first_pass = self._late, True
         while todo:
             rest = []
             for e, e2, lcm, lc, q in todo:
                 first = g[q][e] in (0, (lcm >> q & 1) + 1)
                 then = g[q][e2] in (0, (lc >> q & 1) + 1)
-                if first and then and todo is late:
+                if first and then and first_pass:
                     rest.append((e, e2, lcm, lc, q))       # see what the others say
                 elif first:
                     put(q, e, lcm >> q & 1)
                 else:
                     put(q, e2, lc >> q & 1)
-            todo, late = rest, None
-        for (j, i), v in self.extra.items():
-            put(j, i, v)
+            todo, first_pass = rest, False
+        for (j, i), v in list(self.extra.items()):
+            if g[j][i] in (0, v + 1):
+                g[j][i] = v + 1
+            else:
+                del self.extra[(j, i)]        # a walk has since shown otherwise
+        multi = [self._multi[key] for key in sorted(self.split) if key in self._multi]
         if multi:
             k = nn + m
             full, v1 = litmasks(k)
@@ -820,7 +844,7 @@ class RegLatchAnalysis(Analysis):
                         "latch pins %s change together at %s in state %s, in no order that "
                         "agrees with the other walks" % (
                             [self.L[j] for j in rm if (lp ^ lc) >> j & 1],
-                            self._cinputs(xx & (N - 1)), _state(self.S[xx >> n1])))
+                            self._cinputs(xx & ((1 << n1) - 1)), _state(self.S[xx >> n1])))
 
     def _enable_cube(self, q):
         """The output enable of a latch pin that is also enumerated: one
@@ -1048,16 +1072,17 @@ class RegLatchAnalysis(Analysis):
         register inputs just learned; if that changes a walk, learn
         again."""
         for _ in range(8):
-            for _ in range(40):
-                self._learn()
-                self._collect()
+            self._learn()
+            self._collect()
+            for _ in range(400):
                 self.equations()
                 if not self._refine():
                     break
+                self._apply()
             else:
                 raise AsyncDesign("checking the steps against the learned circuit keeps adding "
-                                  "to it: not a circuit of registers and latches that galre "
-                                  "models")
+                                  "to it (%d steps still not explained): not a circuit of "
+                                  "registers and latches that galre models" % self.unexplained)
             self._dtab = {}
             self.lpos = [divmod(self.O.index(q), 8) for q in self.L]
             again = False
@@ -1254,18 +1279,20 @@ class RegLatchAnalysis(Analysis):
             t = self._tabs[(q, a, lv, "oe")] = _b01(self._enabled(q, a, lv), 1 << self.n1)
         return t
 
-    def _advance(self, lv, a, pxp, xp):
-        """Where the learned latches come to rest at vector xp in state a,
-        from the levels lv they had at vector pxp.  Every excited latch
-        moves at once, as in the chip's simulator (one gate delay each);
-        if that does not settle, one at a time.  A pin the GAL does not
-        drive is an input: it follows its drive.  One that the GAL lets go
-        moves to its drive after the latches have reacted.  None if they
-        never rest."""
+    def _trace(self, lv, a, pxp, xp):
+        """How the learned latches move at vector xp in state a, from the
+        levels lv they had at vector pxp: (the levels after each move, the
+        first being those they start from; whether they come to rest).
+        Every excited latch moves at once, as in the chip's simulator (one
+        gate delay each); if that does not settle, one at a time.  A pin
+        the GAL does not drive is an input: it follows its drive.  One
+        that the GAL lets go moves to its drive after the latches have
+        reacted."""
         m, bq = len(self.L), self._bq
         for q, j, b in bq:
             if (xp ^ pxp) >> b & 1 and (lv >> j ^ xp >> b) & 1 and not self._en(q, a, lv)[xp]:
                 lv ^= 1 << j
+        path = [lv]
         for it in range(5 * m + 16):
             free, rel = 0, -1
             for q, j, b in bq:
@@ -1282,55 +1309,130 @@ class RegLatchAnalysis(Analysis):
             elif rel >= 0:
                 lv ^= 1 << rel
             else:
-                return lv
-        return None
+                return path, True
+            path.append(lv)
+        return path, False
+
+    def _advance(self, lv, a, pxp, xp):
+        """Where the learned latches come to rest (_trace), None if they
+        never do."""
+        path, rests = self._trace(lv, a, pxp, xp)
+        return path[-1] if rests else None
 
     def _refine(self):
         """Check every step in which a latch pin changed against the learned
-        circuit, which must come to rest where the chip did.  Where it
-        does not: after a step that changed one latch, a latch that the
-        circuit moves at the step's first point, and the chip left as it
-        was, holds there; a step that changed several is split into rounds
-        (_learn, multi).  True if anything was added: learn again."""
+        circuit, which must come to rest where the chip did, and add what
+        the steps that it gets wrong show (True: learn again from it).
+
+        One input change can set off a chain: latch 18 falls, then 14,
+        which reads it, then 13.  The chip is seen only before and after.
+        The learned circuit usually knows the first links already, from
+        steps in which they happened alone, so each wrong step is taken as
+        far as the circuit gets and only the missing link is added:
+        - a latch that the circuit leaves at a level other than the chip's
+          and that was at the chip's level on the way holds where it last
+          was;
+        - a latch that never gets there is excited where the circuit comes
+          to rest (or, if it is known to rest there, one move earlier).
+        The steps that change fewest latches come first, and the circuit
+        is learned again before the next ones, so that longer chains are
+        explained by shorter ones.  Only a step of which the circuit knows
+        nothing at all is split into rounds by guess (_step, up to four
+        latches) or, with more, taken as all moving together."""
         m = len(self.L)
         if not m or not self.steps:
             return False
         self._tabs = {}
-        added = False
-        seen = set()
-        for key, e, lp, lcm, rel, u, pxx, xx in self.steps:
+        wrong, seen = {}, set()
+        for rec in self.steps:
+            key = rec[0]
             if key in seen:
                 continue                  # the same step in another walk
             seen.add(key)
             xp, pxp, a, lp0, lc = key
-            if self._advance(lp0, a, pxp, xp) == lc:
+            path, rests = self._trace(lp0, a, pxp, xp)
+            if not (rests and path[-1] == lc):
+                wrong.setdefault(popcount(lp0 ^ lc), []).append((rec, path, rests))
+        self.unexplained = sum(len(v) for v in wrong.values())
+        if not wrong:
+            return False
+        stuck = None
+        for k in sorted(wrong):
+            added, unknown = False, []
+            for rec, path, rests in wrong[k]:
+                r = self._correct(rec, path, rests)
+                if r is True:
+                    added = True
+                elif r is None:
+                    unknown.append(rec)
+                elif stuck is None:
+                    stuck = rec
+            if added:
+                return True
+            for rec in unknown:
+                key, e, lp, lcm, rel, u = rec[:6]
+                if key not in self.split and k <= 4 and key in self._multi:
+                    self.split.add(key)
+                    added = True
+                    continue
+                todo = [j for j in range(m) if (lp ^ lcm) >> j & 1 and not u >> j & 1
+                        and (j, e) not in self.extra and self.g[j][e] == 0]
+                for j in todo:
+                    self.extra[(j, e)] = lcm >> j & 1          # all together
+                if todo:
+                    added = True
+                elif stuck is None:
+                    stuck = rec
+            if added:
+                return True
+        key = stuck[0]
+        xp, pxp, a, lp0, lc = key
+        raise AsyncDesign(
+            "%d steps are not explained by one circuit of latches (the first: pins %s change "
+            "at %s in state %s): what happens there depends on more than the levels seen" % (
+                self.unexplained, [self.L[j] for j in range(m) if (lp0 ^ lc) >> j & 1],
+                self._cinputs(xp), _state(self.S[a])))
+
+    def _correct(self, rec, path, rests):
+        """Add what the step rec shows, given the way the learned circuit
+        takes through it: True if something was added, None if the circuit
+        knows nothing of the step (it does not move at all), False if
+        nothing can be added."""
+        key, e, lp, lcm, rel, u, pxx, xx = rec
+        lc = key[4]
+        m, nn, g = len(self.L), self.nn, self.g
+        if not rests:
+            return False
+        bad = (path[-1] ^ lc) & ~u
+        if not bad:
+            return False
+        added, need = False, 0
+        for j in range(m):
+            if not bad >> j & 1:
                 continue
-            ch = lcm ^ lp
-            where = "%s in state %s" % (self._cinputs(xp), _state(self.S[a]))
-            if ch and not ch & (ch - 1):
-                q = ch.bit_length() - 1
-                others = [j for j in range(m) if j != q and not u >> j & 1
-                          and (j, e) not in self.extra]
-                moved = [j for j in others if self._tab(j, a, lp)[xp] != lp >> j & 1]
-                if not moved and key not in self.stuck:
-                    self.stuck.add(key)
-                    moved = others
-                if not moved:
-                    raise AsyncDesign(
-                        "pin %d changes at %s, and the circuit learned from the other steps "
-                        "ends elsewhere: what happens there depends on more than the levels "
-                        "seen" % (self.L[q], where))
-                for j in moved:
-                    self.extra[(j, e)] = lp >> j & 1
+            want = lc >> j & 1
+            at = [t for t in range(len(path)) if path[t] >> j & 1 == want]
+            if not at:
+                need |= 1 << j                  # never gets to the chip's level
+                continue
+            i = xx | path[at[-1]] << nn         # was there, and left
+            if g[j][i] == 0 and (j, i) not in self.extra:
+                self.extra[(j, i)] = want
                 added = True
-            elif ch and key not in self.split:
-                self.split.add(key)
-                added = True
-            else:
-                raise AsyncDesign(
-                    "latch pins %s change together at %s, and no circuit learned from the "
-                    "other steps explains it" % (
-                        [self.L[j] for j in range(m) if (lp ^ lc) >> j & 1], where))
+        if need:
+            if len(path) == 1 and not added and popcount(key[3] ^ lc) > 1:
+                return None
+            for t in range(len(path) - 1, -1, -1):
+                i = xx | path[t] << nn
+                pins = [j for j in range(m) if need >> j & 1]
+                if all(g[j][i] in (0, (lc >> j & 1) + 1) and
+                       self.extra.get((j, i), lc >> j & 1) == lc >> j & 1 for j in pins):
+                    new = [j for j in pins if g[j][i] == 0 and (j, i) not in self.extra]
+                    if new:
+                        for j in new:
+                            self.extra[(j, i)] = lc >> j & 1
+                        added = True
+                        break
         return added
 
     def _predict(self, w):

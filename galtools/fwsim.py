@@ -91,6 +91,8 @@ class SocketDevice:
         self.writes = []             # every value written while powered
         self.transients = True       # model the port writes (PORT_GROUPS)
         self.last = 0                # the socket drive the chip sees
+        self.noise = 1               # for the level read of a pin that oscillates; it runs on
+                                     # over power cycles, so that the same walk reads differently
 
     def jumper_pins(self):
         if not self.jumpers_ok:
@@ -124,7 +126,15 @@ class SocketDevice:
         levels = self._apply(value)
         out = self.vcc_bit
         for p in self.pins:
-            if levels[p]:
+            if p in self.g.unstable:
+                # The chip does not come to rest (an output that feeds back
+                # inverted): the pin oscillates, and what a read catches is
+                # arbitrary.  The simulator's level is what it stopped at,
+                # the same every time, which would pass for logic.
+                self.noise = (self.noise * 1664525 + 1013904223) & 0xffffffff
+                if self.noise >> 31:
+                    out |= self.sbit[p]
+            elif levels[p]:
                 out |= self.sbit[p]
         return out
 

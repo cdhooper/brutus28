@@ -60,6 +60,7 @@ struct gal {
     uint32_t unstable;
     int      powered;
     uint32_t last;                      /* the socket value last applied */
+    uint32_t noise;                     /* for the level read of a pin that oscillates */
 };
 
 static uint64_t
@@ -224,7 +225,7 @@ gal_apply(gal_t *g, uint32_t ext)
 }
 
 static uint32_t
-gal_apply_socket(gal_t *g, uint32_t value)
+gal_apply_socket(gal_t *g, uint32_t value, int final)
 {
     uint32_t ext = 0;
     uint32_t out = g->vcc_bit;
@@ -241,8 +242,14 @@ gal_apply_socket(gal_t *g, uint32_t value)
     for (i = 0; i < g->npin; i++) {
         int p = g->pin_list[i];
 
-        if ((g->levels >> p) & 1)
+        if (final && ((g->unstable >> p) & 1)) {
+            /* the pin oscillates: what a read catches is arbitrary */
+            g->noise = g->noise * 1664525U + 1013904223U;
+            if (g->noise >> 31)
+                out |= g->sbit[p];
+        } else if ((g->levels >> p) & 1) {
             out |= g->sbit[p];
+        }
     }
     return (out);
 }
@@ -278,6 +285,7 @@ gal_new(int is16v8, int clock_pin, int ar_row, int sp_row, int ncols,
     }
     g->vcc_bit = vcc_bit;
     g->transients = transients;
+    g->noise = 1;                        /* runs on over power cycles */
     return (g);
 }
 
@@ -342,8 +350,8 @@ gal_io(gal_t *g, uint32_t value)
             done |= groups[i];
             mid = (value & done) | (g->last & ~done);
             if ((mid != g->last) && (mid != value))
-                (void) gal_apply_socket(g, mid);
+                (void) gal_apply_socket(g, mid, 0);
         }
     }
-    return (gal_apply_socket(g, value));
+    return (gal_apply_socket(g, value, 1));
 }

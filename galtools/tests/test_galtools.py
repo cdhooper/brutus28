@@ -51,6 +51,11 @@ CASES = {
 # designs with state that changes without a clock that galre does not
 # model -> (device, pins held, what galre must say when it stops)
 ASYNC_CASES = {
+    # an output that feeds back inverted: it oscillates, and the simulated
+    # chip then reads arbitrary levels, as a real one would
+    "osc16v8": ("GAL16V8", "5-9=0,11-16=0,19=0",
+                "the same walk read differently twice on pins 17, 18: a bad contact, a "
+                "floating pin or an oscillating output"),
     "buried22v10": ("GAL22V10", "5-11=0,13-21=0",
                     "led to state 1Z, but the same clocks from power-up lead to 0Z: the chip "
                     "has state that no pin shows, or its readings do not repeat"),
@@ -197,6 +202,7 @@ class SimulatedChip(unittest.TestCase):
             "reglatch22v10": ar + ["combinational feedback through pin 21"],
             "trilatch22v10": ["combinational feedback through pin 22"],
             "quietlatch16v8": ["combinational feedback through pin 18"],
+            "osc16v8": ["combinational feedback through pin 18"],
             "oeread22v10": [],
             "buried22v10": ["combinational feedback through pin 22"]})
 
