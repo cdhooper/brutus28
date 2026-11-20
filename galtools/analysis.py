@@ -142,6 +142,34 @@ def sop(on, off, k):
     return [(c[0], c[1]) for c in cubes]
 
 
+def tight(cubes, on, k):
+    """The cubes, each with the literals that hold at every point of `on`.
+
+    sop() grows a cube as far as `off` allows.  Where every point is known
+    to be on or off, that is the function.  Where some were never seen (a
+    latch's excitation is known only at the points the walks went
+    through), a cube then also takes in points that nothing was seen of:
+    a latch held by P4 & ... got a term without P4, because no walk had
+    let pin 4 fall in just that corner, and the rebuilt chip kept the
+    latch where the original lets go.  If the function was never seen on
+    with pin 4 low, no cube may say it is.
+
+    (Shrinking every cube to the points of `on` it covers goes too far:
+    the cubes then generalise so little that checking the steps keeps
+    adding to them, and the design no longer fits the chip.)"""
+    full, v1 = litmasks(k)
+    if not on:
+        return cubes
+    care = val = 0
+    for b in range(k):
+        if not on & ~v1[b] & full:
+            care |= 1 << b
+            val |= 1 << b
+        elif not on & v1[b]:
+            care |= 1 << b
+    return [(c | care, v | val) for c, v in cubes]
+
+
 # -- helpers -----------------------------------------------------------------
 
 def swap(f, b, v1):
@@ -984,6 +1012,9 @@ class Analysis:
             k = len(sup)
             pos = sop(on, off, k)
             neg = sop(off, on, k)
+            if self.mixed:
+                # known only where the walks went: claim no more than that
+                pos, neg = tight(pos, on, k), tight(neg, off, k)
             pos, neg = self._hazards(p, kind, sup, pos, neg, on, off)
             if kind == "d" and self.device == "GAL22V10":
                 # a cleared register (power-up, reset term) shows the output

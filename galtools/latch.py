@@ -47,7 +47,7 @@ pair races there); verify compares walks from the first read where the
 rebuilt chip agrees.
 """
 
-from analysis import DEV, HOW, KEEP, AsyncDesign, _cube_set, popcount, sop, swap
+from analysis import DEV, HOW, KEEP, AsyncDesign, _cube_set, popcount, sop, swap, tight
 from bitsim import litmasks
 from rig import bitrev, gray_order, survey_mul
 
@@ -432,7 +432,7 @@ class LatchAnalysis:
             best = None
             for inv in (False, True):
                 a, b = (off, on) if inv else (on, off)
-                cubes = sop(a, b, k)
+                cubes = tight(sop(a, b, k), a, k)
                 cubes = self._hazard_free(cubes, [(x, y) for x, y, v in self.pairs[j]
                                                   if v == (0 if inv else 1)], b, k, full, v1)
                 if best is None or len(cubes) < len(best[0]):
@@ -441,14 +441,22 @@ class LatchAnalysis:
         for p, arr in self.f.items():
             on, off = self._supported(_from_bytes(arr, _ONES), _from_bytes(arr, _ZEROS),
                                       k, full, v1)
-            pos, neg = sop(on, off, k), sop(off, on, k)
+            pos, neg = tight(sop(on, off, k), on, k), tight(sop(off, on, k), off, k)
             self.cover[p] = (neg, True) if len(neg) < len(pos) else (pos, False)
 
     @staticmethod
     def _hazard_free(cubes, pairs, off, k, full, v1):
         """Add, for every pair of neighbouring points that no single cube
-        covers, a cube through both, as large as off allows."""
+        covers, a cube through both.  It is as large as the cover allows:
+        it stays within what the cubes cover already, so it adds no point
+        to the function, as the consensus term of two cubes does.  (As
+        large as off allows, it reached into points that no walk had
+        visited: !P13 held with pin 4 low, where the chip lets go.)"""
         cubes = list(cubes)
+        cov = 0
+        for care, val in cubes:
+            cov |= _cube_set(care, val, k, full, v1)
+        out = full & ~cov                # outside the function as covered
 
         def covers(c, a):
             return a & c[0] == c[1]
@@ -457,12 +465,12 @@ class LatchAnalysis:
                 continue
             care = ((1 << k) - 1) & ~(a ^ b)
             val = a & care
-            if _cube_set(care, val, k, full, v1) & off:
-                continue        # from a step split into rounds by guess: not a hold after all
+            if _cube_set(care, val, k, full, v1) & (off | out):
+                continue        # not both in the function: from a step split by guess
             for bit in range(k):
                 if care >> bit & 1:
                     c2 = care & ~(1 << bit)
-                    if not _cube_set(c2, val & c2, k, full, v1) & off:
+                    if not _cube_set(c2, val & c2, k, full, v1) & out:
                         care, val = c2, val & c2
             cubes.append((care, val))
         return cubes
