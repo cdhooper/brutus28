@@ -302,6 +302,21 @@ clock is high, with an output of the latch on pin 20:
   input changes; they do not change what it does. CUPL's minimiser would
   remove them, so the `.pld` has a `MIN` statement for the latch pins;
   compile it with the command in its first comment.
+- "exploring again by the registers and the levels of ... together":
+  where a clock edge leads depends on a latch. galre explores once more
+  with the latch levels as part of each state. This takes the firmware
+  from the same commit, and more jobs.
+- "N more walks, chosen to show product terms deciding a latch where no
+  walk had": galre checked what its equations only guessed, and learned
+  from the walks that came out otherwise.
+- "not seen, for no walk tried gets there (N): !P15 by ... with P8
+  high; ...": the named product term decides the latch with that pin at
+  that level, by the equations, but the chip was never seen there. The
+  term may lack a literal (`!P8` in the example). If the chip's
+  behaviour in such a case matters, look at it by hand.
+- "pins ... taken to move after the other latches of a step": several
+  latches change in one step, and with these following the others the
+  equations fit the macrocells; they read the others' pins.
 
 ## 7. Check the result on a real chip
 
@@ -365,6 +380,7 @@ designs in `designs/`, with the pins the tests hold:
 | `clklatch22v10` | no registers: a latch that is open while pin 1 is high and looks like a register when clocked | `7-11=0,13-20=0` |
 | `oelatch16v8` | registered GAL16V8 with a latch, pin 11 not held: a register with a constant input, an output that shows a register | `6-9=0,12=0,14=0` |
 | `routelatch22v10` | a register that loads only with a latch set on the way to the state: explored by registers and latch level together | `5-11=0,13-20=0` |
+| `latchfollow16v8` | two latches that set together, and a third that follows them through one term | `12-14=0,19=0` |
 | `osc16v8` | an output that feeds back inverted and oscillates: galre stops | `5-9=0,11-16=0,19=0` |
 | `buried22v10` | a register that never reaches its pin: galre stops | `5-11=0,13-21=0` |
 

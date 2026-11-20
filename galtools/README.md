@@ -357,7 +357,9 @@ minimise the latches (`MIN [P17, P18] = 0;`). What CUPL needs is all in
 the source: that statement, the device (for a GAL16V8 sometimes its mode,
 `g16v8ma` or `g16v8ms`), and a comment with the command galre used,
 `cupl -jaxm4 NAME.pld`. If the design does not fit with the extra terms,
-galre leaves the statement out and says so.
+galre leaves the statement out and says so. If CUPL's minimiser then
+still does not get it to fit (registers and latches together), galre
+writes its own covers without those terms, and keeps the statement.
 
 The rebuilt JED is checked against the walks from the first read where it
 agrees, and in `sim` against the original under random stimulus that
@@ -400,7 +402,20 @@ not the reset term. galre then goes on (`reglatch.py`):
    - then walks from other states and start vectors, until the learned
      circuit predicts as many in a row as make 131072 steps (at least
      two, at most 128), in mixed Gray code order, so pin 1 rises often
-     and in many places.
+     and in many places;
+   - then walks chosen for what the circuit only guesses. A product
+     term grows as far as nothing seen contradicts it, so it may lack a
+     literal that the chip has: the chip was just never seen where that
+     literal would make a difference. Where a term is the only one that
+     is true and a walk showed what the latch does, the term was seen
+     to decide. A pin that the term does not read, and at which it was
+     seen to decide at one level only, may be such a missing literal:
+     at the other level the latch was seen only where another term (the
+     one that holds it) decides as well. galre takes candidate walks
+     through the learned circuit, runs the one that gets to most of
+     these cases on the chip, and learns from it if the chip does
+     otherwise, until no candidate gets to any more (at most 64 walks).
+     What is left is listed: "not seen, for no walk tried gets there".
 
    In a registered GAL16V8 or GAL20V8, pin 11 (13) enables the registers'
    outputs, and the array reads neither it nor pin 1. While it is high no
@@ -463,6 +478,14 @@ not the reset term. galre then goes on (`reglatch.py`):
    - of a step of which the circuit knows nothing, the fewest latches
      that, moved first, let the circuit do the rest are excited; failing
      that, the step is split into rounds, or all move together.
+
+   Which of the latches of a step reacts to the input, and which to the
+   others having moved, makes no difference to the walks, but it does to
+   the equations: a latch taken to move with the others needs their
+   terms as well as its own. If a latch then needs more product terms
+   than its macrocell has, galre learns again with such latches moving
+   after the others of a step (one term that reads them), and keeps
+   that if it explains the walks and fits better.
 
    What is added this way gives way when a later walk shows otherwise.
    The result reads the same as the chip wherever the chip comes to
