@@ -195,6 +195,15 @@ turn these off.
      added and the exploration restarts.
    - If a candidate turns out to depend on the inputs, it is
      reclassified as combinational.
+   - A candidate that the reset term reads (an I/O pin used as an input)
+     is no candidate once the term is known: reading it with its drive
+     inverted would fire the term.
+   - A candidate that shows one level where it is driven, and that a
+     transition or another pin depends on where the chip lets it go, is
+     a constant output with an enable, not a register: a register's
+     feedback comes from the register, not from its pin. An example is
+     an open-drain copy of a register that a register input reads back
+     (`designs/aropen22v10`).
    - If clocking never changes anything, the design is taken as
      combinational and pin 1 is enumerated as an input.
 3. **Register values.** galre assigns each register its value in each
@@ -392,6 +401,20 @@ not the reset term. galre then goes on (`reglatch.py`):
      circuit predicts as many in a row as make 131072 steps (at least
      two, at most 128), in mixed Gray code order, so pin 1 rises often
      and in many places.
+
+   In a registered GAL16V8 or GAL20V8, pin 11 (13) enables the registers'
+   outputs, and the array reads neither it nor pin 1. While it is high no
+   register shows on its pin, and a clock edge that a latch sent another
+   way would be lost. The sweeps have shown what the pin does by then, so
+   galre holds it low for these walks (`designs/oelatch16v8`). An output
+   that only that pin enables is a register too, with a constant input
+   if it never changes.
+
+   A pin that the sweeps took for a register may not follow the clock
+   edges of a walk: a latch that is open while pin 1 is high looks like
+   a register as long as the chip is only clocked. galre then takes the
+   pin for a latch that reads pin 1 and starts again
+   (`designs/clklatch22v10`).
 3. The outputs that read differently at the same inputs, pin 1 level and
    register state are the latch pins, less those that are a function of
    these and the other latch pins. Every output, enable and register
@@ -527,7 +550,8 @@ needed about 3 million power cycles.
   combinational use of pin 1 in a registered GAL22V10 is captured only in
   a design with latches. A latch that is open while the clock is high and
   holds whatever the inputs do while it is low looks like a register, and
-  is written as one.
+  is written as one, unless the design has other latches: then the walks
+  with pin 1 show that it does not follow the clock edges.
 - Registers that never reach a pin are not seen.
 - Of state that changes without a clock, galre models the GAL22V10's
   asynchronous reset term and latches built from combinational feedback.

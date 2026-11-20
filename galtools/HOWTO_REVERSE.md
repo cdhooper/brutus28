@@ -349,6 +349,7 @@ designs in `designs/`, with the pins the tests hold:
 | `ar22v10` | asynchronous reset term `P3 & !P4` | `6-11=0,13-20=0` |
 | `arlow22v10` | active-low reset input and register outputs | `4=0,6-11=0,13-20=0` |
 | `arw22v10` | reset term that reads a register | `4=0,6-11=0,13-20=0` |
+| `aropen22v10` | reset term that reads an I/O pin, an open-drain copy of a register that a register input reads back | `5-11=0,13-15=0,17-18=0,20-21=0` |
 | `latch16v8` | set/reset and transparent latch | `7-9=0,11-15=0,19=0` |
 | `latch22v10` | three latches in a chain, an output of two of them | `7-11=0,13-19=0` |
 | `dlat22v10` | two transparent latches with one enable | `5-11=0,13=0,17-23=0` |
@@ -361,6 +362,8 @@ designs in `designs/`, with the pins the tests hold:
 | `quietlatch16v8` | a latch that only shows when one pin changes at a time | `2=0,6-9=0,11-16=0,19=0` |
 | `racelatch16v8` | a latch held by another output's pin, with a race | `6-9=0,11-14=0,18-19=0` |
 | `chain16v8` | three latches that set each other off in one step, an output with an enable | `8-9=0,11-14=0,19=0` |
+| `clklatch22v10` | no registers: a latch that is open while pin 1 is high and looks like a register when clocked | `7-11=0,13-20=0` |
+| `oelatch16v8` | registered GAL16V8 with a latch, pin 11 not held: a register with a constant input, an output that shows a register | `6-9=0,12=0,14=0` |
 | `osc16v8` | an output that feeds back inverted and oscillates: galre stops | `5-9=0,11-16=0,19=0` |
 | `buried22v10` | a register that never reaches its pin: galre stops | `5-11=0,13-21=0` |
 
