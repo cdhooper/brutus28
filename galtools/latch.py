@@ -432,7 +432,7 @@ class LatchAnalysis:
             best = None
             for inv in (False, True):
                 a, b = (off, on) if inv else (on, off)
-                cubes = tight(sop(a, b, k), a, k)
+                cubes = tight(sop(a, b, k), a, k, n + j)
                 cubes = self._hazard_free(cubes, [(x, y) for x, y, v in self.pairs[j]
                                                   if v == (0 if inv else 1)], b, k, full, v1)
                 if best is None or len(cubes) < len(best[0]):

@@ -142,8 +142,8 @@ def sop(on, off, k):
     return [(c[0], c[1]) for c in cubes]
 
 
-def tight(cubes, on, k):
-    """The cubes, each with the literals that hold at every point of `on`.
+def tight(cubes, on, k, own=None):
+    """The cubes, claiming less where the function is known only in part.
 
     sop() grows a cube as far as `off` allows.  Where every point is known
     to be on or off, that is the function.  Where some were never seen (a
@@ -151,23 +151,39 @@ def tight(cubes, on, k):
     through), a cube then also takes in points that nothing was seen of:
     a latch held by P4 & ... got a term without P4, because no walk had
     let pin 4 fall in just that corner, and the rebuilt chip kept the
-    latch where the original lets go.  If the function was never seen on
-    with pin 4 low, no cube may say it is.
+    latch where the original lets go.
 
-    (Shrinking every cube to the points of `on` it covers goes too far:
-    the cubes then generalise so little that checking the steps keeps
-    adding to them, and the design no longer fits the chip.)"""
+    - Every cube gets the literals that hold at every point of `on`: if
+      the function was never seen on with pin 4 low, no cube says it is.
+    - A cube that reads variable `own` (a latch's own pin: a term that
+      holds the latch) is shrunk to the smallest cube around the points
+      of `on` it covers.  What holds a latch is seen at every point where
+      it rests, so there is much to go by.  The other cubes (what sets
+      it) are seen only in the steps that set it; shrunk like that, they
+      generalise so little that checking the steps keeps adding to them,
+      and the design no longer fits the chip."""
     full, v1 = litmasks(k)
     if not on:
         return cubes
-    care = val = 0
-    for b in range(k):
-        if not on & ~v1[b] & full:
-            care |= 1 << b
-            val |= 1 << b
-        elif not on & v1[b]:
-            care |= 1 << b
-    return [(c | care, v | val) for c, v in cubes]
+
+    def around(points):
+        care = val = 0
+        for b in range(k):
+            if not points & ~v1[b] & full:
+                care |= 1 << b
+                val |= 1 << b
+            elif not points & v1[b]:
+                care |= 1 << b
+        return care, val
+    care, val = around(on)
+    out = []
+    for c, v in cubes:
+        got = _cube_set(c, v, k, full, v1) & on
+        if own is not None and c >> own & 1 and got:
+            out.append(around(got))
+        else:
+            out.append((c | care, v | val))
+    return out
 
 
 # -- helpers -----------------------------------------------------------------
@@ -1014,7 +1030,8 @@ class Analysis:
             neg = sop(off, on, k)
             if self.mixed:
                 # known only where the walks went: claim no more than that
-                pos, neg = tight(pos, on, k), tight(neg, off, k)
+                own = self._own(p, kind, sup)
+                pos, neg = tight(pos, on, k, own), tight(neg, off, k, own)
             pos, neg = self._hazards(p, kind, sup, pos, neg, on, off)
             if kind == "d" and self.device == "GAL22V10":
                 # a cleared register (power-up, reset term) shows the output
@@ -1256,6 +1273,11 @@ class Analysis:
     def _latch_names(self):
         """The outputs CUPL must not minimise (reglatch: the latches)."""
         return []
+
+    def _own(self, p, kind, sup):
+        """Where in sup the function's own pin is (reglatch: a latch reads
+        itself), or None."""
+        return None
 
     def _hazards(self, p, kind, sup, pos, neg, on, off):
         """The two covers of a function, with whatever its kind needs

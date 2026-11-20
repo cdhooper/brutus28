@@ -1222,6 +1222,12 @@ class RegLatchAnalysis(Analysis):
     def _latch_names(self):
         return [self.name(p) for p in self.Lh] if self.mixed else []
 
+    def _own(self, p, kind, sup):
+        if kind or p not in self.L:
+            return None
+        v = self.n1 + len(self.reg) + self.L.index(p)
+        return sup.index(v) if v in sup else None
+
     def _hazards(self, p, kind, sup, pos, neg, on, off):
         if kind or p not in self.L:
             return pos, neg
