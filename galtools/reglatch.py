@@ -397,9 +397,12 @@ class RegLatchAnalysis(Analysis):
         reads pin 1.  It is an output from now on, and the analysis starts
         over."""
         new = []
+        walked = self.cfull
+        if w.cfg[4] == self.AROUND:        # the vectors it skipped read as 0
+            walked ^= cube_set(self.ar, self.Vc, self.base, self.cfull, self.cv1)
         for b, p in enumerate(self.Vc):
             if p in self.dev["io"] and p not in self.O and p not in self.reg \
-                    and (w.la[p] ^ self.cv1[b]) & self.cfull:
+                    and (w.la[p] ^ self.cv1[b]) & walked:
                 new.append(p)
         if new:
             for p in new:

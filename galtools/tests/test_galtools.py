@@ -401,6 +401,19 @@ class SimulatedChip(unittest.TestCase):
             (22, "d"): "P3 & P19 & !P23\n    # P4 & P22",
             (23, "d"): "P2"})
 
+    def test_skipped_vectors_are_not_driven_pins(self):
+        """A walk around the reset term skips vectors, which read as 0.
+        An enumerated I/O pin that the design does not use (19) is not
+        taken for an output because of them."""
+        device, fix, hist, latches, regs, nstates, eqs = MIXED_CASES["reglatch22v10"]
+        logs = []
+        a = galre.analyse(SimRig(jed("reglatch22v10")), device,
+                          fixed=galre.parse_fixed("7-11=0,13-18=0"), log=logs.append)
+        self.assertIn(19, a.V)
+        self.assertEqual(a.late_comb, {})
+        self.assertFalse([l for l in logs if "driven in a walk" in l])
+        self.assertEqual({(p, kind): expr for p, kind, _, expr, _ in a.eqs}, eqs)
+
     def test_registered_gal16v8_with_a_latch(self):
         """Pin 11 of a registered GAL16V8 enables the registers' outputs
         and nothing else.  galre holds it low for the walks with pin 1,
