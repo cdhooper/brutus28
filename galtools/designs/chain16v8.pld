@@ -1,0 +1,34 @@
+Name     chain16v8;
+Partno   x;
+Date     2026-11-19;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g16v8ma;
+
+/* Test design: GAL16V8, three latches in a chain.  With G and H high, S
+   sets A, A sets B and B sets C, all in one step of the inputs: the chip
+   is seen before and after, never on the way.  R drops all three at
+   once.  Y has an enable, so that the chip is not latches alone. */
+
+Pin 2  = S;
+Pin 3  = R;
+Pin 4  = G;
+Pin 5  = H;
+Pin 6  = E;
+Pin 7  = D;
+Pin 15 = Y;
+Pin 16 = C;
+Pin 17 = B;
+Pin 18 = A;
+
+A = S & !R
+  # A & !R;
+B = A & G
+  # B & !R;
+C = B & H
+  # C & !R;
+Y = D & C;
+Y.oe = E;

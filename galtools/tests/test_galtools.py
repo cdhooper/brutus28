@@ -93,6 +93,16 @@ MIXED_CASES = {
         (22, ""): "P2 & !P3\n    # !P3 & P22",
         (22, "oe"): "P4",
         (23, "d"): "P6 & P22"}),
+    # three latches in a chain: one input change sets off all three, and
+    # the chip is seen only before and after.  What comes out holds each
+    # latch by the one before it, which reads the same wherever the chip
+    # comes to rest as the original's "until R"
+    "chain16v8": ("GAL16V8", "8-9=0,11-14=0,19=0", [15, 16, 17, 18], [16, 17, 18], [], 1, {
+        (15, ""): "P7 & P16",
+        (15, "oe"): "P6",
+        (16, ""): "P5 & P17\n    # P16 & P17",
+        (17, ""): "P4 & P18\n    # P17 & P18",
+        (18, ""): "P2 & !P3\n    # !P3 & P18"}),
     "oeread22v10": ("GAL22V10", "4-11=0,13-20=0", [], [], [], 1, {
         (21, ""): "P3 & P23",
         (22, ""): "'b'0",
@@ -201,6 +211,7 @@ class SimulatedChip(unittest.TestCase):
             "latchd16v8": ["combinational feedback through pin 17"],
             "reglatch22v10": ar + ["combinational feedback through pin 21"],
             "trilatch22v10": ["combinational feedback through pin 22"],
+            "chain16v8": ["combinational feedback through pins 16, 17, 18"],
             "quietlatch16v8": ["combinational feedback through pin 18"],
             "osc16v8": ["combinational feedback through pin 18"],
             "oeread22v10": [],

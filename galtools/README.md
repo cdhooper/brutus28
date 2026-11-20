@@ -400,6 +400,32 @@ not the reset term. galre then goes on (`reglatch.py`):
    with pin 1 as an input: a step that changes one pin, or clocks the
    chip, says where the latches settle from the levels they had.
 
+   One input change can set off a chain: a latch falls, then one that
+   reads it, then a third (`designs/chain16v8`). The chip is seen only
+   before and after, so such a step by itself proves nothing about any
+   of them. galre runs the circuit learned so far through every step
+   and adds only what a wrong one shows, the steps that change fewest
+   latches first:
+   - a latch that the circuit moves and the chip left alone holds, at
+     the first such move only. What the circuit does after a wrong move
+     is no guide, because the latches that read it follow it to levels
+     the chip never had;
+   - a latch that never gets to the chip's level is excited where the
+     circuit comes to rest;
+   - a step that comes out right only by the order in which two latches
+     that chase each other are taken is not explained while one of
+     their moves is a guess; that move is held. A race that is the
+     chip's own stays;
+   - of a step of which the circuit knows nothing, the fewest latches
+     that, moved first, let the circuit do the rest are excited; failing
+     that, the step is split into rounds, or all move together.
+
+   What is added this way gives way when a later walk shows otherwise.
+   The result reads the same as the chip wherever the chip comes to
+   rest. Its equations need not be the original's: in the chain above
+   the original holds each latch until R, and galre's hold it by the
+   latch before, which is the same at rest.
+
    A latch can sit on a bidirectional pin: the GAL drives it only while
    its enable is true, and reads it as an input otherwise (a bus signal
    such as DTACK). galre enumerates such a pin like an input. The GAL
@@ -410,7 +436,12 @@ not the reset term. galre then goes on (`reglatch.py`):
    the pin's level, whoever drives it.
 4. The equations are written over pin 1 (as `CLK`), the enumerated pins,
    the registers and the latch pins. A latch gets a product term for
-   every step that holds it. From `designs/reglatch22v10`:
+   every step that holds it. A latch pin often reads the same as an
+   input at rest (a P15 that follows P6), and the walks cannot tell
+   which of the two a product term reads; when a latch's cover has more
+   product terms than its macrocell, galre grows a second one that keeps
+   inputs and the latch's own pin rather than other latches' pins, and
+   takes the smaller. From `designs/reglatch22v10`:
 
        P21 = CLK & !P3 & P4
            # CLK & P3 & P22
@@ -538,8 +569,10 @@ needed about 3 million power cycles.
     latch and no registered pin shows it before the next edge;
   - a latch reacts only to several inputs changing at once;
   - an output oscillates (it feeds back inverted, as in a ring
-    oscillator): its level when read is then arbitrary, and the samples
-    contradict each other;
+    oscillator, `designs/osc16v8`): its level when read is then
+    arbitrary, and the same walk reads differently twice. The simulated
+    chip does the same: a pin that does not settle reads an arbitrary
+    level at every read;
   - in a design of latches alone, a latch output is not always driven and
     the registers-and-latches analysis cannot take it either;
   - in a registered design, something other than the reset term or a
