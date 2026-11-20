@@ -174,8 +174,10 @@ class LatchAnalysis:
 
     def need(self):
         """How many check walks in a row the model must predict: confirm,
-        or as many as make 16384 steps (at most 64)."""
-        return max(self.confirm, min(64, -(-16384 >> self.n)))
+        or as many as make 131072 steps (at most 128).  A circuit that is
+        wrong in one step of 10000 still passes 16384 steps one time in
+        five."""
+        return max(self.confirm, min(128, -(-131072 >> self.n)))
 
     def _walk(self, cfg):
         rot, rev, start, mix = cfg

@@ -319,8 +319,8 @@ class RegLatchAnalysis(Analysis):
 
     def _need(self):
         """How many check walks in a row the learned circuit must predict:
-        confirm, or as many as make 16384 steps (at most 64)."""
-        return max(self.confirm, min(64, -(-16384 >> self.n1)))
+        confirm, or as many as make 131072 steps (at most 128)."""
+        return max(self.confirm, min(128, -(-131072 >> self.n1)))
 
     def _checks(self):
         """Walks to check the learned circuit with: from every state in

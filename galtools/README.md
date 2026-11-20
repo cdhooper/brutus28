@@ -318,9 +318,22 @@ registers (`latch.py`):
   holds it, a product term that holds through the step, so the rebuilt
   latch cannot glitch there.
 - galre then walks from other start vectors until the learned circuit
-  predicts as many walks in a row as make 16384 steps (at least two, at
-  most 64; mixed Gray code walks), learning again from those it gets
-  wrong.
+  predicts as many walks in a row as make 131072 steps (at least two, at
+  most 128; mixed Gray code walks), learning again from those it gets
+  wrong. That bounds how often the learned circuit can be wrong, it does
+  not rule it out: a latch that is set by one combination of eleven
+  inputs is seen to set a few times in all, and never just next to that
+  combination, so nothing says which of the inputs matter. With a sixth
+  of the steps, such a design passed and was wrong in two steps of 30000.
+- Where a function is known only at the points the walks went through,
+  its product terms claim little beyond them. Every term has the literals
+  that hold wherever the function was seen on. A term that holds a latch
+  (it reads the latch's own pin) is shrunk to the smallest one around the
+  points it covers: what holds a latch is seen wherever it rests. The
+  terms that set it are seen only in the steps that do, and stay as
+  large as nothing contradicts; shrunk too, they generalise so little
+  that the design stops fitting the chip. The term that keeps a latch
+  from glitching between two points stays within the other terms.
   Last, it checks that every output is always driven.
 
 The equations read the latch pins, as the original's do:
@@ -376,8 +389,8 @@ not the reset term. galre then goes on (`reglatch.py`):
      order, both ways, so that the chip is clocked and reset in many
      places;
    - then walks from other states and start vectors, until the learned
-     circuit predicts as many in a row as make 16384 steps (at least
-     two, at most 64), in mixed Gray code order, so pin 1 rises often
+     circuit predicts as many in a row as make 131072 steps (at least
+     two, at most 128), in mixed Gray code order, so pin 1 rises often
      and in many places.
 3. The outputs that read differently at the same inputs, pin 1 level and
    register state are the latch pins, less those that are a function of
