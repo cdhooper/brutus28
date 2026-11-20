@@ -1651,6 +1651,11 @@ class RegLatchAnalysis(Analysis):
                             self.extra[(j, i)] = lc >> j & 1
                         added = True
                         break
+                    if any(g[j][i] == 0 for j in pins):
+                        # added in this round already, for the same step from
+                        # another vector: not one move earlier as well
+                        added = True
+                        break
         return added
 
     def _predict(self, w):
