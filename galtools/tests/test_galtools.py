@@ -120,6 +120,15 @@ MIXED_CASES = {
         (23, "oe"): "P2"}),
 }
 
+# latches A and B that set together, and C that follows them through
+# A & B: the pins held, and the terms galre must find for each pin
+LATCHFOLLOW = ("12-14=0,19=0", {
+    (15, ""): {"P16 & P18"},
+    (15, "oe"): {"P4"},
+    (16, ""): {"P5 & P6", "P5 & P7", "P5 & P8", "P5 & P9", "P17 & P18", "P11 & P16"},
+    (17, ""): {"P1 & P2", "P1 & P3", "P8 & P9", "P4 & P17"},
+    (18, ""): {"P1 & P2", "P1 & P3", "P6 & P7", "P4 & P18"}})
+
 # a register input that reads a latch which must have been set on the way
 # to the state: the pins held, and what galre must find
 ROUTELATCH = ("5-11=0,13-20=0", {
@@ -433,6 +442,64 @@ class SimulatedChip(unittest.TestCase):
         self.assertEqual(a.check_equations(), [])
         self.assertEqual(verify.check_captures(a, jed("routelatch22v10")), [])
 
+    def test_latch_taken_to_follow(self):
+        """One input change sets latches A and B, and C follows them through
+        A & B; from outside the three rise in one step.  galre finds C
+        following by itself here.  Where it takes such a latch to move
+        with the others, the latch needs their terms too and may not fit
+        its macrocell; galre then learns again with it moving after the
+        other latches of a step.  Told that pin 16 does not fit, it does
+        so, and finds the same design."""
+        fix, eqs = LATCHFOLLOW
+
+        def terms(a):
+            self.assertFalse(any(inv for _, _, inv, _, _ in a.eqs))
+            return {(p, kind): set(expr.split("\n    # ")) for p, kind, _, expr, _ in a.eqs}
+        a = galre.analyse(SimRig(jed("latchfollow16v8")), "GAL16V8",
+                          fixed=galre.parse_fixed(fix), log=quiet)
+        self.assertIsInstance(a, RegLatchAnalysis)
+        self.assertEqual(a.follow, set())
+        self.assertEqual(a.Lh, [16, 17, 18])
+        self.assertEqual(terms(a), eqs)
+        real, calls, logs = RegLatchAnalysis._over, [], []
+
+        def over(a):
+            calls.append(1)
+            return [16] if len(calls) == 1 else real(a)
+        with mock.patch.object(RegLatchAnalysis, "_over", over):
+            a = galre.analyse(SimRig(jed("latchfollow16v8")), "GAL16V8",
+                              fixed=galre.parse_fixed(fix), log=logs.append)
+        self.assertEqual(a.follow, {16})
+        self.assertIn("pin 16 taken to move after the other latches of a step", logs)
+        self.assertEqual(terms(a), eqs)
+        self.assertEqual(a.check_equations(), [])
+        self.assertEqual(verify.check_captures(a, jed("latchfollow16v8")), [])
+
+    def test_walks_chosen_for_what_the_circuit_guesses(self):
+        """A product term that was seen to decide a latch with a pin at one
+        level only may lack that pin's literal.  galre lists such cases
+        (_open_terms), and chooses walks that the learned circuit takes
+        through them.  Here the walks learned from are cut down to those
+        from before the confirmation, so that cases are open; a chosen
+        walk settles some of them, and comes out as the circuit says."""
+        fix, _ = LATCHFOLLOW
+        a = galre.analyse(SimRig(jed("latchfollow16v8")), "GAL16V8",
+                          fixed=galre.parse_fixed(fix), log=quiet)
+        self.assertEqual(a.guided, 0)
+        a._open_terms()
+        self.assertEqual(a._open, set())          # every term seen at both levels
+        a.lwalks = a.lwalks[:len(a.S) + 6]
+        a._solve()
+        a._open_terms()
+        self.assertTrue(a._open)
+        j, ci, i, side = sorted(a._open)[0]
+        sup, cubes, _ = a.cover[(a.L[j], "")]
+        self.assertFalse(cubes[ci][0] >> i & 1)   # a variable the term does not read
+        cfg, claims = a._guess_walk(set())
+        self.assertTrue(claims and claims <= a._open)
+        w = a._event(*cfg)
+        self.assertIsNone(a._predict(w))
+
     def test_skipped_vectors_are_not_driven_pins(self):
         """A walk around the reset term skips vectors, which read as 0.
         An enumerated I/O pin that the design does not use (19) is not
@@ -531,7 +598,8 @@ class SimulatedChip(unittest.TestCase):
         cases += [(name, c[0], galre.parse_fixed(c[1])) for name, c in MIXED_CASES.items()]
         cases += [("racelatch16v8", "GAL16V8", galre.parse_fixed("6-9=0,11-14=0,18-19=0")),
                   ("oelatch16v8", "GAL16V8", galre.parse_fixed(OELATCH[0])),
-                  ("routelatch22v10", "GAL22V10", galre.parse_fixed(ROUTELATCH[0]))]
+                  ("routelatch22v10", "GAL22V10", galre.parse_fixed(ROUTELATCH[0])),
+                  ("latchfollow16v8", "GAL16V8", galre.parse_fixed(LATCHFOLLOW[0]))]
         try:
             for name, device, fixed in cases:
                 with self.subTest(design=name):

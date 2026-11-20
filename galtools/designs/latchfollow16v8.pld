@@ -1,0 +1,48 @@
+Name     latchfollow16v8;
+Partno   x;
+Date     2026-11-20;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g16v8ma;
+
+/* Test design: GAL16V8, latches A and B that two terms set together (and
+   one more each), and a latch C that follows them a gate delay later
+   through one term, A & B.  From outside the three rise in one step.
+   Taken to rise with A and B, C needs their terms as well as its own,
+   more than the seven of a macrocell; taken to follow them, it has the
+   six below.  O has an enable, so that the chip is not latches alone. */
+
+Pin 1  = X;
+Pin 2  = Y1;
+Pin 3  = Z;
+Pin 4  = H;
+Pin 5  = E;
+Pin 6  = K1;
+Pin 7  = K2;
+Pin 8  = K3;
+Pin 9  = K4;
+Pin 11 = G;
+Pin 15 = O;
+Pin 16 = C;
+Pin 17 = B;
+Pin 18 = A;
+
+A = X & Y1
+  # X & Z
+  # K1 & K2
+  # A & H;
+B = X & Y1
+  # X & Z
+  # K3 & K4
+  # B & H;
+C = A & B
+  # K1 & E
+  # K2 & E
+  # K3 & E
+  # K4 & E
+  # C & G;
+O = A & C;
+O.oe = H;

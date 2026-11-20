@@ -279,6 +279,30 @@ def main(argv=None):
                 best = dev, kept, text, diff, notes
             if not diff:
                 break
+        if (best is None or best[3]) and keep and getattr(a, "hold_terms", False):
+            # CUPL's minimiser, let loose on the terms that hold the latches
+            # through a step, may not get back to as few as fit.  galre's own
+            # covers without those terms do, if anything does: written like
+            # that, and kept as written (MIN).
+            a.hold_terms = False
+            a.equations()
+            plain = a.cupl(args.title)
+            for dev in dict.fromkeys(d for d, _ in tries):
+                text = plain if not dev else plain.replace(
+                    "Device %s;" % a.dev["cupl"], "Device %s;" % dev)
+                with open(pld, "w") as f:
+                    f.write(text)
+                jed = compile_cupl(args.cupl, pld, said.append)
+                if jed:
+                    notes = []
+                    diff = verify.check_captures(a, jed, notes)
+                    if best is None or not diff:
+                        best = dev, None, text, diff, notes
+                    if not diff:
+                        break
+            if best is None or best[1] is not None:
+                a.hold_terms = True           # no better: as it was
+                a.equations()
         if best is None:
             with open(pld, "w") as f:
                 f.write(src)
@@ -293,7 +317,10 @@ def main(argv=None):
             jed = compile_cupl(args.cupl, pld, log)
         if dev:
             log("compiled for %s (CUPL does not choose that mode by itself)" % dev)
-        if keep and not kept and not diff:
+        if keep and kept is None and not diff:
+            log("it does not fit with the product terms that hold the latches through a step: "
+                "written without them in %s" % os.path.basename(pld))
+        elif keep and not kept and not diff:
             log("it does not fit with the product terms that hold the latches through a step: "
                 "compiled without them (no MIN statement in %s)" % os.path.basename(pld))
         log("%s against the captures (%s x %d input vectors%s): %s" % (

@@ -1308,6 +1308,7 @@ class Analysis:
         regs = sorted(self.reg)
         names = [self.name(p) for p in self.EV] + [self.name(r) for r in self.cvars]
         self.F, self.cover, eqs = F, {}, []
+        self.nterms = {}            # (pin, kind) -> (product terms, the macrocell's)
         for (p, kind), f in F.items():
             sup = self._support(f)
             while True:
@@ -1338,6 +1339,7 @@ class Analysis:
                 # ... and claim no more than that
                 own = self._own(p, kind, sup)
                 pos, neg = tight(pos, on, k, own), tight(neg, off, k, own)
+                self.nterms[(p, kind)] = (min(len(pos), len(neg)), limit)
             pos, neg = self._hazards(p, kind, sup, pos, neg, on, off)
             if kind == "d" and self.device == "GAL22V10":
                 # a cleared register (power-up, reset term) shows the output

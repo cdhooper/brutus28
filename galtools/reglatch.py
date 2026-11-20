@@ -73,7 +73,7 @@ from functools import reduce
 from analysis import Analysis, AsyncDesign, Limit, _Restart, _pins, _state, lowest, swap
 from bitsim import litmasks
 from latch import LatchAnalysis, _ONES, _ZEROS, _from_bytes
-from rig import CLOCK, bitrev, cube_set, gray_arrays, popcount, survey_mul
+from rig import CLOCK, bitrev, cube_set, gray_arrays, gray_order, popcount, survey_mul
 
 _T01 = bytes.maketrans(b"01", b"\x00\x01")
 
@@ -157,12 +157,16 @@ class RegLatchAnalysis(Analysis):
     PLAIN, AROUND, AVOID = 0, 1, 2      # how a walk treats the reset term
 
     def __init__(self, rig, device, fixed=None, survey=64, max_states=1024, log=print,
-                 hist=(), max_checks=48, confirm=2):
+                 hist=(), max_checks=48, confirm=2, max_guided=64):
         super().__init__(rig, device, fixed=fixed, survey=survey, max_states=max_states,
                          log=log)
         self.hist = {p for p in hist if p in self.dev["io"] and p not in self.fixed}
         self.mixed = bool(self.hist)
-        self.max_checks, self.confirm = max_checks, confirm
+        self.max_checks, self.confirm, self.max_guided = max_checks, confirm, max_guided
+        self.guided = 0           # walks chosen to go through the circuit's guesses
+        self.follow = set()       # latch pins that move after the other latches of a step
+        self._blind = None
+        self._gk, self._tg, self._open, self._dead = 0, None, set(), set()
         self.L, self.Lh, self.O, self.lwalks = [], [], [], []
         self.readpins = set()     # outputs with an enable whose level other logic reads
         self.rise = {}            # clock edges a walk showed: (state, x, levels) -> state
@@ -172,6 +176,8 @@ class RegLatchAnalysis(Analysis):
         self._tabs = {}
         self.deep = False         # every readable output is a variable, not only the latches
         self.oe_held = None       # a registered GAL16V8's pin 11, held low for the walks
+        self.unseen = []          # what the latches' terms claim without having been seen to
+        self.hold_terms = True    # covers get the terms that hold a latch through a step
         self.composite = False    # explore by register values and latch levels together
         self.var = []             # per state: its sweeps with the latches at other levels
 
@@ -337,6 +343,7 @@ class RegLatchAnalysis(Analysis):
                 self.var[self.sidx[s]].append((self._pack(pre, N), _states(acc, N)))
         self.rise, self._dtab = {}, None
         self.extra, self.split, self.stuck, self._lkey = {}, set(), set(), None
+        self.follow, self._blind = set(), None
 
     def _pack(self, la, N):
         """The outputs' levels per vector, 8 pins to a byte (in the order
@@ -440,6 +447,12 @@ class RegLatchAnalysis(Analysis):
         lv = 0
         for j, (c, bit) in enumerate(self.lpos):
             lv |= (kb[c] >> bit & 1) << j
+        return self._edge(b, x, lv)
+
+    def _edge(self, b, x, lv):
+        """The state that the learned register inputs load at a clock edge
+        in state b with x, the latch pins at lv (None: not a known
+        state)."""
         wn = []
         for i, r in enumerate(sorted(self.reg)):
             t = self._dtab.get((i, b, lv))
@@ -1152,35 +1165,47 @@ class RegLatchAnalysis(Analysis):
                 raise e from None
 
     def _converge(self):
-        """Learn from the walks, then walk on until the learned circuit
-        predicts enough walks in a row."""
+        """Learn from the walks, and walk on until the learned circuit is
+        confirmed (_confirm).  If a latch then needs more product terms
+        than its macrocell has, try it as one that follows the others."""
         self._solve()
-        good = checks = 0
-        need = self._need()
-        limit = max(self.max_checks, 3 * need)
-        for cfg in self._checks():
-            if good >= need or checks >= limit:
-                break
-            checks += 1
-            w = self._event(*cfg)
-            miss = self._predict(w)
-            if w.surprises:
-                miss = "the registers went elsewhere than predicted at %d clock edge%s" % (
-                    w.surprises, "" if w.surprises == 1 else "s")
-            self.lwalks.append(w)
-            if miss is None:
-                good += 1
-                continue
-            good = 0
-            self.log("walk from state %s with rot=%d rev=%d start=%x mix=%d: %s; learning "
-                     "again from %d walks" % ((_state(self.S[cfg[0]]),) + cfg[1:4] + (cfg[5],)
-                                              + (miss, len(self.lwalks) - len(self.S))))
-            self._solve()
-        if good < need:
-            raise AsyncDesign("the model of registers and latches did not predict %d walks in "
-                              "a row within %d walks" % (need, limit))
+        self._confirm()
+        over = self._over()
+        if over and not self.follow:
+            # One input change can make several latches move, and the chip
+            # is seen only before and after: which of them reacts to the
+            # input, and which to the others having moved?  Both explain
+            # the walks, but the equations differ.  Taken to move with the
+            # others, a latch needs their terms as well as its own, and may
+            # not fit its macrocell; taken to follow them, it needs one
+            # term that reads them.
+            kept = dict(self.extra), set(self.split), set(self.stuck)
+            self.log("%s %s more product terms than a macrocell has: learning again with "
+                     "%s moving after the other latches of a step" % (
+                         _pins(over), "needs" if len(over) == 1 else "need",
+                         "it" if len(over) == 1 else "them"))
+            self.follow = set(over)
+            self.extra, self.split, self.stuck = {}, set(), set()
+            try:
+                self._solve()
+                self._confirm()
+                now = self._over()
+            except AsyncDesign as e:
+                now = None
+                self.log("that does not explain the walks (%s)" % e)
+            if now is None or len(now) >= len(over):
+                if now is not None:
+                    self.log("%s %s not fit then either: as it was" % (
+                        _pins(now), "does" if len(now) == 1 else "do"))
+                self.follow = set()
+                self.extra, self.split, self.stuck = kept
+                self._solve()
+                self._confirm()
         cut = [w for w in self.lwalks if w.cut]
         latches = [p for p in self.Lh if p not in self.readpins]
+        if self.follow:
+            self.log("%s taken to move after the other latches of a step" % _pins(
+                sorted(self.follow)))
         self.log("latch model: latch pins %s, other outputs %s, from %d walks with pin 1 "
                  "enumerated%s" % (latches, [p for p in self.O if p not in latches],
                                    len(self.lwalks) - len(self.S),
@@ -1189,6 +1214,304 @@ class RegLatchAnalysis(Analysis):
         if self.rise:
             self.log("%d clock edges went another way than in the sweeps, with a latch at "
                      "another level: the register inputs read latch pins" % len(self.rise))
+
+    def _over(self):
+        """The latch pins whose product terms do not fit their macrocell,
+        even without those that only hold them through a step."""
+        return [p for p in self.Lh
+                if (p, "") in self.nterms and self.nterms[(p, "")][0] > self.nterms[(p, "")][1]]
+
+    def _confirm(self):
+        """Walk on until the learned circuit predicts enough walks in a
+        row (a fixed sequence of walks), then check it where it only
+        guesses (_guess_walk), and learn from every walk it gets wrong."""
+        good = checks = 0
+        need = self._need()
+        limit = max(self.max_checks, 8 * need)
+        if self._blind is None:
+            self._blind = self._checks()
+        shown, first, wrong = set(), self.guided, 0
+        while True:
+            cfg = guess = None
+            if good < need:
+                if checks >= limit:
+                    raise AsyncDesign("the model of registers and latches did not predict %d "
+                                      "walks in a row within %d walks" % (need, limit))
+                checks += 1
+                cfg = next(self._blind)
+            elif self.guided - first < self.max_guided:
+                cfg, guess = self._guess_walk(shown)
+                self.guided += cfg is not None
+            if cfg is None:
+                break
+            w = self._event(*cfg)
+            miss = self._predict(w)
+            if w.surprises:
+                miss = "the registers went elsewhere than predicted at %d clock edge%s" % (
+                    w.surprises, "" if w.surprises == 1 else "s")
+            self.lwalks.append(w)
+            if miss is None:
+                good += 1
+                if guess:
+                    shown |= guess            # the chip did as the circuit said
+                continue
+            good = 0
+            wrong += guess is not None
+            self.log("walk from state %s with rot=%d rev=%d start=%x mix=%d: %s; learning "
+                     "again from %d walks" % ((_state(self.S[cfg[0]]),) + cfg[1:4] + (cfg[5],)
+                                              + (miss, len(self.lwalks) - len(self.S))))
+            self._solve()
+        if self.guided > first:
+            self.log("%d more walks, chosen to show product terms deciding a latch where no "
+                     "walk had: %s" % (
+                         self.guided - first,
+                         "%d came out otherwise" % wrong if wrong else "all as predicted"))
+        self.unseen = sorted(self._claim(t) for t in self._open - shown)
+        if self.unseen:
+            self.log("not seen, for no walk tried gets there (%d): %s%s" % (
+                len(self.unseen), "; ".join(self.unseen[:6]),
+                "; ..." if len(self.unseen) > 6 else ""))
+
+    def _start_levels(self, a, start):
+        """The latch pins' levels at the first vector of a walk from state
+        a that begins at start, as an earlier such walk read them (None
+        if there is none)."""
+        N = 1 << self.n1
+        for w in self.lwalks:
+            if (w.order is not None and len(w.order) and w.cfg[0] == a and w.cfg[3] == start
+                    and w.order[0] == start):
+                lv = 0
+                for j, p in enumerate(self.L):
+                    lv |= (w.la[p] >> start & 1) << j
+                return lv
+        return None
+
+    def _alone_cubes(self, j, a, lv):
+        """Per product term of latch j's cover: the vectors at which, in
+        state a with the latch pins at lv, it is the only term that is
+        true."""
+        key = (j, a, lv)
+        al = self._alone.get(key)
+        if al is None:
+            n1 = self.n1
+            sup, cubes, _ = self.cover[(self.L[j], "")]
+            w = self.CW[(a, lv)]
+            cs = []
+            for care, val in cubes:
+                c = self.cfull
+                for i, v in enumerate(sup):
+                    if care >> i & 1:
+                        want = val >> i & 1
+                        if v < n1:
+                            c &= self.cv1[v] if want else self.cfull ^ self.cv1[v]
+                        elif w[v - n1] != want:
+                            c = 0
+                            break
+                cs.append(c)
+            once = twice = 0
+            for c in cs:
+                twice |= once & c
+                once |= c
+            al = self._alone[key] = [c & ~twice for c in cs]
+        return al
+
+    def _open_terms(self):
+        """What the product terms of the latches claim without having been
+        seen to: {(latch, term, variable, level)}.
+
+        A term grows as far as nothing seen contradicts it, so it may lack
+        a literal: the chip was never seen where that literal would make a
+        difference.  Where a term is the only one true and a walk has shown
+        what the latch does, the term is seen to decide.  A variable that
+        the term does not read, and at which it was seen to decide at one
+        level only, may be such a missing literal: at the other level the
+        latch was seen only where another term (the one that holds it)
+        decides as well, or not at all."""
+        n1, nn, N, m = self.n1, self.nn, 1 << self.n1, len(self.L)
+        bg = self._base[0]
+        self._alone, self._tg, self._dead = {}, {}, set()
+        seen = {}
+        for j, p in enumerate(self.L):
+            sup, cubes, _ = self.cover[(p, "")]
+            for a in range(len(self.S)):
+                for lv in range(1 << m):
+                    base = a << n1 | lv << nn
+                    chunk = bg[j][base:base + N]
+                    known = _from_bytes(chunk, _ONES) | _from_bytes(chunk, _ZEROS)
+                    if not known:
+                        continue
+                    w = self.CW[(a, lv)]
+                    for ci, pts in enumerate(self._alone_cubes(j, a, lv)):
+                        pts &= known
+                        if not pts:
+                            continue
+                        care = cubes[ci][0]
+                        for i, v in enumerate(sup):
+                            if care >> i & 1:
+                                continue
+                            if v < n1:
+                                side = ((1 if pts & ~self.cv1[v] else 0)
+                                        | (2 if pts & self.cv1[v] else 0))
+                            else:
+                                side = 2 if w[v - n1] else 1
+                            seen[(j, ci, i)] = seen.get((j, ci, i), 0) | side
+        self._open = set()
+        for j, p in enumerate(self.L):
+            sup, cubes, _ = self.cover[(p, "")]
+            k = len(sup)
+            full, v1 = litmasks(k)
+            cs = []
+            for care, val in cubes:
+                c = full
+                for i in range(k):
+                    if care >> i & 1:
+                        c &= v1[i] if val >> i & 1 else full ^ v1[i]
+                cs.append(c)
+            once = twice = 0
+            for c in cs:
+                twice |= once & c
+                once |= c
+            for (jj, ci, i), side in seen.items():
+                # ... unless another term is true wherever this one is with the
+                # variable at the other level: then nothing depends on it
+                if jj == j and side < 3 and cs[ci] & ~twice & (
+                        v1[i] if side == 1 else full ^ v1[i]):
+                    self._open.add((j, ci, i, 2 - side))
+        self._openj = [[t[1:] for t in self._open if t[0] == j] for j in range(m)]
+        # A latch that follows others moves only in steps that change
+        # several latches, which by themselves show nothing of any one of
+        # them.  What the circuit does on its way through a step that it
+        # explains counts as seen too.
+        done, keys = set(), set()
+        for rec in self.steps:
+            key = rec[0]
+            if key in keys or not self._open:
+                continue
+            keys.add(key)
+            xp, pxp, a, lp0, lc = key
+            path, rests = self._trace(lp0, a, pxp, xp)
+            if rests and path[-1] == lc:
+                for lv in path:
+                    for j in range(m):
+                        done.update(self._tries(j, a, lv, xp))
+        if done:
+            self._open -= done
+            self._openj = [[t[1:] for t in self._open if t[0] == j] for j in range(m)]
+            self._tg = {}
+
+    def _claim(self, t):
+        """An open claim as text."""
+        j, ci, i, side = t
+        sup, cubes, inv = self.cover[(self.L[j], "")]
+        names = [self.name(p) for p in self.EV] + [self.name(r) for r in self.cvars]
+        care, val = cubes[ci]
+        return "%s%s by %s with %s %s" % (
+            "!" if inv else "", self.name(self.L[j]),
+            " & ".join(("" if val >> k & 1 else "!") + names[v]
+                       for k, v in enumerate(sup) if care >> k & 1) or "'b'1",
+            names[sup[i]], "high" if side else "low")
+
+    def _tries(self, j, a, lv, xp):
+        """The open claims (_open_terms) that a sample of latch j at vector
+        xp, in state a with the latch pins at lv, would settle."""
+        t = self._tg.get((j, a, lv))
+        if t is None:
+            n1 = self.n1
+            sup = self.cover[(self.L[j], "")][0]
+            w = self.CW[(a, lv)]
+            al = self._alone_cubes(j, a, lv)
+            t = 0
+            for ci, i, side in self._openj[j]:
+                v = sup[i]
+                if v < n1:
+                    t |= al[ci] & (self.cv1[v] if side else self.cfull ^ self.cv1[v])
+                elif w[v - n1] == side:
+                    t |= al[ci]
+            self._tg[(j, a, lv)] = t
+        if not t >> xp & 1:
+            return ()
+        n1 = self.n1
+        sup = self.cover[(self.L[j], "")][0]
+        w = self.CW[(a, lv)]
+        al = self._alone_cubes(j, a, lv)
+        return [(j, ci, i, side) for ci, i, side in self._openj[j]
+                if al[ci] >> xp & 1
+                and (xp >> sup[i] & 1 if sup[i] < n1 else w[sup[i] - n1]) == side]
+
+    def _guesses(self, cfg, lv):
+        """The open claims that the walk cfg would settle, as the learned
+        circuit takes it from the latch levels lv.  A walk shows what
+        every latch does where the chip rests, and what a latch does
+        where it alone moves."""
+        a, rot, rev, start, mode, mix = cfg
+        fire, arb, s0, rm = self.fire, self.arb, self.s0, range(len(self.L))
+        new = set()
+        pxp = None
+        for xp in gray_order(self.n1, rot, rev, start, mix):
+            if pxp is None:
+                pxp = xp                    # the chip is there already
+                continue
+            d, x = xp ^ pxp, xp >> 1
+            if d & xp & 1:                  # pin 1 rises
+                if d & (d - 1):
+                    break
+                b = s0 if arb and fire[a] and arb[x] else a
+                if not (arb and fire[b] and arb[x]):
+                    b = self._edge(b, x, lv)
+                    if b is None:
+                        break
+                    if arb and fire[b] and arb[x]:
+                        b = s0
+                a = b
+            elif arb and fire[a] and arb[x]:
+                a = s0
+            path, rests = self._trace(lv, a, pxp, xp)
+            if not rests:
+                break
+            lv, pxp = path[-1], xp
+            for j in rm:
+                new.update(self._tries(j, a, lv, xp))
+            if len(path) == 2:
+                ch = path[0] ^ path[1]
+                if ch & (ch - 1) == 0:
+                    new.update(self._tries(ch.bit_length() - 1, a, path[0], xp))
+        return new
+
+    def _guess_walk(self, shown):
+        """A walk to check the learned circuit where it only guesses
+        (_open_terms).  Candidates, from every state in turn and in other
+        Gray codes, are taken through the learned circuit, and the one
+        that would settle most open claims is the next walk.  Returns
+        (walk, those claims), or (None, None) when none are open or four
+        rounds of candidates settle none."""
+        if not self.L:
+            return None, None
+        if self._tg is None:
+            self._open_terms()
+        todo = self._open - shown - self._dead
+        if not todo:
+            return None, None
+        n1 = self.n1
+        per = max(8, min(256, (1 << 17) >> n1))
+        for _ in range(4):
+            best, most = None, set()
+            for _ in range(per):
+                k = self._gk = self._gk + 1
+                a = k % len(self.S)
+                path = self.states[self.S[a]][0]
+                start = self._left_at(path)
+                lv = self._start_levels(a, start)
+                if lv is None:
+                    continue
+                cfg = (a, (k * 5) % n1, k >> 3 & 1, start,
+                       self.AVOID if self.ar and path else self.PLAIN, 0x4000 + k)
+                new = self._guesses(cfg, lv) & todo
+                if len(new) > len(most):
+                    best, most = cfg, new
+            if best:
+                return best, most
+        self._dead |= todo                  # no walk tried reaches these
+        return None, None
 
     def _solve(self):
         """Learn the latches and every function from the walks.  The walks
@@ -1207,7 +1530,7 @@ class RegLatchAnalysis(Analysis):
                 raise AsyncDesign("checking the steps against the learned circuit keeps adding "
                                   "to it (%d steps still not explained): not a circuit of "
                                   "registers and latches that galre models" % self.unexplained)
-            self._dtab = {}
+            self._dtab, self._tg = {}, None
             self.lpos = [divmod(self.O.index(q), 8) for q in self.L]
             again = False
             for w in self.lwalks:
@@ -1396,7 +1719,7 @@ class RegLatchAnalysis(Analysis):
                 + ([own] if own is not None else []))
 
     def _hazards(self, p, kind, sup, pos, neg, on, off):
-        if kind or p not in self.L:
+        if kind or p not in self.L or not self.hold_terms:
             return pos, neg
         pairs = self._hold_pairs(self.L.index(p), sup)
         k = len(sup)
@@ -1527,6 +1850,26 @@ class RegLatchAnalysis(Analysis):
                 return True
             for rec in unknown:
                 key, e, lp, lcm, rel, u = rec[:6]
+                if self.follow:
+                    ch = [j for j in range(m) if (lp ^ lcm) >> j & 1 and not u >> j & 1]
+                    lead = [j for j in ch if self.L[j] not in self.follow]
+                    late = [j for j in ch if self.L[j] in self.follow]
+                    if lead and late:
+                        # those that follow move once the others have
+                        lv = lp
+                        for j in lead:
+                            lv ^= 1 << j
+                        at = [(j, i) for js, i in ((lead, e), (late, rec[7] | lv << self.nn))
+                              for j in js]
+                        new = [(j, i) for j, i in at
+                               if (j, i) not in self.extra and self.g[j][i] == 0]
+                        for j, i in new:
+                            self.extra[(j, i)] = lcm >> j & 1
+                        if new:
+                            added = True
+                            continue
+                        if any((j, i) in self.extra and self.g[j][i] == 0 for j, i in at):
+                            continue          # added for the same step from another vector
                 first = self._first_movers(rec)
                 if first:
                     for j in first:
@@ -1638,6 +1981,10 @@ class RegLatchAnalysis(Analysis):
                     added = True
             return added
         if need:
+            lead = sum(1 << j for j in range(m)
+                       if need >> j & 1 and self.L[j] not in self.follow)
+            if lead:
+                need = lead               # those that follow, once these have moved
             if len(path) == 1 and not added and popcount(key[3] ^ lc) > 1:
                 return None
             for t in range(len(path) - 1, -1, -1):
