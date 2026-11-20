@@ -103,6 +103,15 @@ MIXED_CASES = {
         (16, ""): "P5 & P17\n    # P16 & P17",
         (17, ""): "P4 & P18\n    # P17 & P18",
         (18, ""): "P2 & !P3\n    # !P3 & P18"}),
+    # no registers: pin 23 is a latch that is open while pin 1 is high.
+    # Clocked, it looks like a register; in the walks with pin 1 it does
+    # not follow the clock edges, and is taken for a latch that reads
+    # pin 1
+    "clklatch22v10": ("GAL22V10", "7-11=0,13-20=0", [22, 23], [22, 23], [], 1, {
+        (21, ""): "P5 & P23",
+        (21, "oe"): "P6",
+        (22, ""): "P3 & !P4\n    # !P4 & P22",
+        (23, ""): "P1 & P2\n    # !P1 & P23\n    # P2 & P23"}),
     "oeread22v10": ("GAL22V10", "4-11=0,13-20=0", [], [], [], 1, {
         (21, ""): "P3 & P23",
         (22, ""): "'b'0",
@@ -110,6 +119,17 @@ MIXED_CASES = {
         (23, ""): "'b'0",
         (23, "oe"): "P2"}),
 }
+
+# a registered GAL16V8 with a latch that the register input reads: the
+# pins held, and what galre must find.  Pin 11 is not held: while it is
+# high no register shows on its pin
+OELATCH = ("6-9=0,12=0,14=0", {
+    (15, "d"): "!'b'0",
+    (16, ""): "P18",
+    (16, "oe"): "!P2 & P4",
+    (17, ""): "P3 & P17\n    # P2",
+    (18, "d"): "!P17",
+    (19, ""): "P5 & P13"})
 
 # designs of latches built from combinational feedback -> (device, pins
 # held, latch pins, other outputs, the equations galre must find).
@@ -151,6 +171,8 @@ AR_CASES = {
     "ar22v10": ("6-11=0,13-20=0", "P3 & !P4", 3),
     "arlow22v10": ("4=0,6-11=0,13-20=0", "!P3", 3),
     "arw22v10": ("4=0,6-11=0,13-20=0", "P3 & P22", 2),
+    # the term reads an I/O pin that is used as an input (16)
+    "aropen22v10": ("5-11=0,13-15=0,17-18=0,20-21=0", "!P16", 3),
 }
 
 
@@ -202,7 +224,7 @@ class SimulatedChip(unittest.TestCase):
         self.assertEqual(found, {
             "cnt16v8": [], "fsm22v10": [], "comb16v8": [],
             "cnt20v8": [], "comb20v8": [], "simple20v8": [],
-            "ar22v10": ar, "arlow22v10": ar, "arw22v10": ar,
+            "ar22v10": ar, "arlow22v10": ar, "arw22v10": ar, "aropen22v10": ar,
             "latch16v8": ["combinational feedback through pins 17, 18"],
             "latch22v10": ["combinational feedback through pins 21, 22, 23"],
             "dlat22v10": ["combinational feedback through pins 14, 15"],
@@ -212,6 +234,7 @@ class SimulatedChip(unittest.TestCase):
             "reglatch22v10": ar + ["combinational feedback through pin 21"],
             "trilatch22v10": ["combinational feedback through pin 22"],
             "chain16v8": ["combinational feedback through pins 16, 17, 18"],
+            "clklatch22v10": ["combinational feedback through pins 22, 23"],
             "quietlatch16v8": ["combinational feedback through pin 18"],
             "osc16v8": ["combinational feedback through pin 18"],
             "oeread22v10": [],
@@ -360,6 +383,42 @@ class SimulatedChip(unittest.TestCase):
                     self.assertIn("P%d.ar = %s;" % (r, term), src)
                 self.assertEqual(verify.check_captures(a, jed(name)), [])
 
+    def test_reset_term_on_an_io_pin(self):
+        """The reset term reads an I/O pin that is used as an input: a
+        state's signature is read without driving that pin both ways,
+        which would fire the term.  Pin 19 is an open-drain copy of a
+        register that a register input reads where the chip lets it go:
+        a constant output with an enable, not a register."""
+        a = Analysis(SimRig(jed("aropen22v10")), "GAL22V10",
+                     fixed=galre.parse_fixed(AR_CASES["aropen22v10"][0]), log=quiet)
+        a.run()
+        self.assertEqual(a.ar, {16: 0})
+        self.assertNotIn(16, a.cand)
+        self.assertEqual(sorted(a.reg), [22, 23])
+        self.assertEqual({(p, kind): expr for p, kind, _, expr, _ in a.eqs}, {
+            (19, ""): "'b'0",
+            (19, "oe"): "P23",
+            (22, "d"): "P3 & P19 & !P23\n    # P4 & P22",
+            (23, "d"): "P2"})
+
+    def test_registered_gal16v8_with_a_latch(self):
+        """Pin 11 of a registered GAL16V8 enables the registers' outputs
+        and nothing else.  galre holds it low for the walks with pin 1,
+        so that every clock edge shows.  An output that only pin 11
+        enables stays a register (one with a constant input); one with
+        an enable of its own that shows a register is combinational."""
+        fix, eqs = OELATCH
+        a = galre.analyse(SimRig(jed("oelatch16v8")), "GAL16V8", fixed=galre.parse_fixed(fix),
+                          log=quiet)
+        self.assertIsInstance(a, RegLatchAnalysis)
+        self.assertEqual(a.oe_held, 11)
+        self.assertEqual(a.fixed[11], 0)
+        self.assertEqual(sorted(a.reg), [15, 18])
+        self.assertEqual(a.Lh, [17])
+        self.assertEqual({(p, kind): "!" * inv + expr for p, kind, inv, expr, _ in a.eqs}, eqs)
+        self.assertEqual(a.check_equations(), [])
+        self.assertEqual(verify.check_captures(a, jed("oelatch16v8")), [])
+
     def test_register_polarity(self):
         """A GAL22V10 register output that is high at power-up (active low)
         gets a negated .d, which CUPL makes active low."""
@@ -425,7 +484,8 @@ class SimulatedChip(unittest.TestCase):
         cases += [(name, device, galre.parse_fixed(fix))
                   for name, (device, fix, _, _, _) in LATCH_CASES.items()]
         cases += [(name, c[0], galre.parse_fixed(c[1])) for name, c in MIXED_CASES.items()]
-        cases += [("racelatch16v8", "GAL16V8", galre.parse_fixed("6-9=0,11-14=0,18-19=0"))]
+        cases += [("racelatch16v8", "GAL16V8", galre.parse_fixed("6-9=0,11-14=0,18-19=0")),
+                  ("oelatch16v8", "GAL16V8", galre.parse_fixed(OELATCH[0]))]
         try:
             for name, device, fixed in cases:
                 with self.subTest(design=name):

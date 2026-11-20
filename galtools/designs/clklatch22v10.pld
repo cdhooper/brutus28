@@ -1,0 +1,31 @@
+Name     clklatch22v10;
+Partno   x;
+Date     2026-11-20;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g22v10;
+
+/* Test design: GAL22V10 without registers.  L is a latch that is open
+   while pin 1 is high: clocked, it looks like a register.  M is a latch
+   of its own, and Y has an enable, so the latches are not learned alone. */
+
+Pin 1  = CLK;
+Pin 2  = D;
+Pin 3  = S;
+Pin 4  = R;
+Pin 5  = A;
+Pin 6  = E;
+Pin 21 = Y;
+Pin 22 = M;
+Pin 23 = L;
+
+L = CLK & D
+  # !CLK & L
+  # D & L;
+M = S & !R
+  # M & !R;
+Y = A & L;
+Y.oe = E;

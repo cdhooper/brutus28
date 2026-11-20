@@ -171,6 +171,7 @@ class RegLatchAnalysis(Analysis):
         self.extra, self.split, self.stuck, self._lkey = {}, set(), set(), None
         self._tabs = {}
         self.deep = False         # every readable output is a variable, not only the latches
+        self.oe_held = None       # a registered GAL16V8's pin 11, held low for the walks
 
     # 1. exploration without the pins that change without a clock ------------
     def _history(self, pins, err):
@@ -190,6 +191,22 @@ class RegLatchAnalysis(Analysis):
 
     def _history_dependent(self, pins, err):
         self._history(pins, err)
+
+    def _no_register(self, r, msg):
+        """A pin that the sweeps took for a register does not follow the
+        clock edges of a walk.  A latch that is open while pin 1 is high
+        looks like a register in the sweeps, which only clock: take the
+        pin for a latch, and start again."""
+        if r in self.hist or r in self.fixed or r not in self.dev["io"]:
+            raise AsyncDesign(msg)
+        self.hist.add(r)
+        if r in self.V:
+            self.bidir.add(r)
+        self.mixed = True
+        self.log("asynchronous behaviour: %s" % msg)
+        self.log("taking pin %d for a latch that reads pin 1, not for a register, and "
+                 "exploring again" % r)
+        raise _Again()
 
     def _flagged(self, path, x, pins=()):
         try:
@@ -506,11 +523,11 @@ class RegLatchAnalysis(Analysis):
             if bad >= 0:
                 cands = [t for t in trust if t[0] > last_ok[bad]]
                 if not cands:
-                    raise AsyncDesign(
+                    self._no_register(regs[bad][1], (
                         "pin %d reads %d at %s in a walk that enumerates pin 1, where the "
                         "transitions lead to state %s: the registers do not follow the "
                         "transitions the sweeps and the walks showed" % (
-                            regs[bad][1], lvl[bad][xp], self._cinputs(xp), _state(self.S[a])))
+                            regs[bad][1], lvl[bad][xp], self._cinputs(xp), _state(self.S[a]))))
                 t = cands[-1]
                 f = fix[t[0]]
                 wn = list(self.W[self.S[f[0]]]) if f[0] is not None else None
@@ -990,6 +1007,26 @@ class RegLatchAnalysis(Analysis):
         if self.clock_in_v:
             raise AsyncDesign("the chip changes state without a clock, with pin 1 held: galre "
                               "walks pin 1 to learn latches in a clocked design")
+        oe = self.dev.get("oe")
+        if oe in self.V and self.reg:
+            # A registered GAL16V8 or GAL20V8: pin 11 (13) enables the
+            # registers' outputs and does nothing else, its array reads
+            # neither that pin nor pin 1.  While it is high no register
+            # shows, and a clock edge that a latch sends another way is
+            # lost.  The sweeps have shown what it does; from here on it
+            # is held low.
+            # An output that the pin alone enables is a register too (an
+            # enable term cannot read the pin): one with a constant input,
+            # if it never changes.
+            low = self.full ^ self.v1[self.V.index(oe)]
+            self.oe_const = [r for r in self.comb if r in self.cand and all(
+                t.driven[r] == t.care[r] & low for _, t in self.states.values())]
+            self.log("pin %d only enables the registers' outputs: held low from here on, so "
+                     "that the registers show in the walks with pin 1" % oe)
+            self.fixed[oe] = self.base[oe] = 0
+            self.oe_held = oe
+            self._power_up = {}
+            raise _Again()
         self._model()
         if self.n1 < 3:
             raise AsyncDesign("too few inputs to walk in different orders")

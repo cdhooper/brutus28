@@ -414,6 +414,8 @@ class Analysis:
         self._power_up = {}
         self.ar = None            # the asynchronous reset term's inputs, pin -> value
         self.ar_set = 0           # the x in it
+        self.ar_cand = []         # its pins that would be state candidates
+        self.oe_const = []        # registers with a constant input (reglatch, pin 11 held)
         self.ar_on = set()        # states in which it fires
         self.ar_regs = {}         # its register literals, register pin -> value
         self.ar_dc = set()
@@ -457,6 +459,11 @@ class Analysis:
                 raise AsyncDesign("the asynchronous reset term reads pins that are no longer "
                                   "enumerated")
             self.ar_set = cube_set(self.ar, self.V, self.base, self.full, self.v1)
+            # A state's signature is read with every candidate driven both
+            # ways, to see whether the GAL drives it.  On a pin that the
+            # reset term reads, that would fire the term.
+            self.ar_cand = [p for p in self.cand if p in self.ar]
+            self.cand = [p for p in self.cand if p not in self.ar]
         self.log("power-up walk: combinational %s (tri-state %s), state candidates %s "
                  "(never driven %s)%s" % (
                      self.comb0, tri, self.cand, never,
@@ -869,7 +876,11 @@ class Analysis:
                          "now, exploring again" % (rnd + 1, len(self.probe_x)))
         else:
             raise Limit("the probe vectors that tell the states apart did not settle")
-        self.inputs, self.reg, self.comb = [], [], list(self.comb0)
+        for r in self.ar_cand:
+            if any(t.driven[r] for _, t in self.states.values()):
+                raise AsyncDesign("the asynchronous reset term reads pin %d, which the chip "
+                                  "drives in some states: galre does not model that" % r)
+        self.inputs, self.reg, self.comb = list(self.ar_cand), [], list(self.comb0)
         for i, r in enumerate(self.cand):
             sigs = {sig[i] for sig in self.states}
             if all(not t.driven[r] for _, t in self.states.values()):
@@ -878,7 +889,30 @@ class Analysis:
                 self.reg.append(r)
             else:
                 self.comb.append(r)       # constant or input-dependent
+        for i, r in enumerate(self.cand):
+            # A register's feedback comes from the register, not from its
+            # pin.  A pin that shows one level where it is driven, and that
+            # other logic reads where the chip lets it go, is a constant
+            # output with an enable (an open-drain copy of a register,
+            # say), if the other registers tell the states apart.
+            if (r in self.reg and r in self.V
+                    and len({s[i] for s in self.states} - {"Z"}) == 1 and self._pin_read(r)):
+                rest = [k for k, q in enumerate(self.cand) if q in self.reg and q != r]
+                if len({tuple(s[k] for k in rest) for s in self.states}) == len(self.states):
+                    self.reg.remove(r)
+                    self.comb.append(r)
         oe = self.dev.get("oe")
+        if oe is not None and self.fixed.get(oe) == 0 and not self.clock_in_v:
+            # Held low, pin 11 (13) enables every register: a pin that is
+            # not always driven has an enable of its own.
+            for r in list(self.reg):
+                if any(t.driven[r] != t.care[r] for _, t in self.states.values()):
+                    self.reg.remove(r)
+                    self.comb.append(r)
+            for r in self.oe_const:
+                if r in self.comb:
+                    self.comb.remove(r)
+                    self.reg.append(r)
         if oe in self.V and not self.clock_in_v:
             # A registered GAL16V8's or GAL20V8's registers are enabled by
             # the OE pin (11, 13) and by nothing else.  A pin that changes with the state but is not
@@ -895,6 +929,26 @@ class Analysis:
         self.ar_on = {s for s, (path, _) in self.states.items() if path in self.ar_paths}
         if self.ar:
             self.log("the asynchronous reset term fires in %d of them" % len(self.ar_on))
+
+    def _pin_read(self, r):
+        """Does a transition or another pin depend on the level of the
+        enumerated pin r where the chip lets it go?"""
+        b = self.V.index(r)
+        for s, (_, t) in self.states.items():
+            free = (t.care[r] ^ t.driven[r]) & self.full
+            if not free:
+                continue
+            for xs in self.trans.get(s, {}).values():
+                if (xs ^ swap(xs, b, self.v1)) & free:
+                    return True
+            for p in t.value:
+                if p in self.V or p == CLOCK or p in self.hist:
+                    continue
+                d, v = t.driven[p], t.value[p]
+                ds, vs = swap(d, b, self.v1), swap(v, b, self.v1)
+                if ((d ^ ds) | (v ^ vs) & d & ds) & free & t.care[p] & swap(t.care[p], b, self.v1):
+                    return True
+        return False
 
     def run(self):
         """discover + explore + assign + equations; treats pin 1 as an input
@@ -928,7 +982,7 @@ class Analysis:
         the next round on (True: discover and explore again)."""
         held = {}
         for r in self.cand:
-            if r not in self.comb or r in self.late_comb or r in self.hist:
+            if r not in self.comb or r in self.late_comb or r in self.hist or r in self.V:
                 continue
             tables = [t for _, t in self.states.values()]
             if not any(t.care[r] ^ t.driven[r] for t in tables):

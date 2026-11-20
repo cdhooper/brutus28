@@ -1,0 +1,31 @@
+Name     aropen22v10;
+Partno   x;
+Date     2026-11-20;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g22v10;
+
+/* Test design: GAL22V10.  The asynchronous reset term reads an I/O pin
+   that is used as an input (16).  Pin 19 is an open-drain copy of a
+   register: low while Q0 is set, let go otherwise, and the input of Q1
+   reads its level, whoever drives it. */
+
+Pin 1  = CLK;
+Pin 2  = A;
+Pin 3  = B;
+Pin 4  = C;
+Pin 16 = RST;
+Pin 19 = W;
+Pin 22 = Q1;
+Pin 23 = Q0;
+
+Q0.d = A;
+Q1.d = B & W
+     # C & Q1;
+W = 'b'0;
+W.oe = Q0;
+Q0.ar = !RST;
+Q1.ar = !RST;

@@ -309,7 +309,8 @@ def main(argv=None):
             import csimcheck
             log(csimcheck.report(args.csim, pld, jed))
         if args.mode == "sim":
-            d, first, osc = verify.compare_jeds(args.source, jed, args.steps, fixed=a.fixed,
+            held = {p: v for p, v in a.fixed.items() if p != getattr(a, "oe_held", None)}
+            d, first, osc = verify.compare_jeds(args.source, jed, args.steps, fixed=held,
                                                 sic=latches or mixed)
             log("random %d-step run%s, original vs rebuilt: %s" % (
                 args.steps, " (one input changing at a time)" if latches or mixed else "",
