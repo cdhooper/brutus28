@@ -1279,6 +1279,8 @@ class RegLatchAnalysis(Analysis):
             t = self._tabs[(q, a, lv, "oe")] = _b01(self._enabled(q, a, lv), 1 << self.n1)
         return t
 
+    SYNC = 6        # moves beyond one per latch in which all excited latches move together
+
     def _trace(self, lv, a, pxp, xp):
         """How the learned latches move at vector xp in state a, from the
         levels lv they had at vector pxp: (the levels after each move, the
@@ -1305,7 +1307,7 @@ class RegLatchAnalysis(Analysis):
                 if not free >> j & 1 and self._tab(j, a, lv)[xp] != lv >> j & 1:
                     exc |= 1 << j
             if exc:
-                lv ^= exc if it < m + 6 else exc & -exc
+                lv ^= exc if it < m + self.SYNC else exc & -exc
             elif rel >= 0:
                 lv ^= 1 << rel
             else:
@@ -1343,7 +1345,7 @@ class RegLatchAnalysis(Analysis):
         if not m or not self.steps:
             return False
         self._tabs = {}
-        wrong, seen = {}, set()
+        wrong, raced, seen = {}, [], set()
         for rec in self.steps:
             key = rec[0]
             if key in seen:
@@ -1353,9 +1355,21 @@ class RegLatchAnalysis(Analysis):
             path, rests = self._trace(lp0, a, pxp, xp)
             if not (rests and path[-1] == lc):
                 wrong.setdefault(popcount(lp0 ^ lc), []).append((rec, path, rests))
+            elif len(path) > m + self.SYNC + 1:
+                raced.append((rec, path))
         self.unexplained = sum(len(v) for v in wrong.values())
         if not wrong:
-            return False
+            # A step that comes out right only by the order in which the
+            # latches are taken, after they did not settle moving together:
+            # two of them chase each other, and which wins is the model's
+            # choice, not the chip's (the rebuilt chip may choose
+            # otherwise).  If one of them moves on a guess, it holds; a
+            # race that is the chip's own stays.
+            added = False
+            for rec, path in raced:
+                if self._hold_first(rec, path[:m + self.SYNC + 1]):
+                    added = True
+            return added
         stuck = None
         for k in sorted(wrong):
             added, unknown = False, []
@@ -1393,6 +1407,27 @@ class RegLatchAnalysis(Analysis):
                 self.unexplained, [self.L[j] for j in range(m) if (lp0 ^ lc) >> j & 1],
                 self._cinputs(xp), _state(self.S[a])))
 
+    def _hold_first(self, rec, path):
+        """For a step at which the learned latches do not settle: the
+        first move on the way that takes a latch from the level the chip
+        ends at, and that no walk has shown (the minimiser's guess), is
+        held.  True if there is one."""
+        key, e, lp, lcm, rel, u, pxx, xx = rec
+        lc = key[4]
+        m, nn, g = len(self.L), self.nn, self.g
+        for t in range(len(path) - 1):
+            gone = (path[t] ^ path[t + 1]) & ~(path[t] ^ lc) & ~u
+            i = xx | path[t] << nn
+            new = [j for j in range(m) if gone >> j & 1 and g[j][i] == 0]
+            if new:
+                added = False
+                for j in new:
+                    if (j, i) not in self.extra:
+                        self.extra[(j, i)] = lc >> j & 1
+                        added = True
+                return added
+        return False
+
     def _correct(self, rec, path, rests):
         """Add what the step rec shows, given the way the learned circuit
         takes through it: True if something was added, None if the circuit
@@ -1401,12 +1436,12 @@ class RegLatchAnalysis(Analysis):
         key, e, lp, lcm, rel, u, pxx, xx = rec
         lc = key[4]
         m, nn, g = len(self.L), self.nn, self.g
-        if not rests:
-            return False
+        if not rests or len(path) > m + self.SYNC + 1:
+            return self._hold_first(rec, path[:m + self.SYNC + 1])     # the latches chase each other
         bad = (path[-1] ^ lc) & ~u
         if not bad:
             return False
-        added, need = False, 0
+        added, need, left = False, 0, {}
         for j in range(m):
             if not bad >> j & 1:
                 continue
@@ -1414,11 +1449,23 @@ class RegLatchAnalysis(Analysis):
             at = [t for t in range(len(path)) if path[t] >> j & 1 == want]
             if not at:
                 need |= 1 << j                  # never gets to the chip's level
-                continue
-            i = xx | path[at[-1]] << nn         # was there, and left
-            if g[j][i] == 0 and (j, i) not in self.extra:
-                self.extra[(j, i)] = want
-                added = True
+            elif g[j][xx | path[at[-1]] << nn] == 0:
+                left.setdefault(at[-1], []).append(j)       # was there, and left
+        if left:
+            # The circuit moved a latch that the chip held, by a guess of the
+            # minimiser's.  What it does after the first such move is no
+            # guide: a latch that reads the one moved wrongly follows it, at
+            # levels the chip never had, and holding it there, or exciting
+            # another there, would be learning from the mistake.  So only
+            # the first wrong move is held; the rest shows when the circuit
+            # is learned again.
+            t = min(left)
+            for j in left[t]:
+                i = xx | path[t] << nn
+                if (j, i) not in self.extra:
+                    self.extra[(j, i)] = lc >> j & 1
+                    added = True
+            return added
         if need:
             if len(path) == 1 and not added and popcount(key[3] ^ lc) > 1:
                 return None
