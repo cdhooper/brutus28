@@ -151,6 +151,12 @@ this:
    pin 1 together with the inputs, from every state, and learns the
    latches with pin 1 and the registers as their inputs. It also learns
    register inputs that read a latch, and latches on bidirectional pins.
+6. **Outputs that do not settle.** If the same walk reads differently
+   twice, a pin may be oscillating: an output that feeds back inverted.
+   galre reads every vector many times, takes a pin for its own
+   complement where it does not settle, and writes that. The source
+   says in a comment which pin it is, and which outputs it took to
+   follow it. A copy oscillates at its own frequency.
 
 It writes:
 
@@ -388,7 +394,8 @@ designs in `designs/`, with the pins the tests hold:
 | `routelatch22v10` | a register that loads only with a latch set on the way to the state: explored by registers and latch level together | `5-11=0,13-20=0` |
 | `latchfollow16v8` | two latches that set together, and a third that follows them through one term | `12-14=0,19=0` |
 | `edgelatch16v8` | an edge detector made from an output's gate delay, an output with an enable | `7-9=0,11-14=0,19=0` |
-| `osc16v8` | an output that feeds back inverted and oscillates: galre stops | `5-9=0,11-16=0,19=0` |
+| `osc16v8` | an output that feeds back inverted and oscillates, and one that follows it | `5-9=0,11-16=0,19=0` |
+| `oscstate16v8` | an oscillating output and a latch in one chip: galre stops | `6-9=0,11-16=0,19=0` |
 | `buried22v10` | a register that never reaches its pin: galre stops | `5-11=0,13-21=0` |
 
 ## 10. When galre stops
@@ -410,7 +417,9 @@ commit (section 2).
 
 | Message | Meaning |
 |---|---|
-| "the same walk read differently twice on ..." | A pin reads differently on the same inputs: a bad contact in the socket, or an output that oscillates. Reseat the chip. |
+| "the same walk read differently twice on ..." | A pin reads differently on the same inputs. galre goes on to see whether it is an output that oscillates ("trying an output that feeds back inverted"); this is the reason only if one of the next two follows. |
+| "pin N reads unsteadily at ... input vectors in one walk order and not in another" | Not an oscillator, which fails to settle at the same inputs every time: a bad contact in the socket or a floating pin. Reseat the chip. |
+| "pin N settles at ..., but high in one walk order and low in another: the chip holds state as well as oscillating" | An oscillating output together with latches or registers, which galre does not model. |
 | "... is 1 once and 0 once: not a circuit of latches on those pins" | Not latches alone. galre goes on to try registers and latches together; this is the reason only if that fails too. |
 | "the registers do not follow the transitions the sweeps and the walks showed" | The registers go another way than learned, and no latch explains it: state that no pin shows, or readings that do not repeat. |
 | "... led to state ..., but the same clocks from power-up lead to ..." | The same: a register that never reaches a pin, or readings that do not repeat (reseat the chip). In a design with latches galre first explores again by the registers and the latch levels together ("exploring again by the registers and the levels of ..."); this is the reason only if it shows again after that. |

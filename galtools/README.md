@@ -367,6 +367,49 @@ changes one input at a time. galre does not model the latches' state at
 power-up, which in a cross-coupled pair is a race the rebuilt chip may
 settle differently. It reports the walks that start differently.
 
+### Outputs that do not settle
+
+An output that feeds back inverted has no level while its loop is closed.
+With
+
+    P17 = !P1 & !P5
+        # !P17 & !P5;
+
+(from an accelerator board's GAL), pin 17 is its own complement while
+pin 1 is high and pin 5 low, and toggles as fast as the chip lets it: a
+ring oscillator of one gate. A read then catches an arbitrary level, and
+the same walk reads differently twice. The simulated chip does the same:
+a pin that does not settle reads an arbitrary level at every read.
+
+Where a pin does not settle is itself what there is to learn. When the
+power-up walk reads differently twice, galre (`osc.py`) reads every
+vector twelve times in each of four walk orders, which says for every
+output and every vector whether it settles there, and at which level:
+
+- A pin that does not settle at a vector can only be the complement of
+  itself there: its equation is 1 with the pin low and 0 with it high.
+  Where it settles, the equation is its level.
+- An output that is unsteady only where such a pin is, is a function of
+  that pin there, and is taken to follow it. Following its complement
+  explains the same reads, because the phase is not seen; of the two,
+  galre writes the one with fewer product terms and literals, and says
+  so in a comment in the source.
+- An output that settles where the pin does not is the same at both
+  levels of the pin.
+
+The equations above come out as they are, and `designs/osc16v8` as its
+source. The rebuilt JED is put through the same reads: every output must
+settle at the same vectors, at the same levels.
+
+An oscillator fails to settle at the same vectors every time. A pin that
+is unsteady at other vectors in another walk order is a bad contact or
+a floating pin, and galre says that instead. It also stops when the chip
+holds state as well (`designs/oscstate16v8`), at a ring through several
+pins, and at outputs that are not always driven. The frequency is the
+chip's own. This has not been tried on a real chip: a loop of one gate
+may toggle too fast for its pin to swing fully, and then read as a
+level.
+
 ### Registers and latches together
 
 A registered design can hold state in a latch too, and a GAL22V10's
@@ -651,11 +694,10 @@ needed about 3 million power cycles.
     because of a latch and no registered pin shows it before the next
     edge;
   - a latch reacts only to several inputs changing at once;
-  - an output oscillates (it feeds back inverted, as in a ring
-    oscillator, `designs/osc16v8`): its level when read is then
-    arbitrary, and the same walk reads differently twice. The simulated
-    chip does the same: a pin that does not settle reads an arbitrary
-    level at every read;
+  - a pin reads unsteadily, and not as an output that feeds back
+    inverted would (see Outputs that do not settle): at other vectors
+    in another walk order, or in a chip that holds state as well
+    (`designs/oscstate16v8`);
   - in a design of latches alone, a latch output is not always driven and
     the registers-and-latches analysis cannot take it either;
   - in a registered design, something other than the reset term or a
@@ -754,6 +796,7 @@ chunks. The header comment of `fw/capture.c` describes the format.
 | `galre.py` | Command line |
 | `analysis.py` | Discovery, exploration, equations, CUPL |
 | `latch.py` | Latches built from combinational feedback |
+| `osc.py` | Outputs that feed back inverted and do not settle |
 | `reglatch.py` | Latches in a registered design, and pin 1 as an input |
 | `rig.py` | `SimRig` (simulated chip), `BrutusRig` (board, jumper check), recording and replay, socket pin maps |
 | `fwsim.py`, `fwstub/` | `fw/capture.c` built for the host, with a simulated GAL in the socket (`galmodel.c`: the GAL in C) |
