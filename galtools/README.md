@@ -487,7 +487,11 @@ not the reset term. galre then goes on (`reglatch.py`):
    after the others of a step (one term that reads them), and keeps
    that if it explains the walks and fits better.
 
-   What is added this way gives way when a later walk shows otherwise.
+   What is added this way gives way when a later walk shows otherwise,
+   also when a later step does: if the circuit moves a latch at a point
+   only because of such an addition, and the chip left it alone there,
+   the addition is replaced by a hold, and the step that it was made
+   for is explained again, one move earlier.
    The result reads the same as the chip wherever the chip comes to
    rest. Its equations need not be the original's: in the chain above
    the original holds each latch until R, and galre's hold it by the
@@ -530,6 +534,16 @@ equations read other outputs' pins as the original's do
 (`!P16 = !P3 & !P15 # !P2 & !P16`, with pin 15 for NC). It does this only
 as a second attempt, and only up to 22 bits of inputs, register states
 and outputs together.
+
+The same makes an edge detector learnable (`designs/edgelatch16v8`, after
+a video digitiser's GAL): pin 16 is a copy of pin 4, and a latch is set
+by `!P4 & P16`, which is true only for the gate delay in which pin 16
+has not yet followed pin 4 down. The latch is a flip-flop clocked by the
+falling edge of pin 4, in a chip whose registers pin 1 clocks. galre
+writes the term as it is; a GAL has no other way to do this. A term that
+is never true where the chip rests is named in the report and in a
+comment in the source, because a copy behaves the same only if its
+delays allow it.
 
 If the power-up walk does read differently in another order, galre first
 tries latches alone, and then registers and latches together

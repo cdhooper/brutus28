@@ -314,6 +314,12 @@ clock is high, with an output of the latch on pin 20:
   that level, by the equations, but the chip was never seen there. The
   term may lack a literal (`!P8` in the example). If the chip's
   behaviour in such a case matters, look at it by hand.
+- "P17 has a product term that is true only in passing: ...": the term
+  reads an output together with inputs at levels the output does not
+  have once it has followed them, so it is true only for that output's
+  gate delay: a pulse, as in an edge detector. The equations reproduce
+  it, and the source says so in a comment. Check a copy on the board;
+  its delays decide whether the pulse is long enough.
 - "pins ... taken to move after the other latches of a step": several
   latches change in one step, and with these following the others the
   equations fit the macrocells; they read the others' pins.
@@ -381,6 +387,7 @@ designs in `designs/`, with the pins the tests hold:
 | `oelatch16v8` | registered GAL16V8 with a latch, pin 11 not held: a register with a constant input, an output that shows a register | `6-9=0,12=0,14=0` |
 | `routelatch22v10` | a register that loads only with a latch set on the way to the state: explored by registers and latch level together | `5-11=0,13-20=0` |
 | `latchfollow16v8` | two latches that set together, and a third that follows them through one term | `12-14=0,19=0` |
+| `edgelatch16v8` | an edge detector made from an output's gate delay, an output with an enable | `7-9=0,11-14=0,19=0` |
 | `osc16v8` | an output that feeds back inverted and oscillates: galre stops | `5-9=0,11-16=0,19=0` |
 | `buried22v10` | a register that never reaches its pin: galre stops | `5-11=0,13-21=0` |
 
