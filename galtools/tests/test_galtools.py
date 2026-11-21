@@ -51,15 +51,22 @@ CASES = {
 # designs with state that changes without a clock that galre does not
 # model -> (device, pins held, what galre must say when it stops)
 ASYNC_CASES = {
-    # an output that feeds back inverted: it oscillates, and the simulated
-    # chip then reads arbitrary levels, as a real one would
-    "osc16v8": ("GAL16V8", "5-9=0,11-16=0,19=0",
-                "the same walk read differently twice on pins 17, 18: a bad contact, a "
-                "floating pin or an oscillating output"),
+    # an output that oscillates and a latch in one chip: where the pins
+    # settle, their levels depend on the walk order
+    "oscstate16v8": ("GAL16V8", "6-9=0,11-16=0,19=0",
+                     "but high in one walk order and low in another: the chip holds state "
+                     "as well as oscillating, which galre does not model"),
     "buried22v10": ("GAL22V10", "5-11=0,13-21=0",
                     "led to state 1Z, but the same clocks from power-up lead to 0Z: the chip "
                     "has state that no pin shows, or its readings do not repeat"),
 }
+
+# an output that feeds back inverted and oscillates (the simulated chip
+# then reads arbitrary levels, as a real one would), and one that follows
+# it: the pins held, and what galre must infer
+OSC = ("5-9=0,11-16=0,19=0", {
+    17: "P4 & P18",
+    18: "!P3 & !P18\n    # !P2 & !P3"})
 
 # designs with registers and latches -> (device, pins held, pins that change
 # without a clock, latch pins, registers, states, the equations galre must
@@ -244,7 +251,7 @@ class SimulatedChip(unittest.TestCase):
     def test_async_parts(self):
         found = {name: GAL(jed(name)).async_parts()
                  for name in list(CASES) + list(ASYNC_CASES) + list(AR_CASES) +
-                 list(LATCH_CASES) + list(MIXED_CASES)}
+                 list(LATCH_CASES) + list(MIXED_CASES) + ["osc16v8"]}
         ar = ["an asynchronous reset term"]
         self.assertEqual(found, {
             "cnt16v8": [], "fsm22v10": [], "comb16v8": [],
@@ -262,6 +269,7 @@ class SimulatedChip(unittest.TestCase):
             "clklatch22v10": ["combinational feedback through pins 22, 23"],
             "quietlatch16v8": ["combinational feedback through pin 18"],
             "osc16v8": ["combinational feedback through pin 18"],
+            "oscstate16v8": ["combinational feedback through pins 17, 18"],
             "oeread22v10": [],
             "buried22v10": ["combinational feedback through pin 22"]})
 
@@ -509,6 +517,36 @@ class SimulatedChip(unittest.TestCase):
         w = a._event(*cfg)
         self.assertIsNone(a._predict(w))
 
+    def test_output_that_does_not_settle(self):
+        """R = !EN & !STOP # !R & !STOP is its own complement while EN is
+        high and STOP low, and toggles; a read catches an arbitrary level.
+        Where a pin does not settle is what there is to learn: galre
+        reads every vector often, takes the pin for its own complement
+        where it is unsteady, and the output that is unsteady with it for
+        one that follows it.  The rebuilt chip settles at the same
+        vectors, at the same levels."""
+        from osc import OscAnalysis
+        fix, eqs = OSC
+        logs = []
+        a = galre.analyse(SimRig(jed("osc16v8")), "GAL16V8", fixed=galre.parse_fixed(fix),
+                          log=logs.append)
+        self.assertIsInstance(a, OscAnalysis)
+        self.assertIn("asynchronous behaviour: the same walk read differently twice on pins "
+                      "17, 18: a bad contact, a floating pin or an oscillating output", logs)
+        self.assertEqual(a.L, [18])
+        self.assertEqual(a.follows, {17: 18})
+        self.assertEqual(bin(a.un[18]).count("1"), 4)  # EN & !STOP, of 16 vectors
+        self.assertEqual(bin(a.un[17]).count("1"), 2)  # and A
+        self.assertEqual({p: "!" * inv + expr for p, _, inv, expr, _ in a.eqs}, eqs)
+        self.assertEqual(a.check_equations(), [])
+        self.assertEqual(verify.check_captures(a, jed("osc16v8")), [])
+        src = a.cupl("osc")
+        self.assertIn("MIN [P18] = 0;", src)
+        self.assertIn("/* P18 does not settle at some inputs:", src)
+        self.assertIn("/* P17 is taken to follow P18 where that does not settle;", src)
+        # another chip does not settle at the same vectors
+        self.assertTrue(verify.check_captures(a, jed("oscstate16v8")))
+
     def test_edge_detector_from_an_output_delay(self):
         """Pin 16 is a copy of pin 4, a gate delay late, and pin 17 is set
         by !P4 & P16: a flip-flop clocked by the falling edge of pin 4.
@@ -652,7 +690,8 @@ class SimulatedChip(unittest.TestCase):
                   ("oelatch16v8", "GAL16V8", galre.parse_fixed(OELATCH[0])),
                   ("routelatch22v10", "GAL22V10", galre.parse_fixed(ROUTELATCH[0])),
                   ("latchfollow16v8", "GAL16V8", galre.parse_fixed(LATCHFOLLOW[0])),
-                  ("edgelatch16v8", "GAL16V8", galre.parse_fixed(EDGELATCH[0]))]
+                  ("edgelatch16v8", "GAL16V8", galre.parse_fixed(EDGELATCH[0])),
+                  ("osc16v8", "GAL16V8", galre.parse_fixed(OSC[0]))]
         try:
             for name, device, fixed in cases:
                 with self.subTest(design=name):
@@ -948,6 +987,44 @@ class Firmware(unittest.TestCase):
                             pld[d] = f.read()
                     self.assertEqual(pld["board"], pld["sim"])
                     self.assertEqual(pld["replay"], pld["sim"])
+        finally:
+            shutil.rmtree(out)
+
+    def test_oscillator_board_and_replay(self):
+        """galre board infers an oscillating output through the host-built
+        firmware as sim does (other noise, the same pins unsteady at the
+        same vectors), and replay answers the repeated walks in the order
+        recorded."""
+        out = tempfile.mkdtemp(prefix="galre")
+        name, fix = "osc16v8", OSC[0]
+
+        def galre_main(*argv):
+            with contextlib.redirect_stdout(io.StringIO()):
+                r = galre.main(list(argv) + ["--cupl", ""])
+            with open(os.path.join(argv[argv.index("-o") + 1], "report.txt")) as f:
+                return r, f.read()
+        try:
+            pld = {}
+            r, report = galre_main("sim", jed(name), "-o", os.path.join(out, "sim"),
+                                   "--fix", fix, "-t", name)
+            self.assertEqual(r, 0)
+            dev = fwsim.SocketDevice(jed(name), "dip20")
+            board = os.path.join(out, "board")
+            with mock.patch.object(galre, "SerialTransport",
+                                   lambda port: fwsim.HarnessTransport(self.lib, dev)):
+                r, report = galre_main("board", "-p", "-", "-d", "GAL16V8", "-o", board,
+                                       "--fix", fix, "-t", name)
+            self.assertEqual(r, 0)
+            self.assertIn("pin 18 does not settle at 4 of 16 input vectors, and pin 17 with "
+                          "it at some: its own complement there, an oscillator", report)
+            r, report = galre_main("replay", os.path.join(board, "capture.jsonl"),
+                                   "-o", os.path.join(out, "replay"))
+            self.assertEqual(r, 0)
+            for d in ("sim", "board", "replay"):
+                with open(os.path.join(out, d, name + ".pld")) as f:
+                    pld[d] = f.read()
+            self.assertEqual(pld["board"], pld["sim"])
+            self.assertEqual(pld["replay"], pld["sim"])
         finally:
             shutil.rmtree(out)
 

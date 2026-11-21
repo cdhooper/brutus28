@@ -26,9 +26,10 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from analysis import AsyncDesign, LatchSuspected, Limit     # noqa: E402
+from analysis import AsyncDesign, LatchSuspected, Limit, Unsteady     # noqa: E402
 from capture import CaptureError, SerialTransport          # noqa: E402
 from latch import LatchAnalysis                            # noqa: E402
+from osc import OscAnalysis                                # noqa: E402
 from reglatch import RegLatchAnalysis                      # noqa: E402
 from rig import BrutusRig, RecordingRig, ReplayRig, SimRig  # noqa: E402
 import verify                                              # noqa: E402
@@ -36,14 +37,22 @@ import verify                                              # noqa: E402
 
 def analyse(rig, device, fixed=None, survey=64, log=print, max_states=1024):
     """Run the analysis of a clocked design (which goes on to latches in
-    it, if the chip changes state without a clock), or of latches alone
-    when the power-up walk shows them; returns the RegLatchAnalysis or
-    LatchAnalysis.  Raises AsyncDesign when none models the chip."""
+    it, if the chip changes state without a clock), of latches alone
+    when the power-up walk shows them, or of outputs that do not settle
+    when the same walk reads differently twice; returns the
+    RegLatchAnalysis, LatchAnalysis or OscAnalysis.  Raises AsyncDesign
+    when none models the chip."""
     a = RegLatchAnalysis(rig, device, fixed=fixed, survey=survey, log=log,
                          max_states=max_states)
     try:
         a.run()
         return a
+    except Unsteady as e:
+        log("asynchronous behaviour: %s" % e)
+        log("trying an output that feeds back inverted: where does each pin settle?")
+        b = OscAnalysis(rig, device, fixed=fixed, log=log, walk0=a.walk0)
+        b.run()
+        return b
     except LatchSuspected as e:
         log("asynchronous behaviour: %s" % e)
         log("trying latches built from combinational feedback")

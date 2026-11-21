@@ -18,6 +18,8 @@ def check_captures(a, jed, notes=None):
     settle differently), and a walk that starts differently is added to
     notes.  Returns a list of differences (empty when the rebuilt JED
     matches the captures)."""
+    if hasattr(a, "check_jed"):
+        return a.check_jed(jed, notes)          # outputs that do not settle
     if hasattr(a, "walks"):
         return _check_walks(a, jed, notes)
     rig = SimRig(jed, careful=True)

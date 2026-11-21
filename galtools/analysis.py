@@ -73,6 +73,15 @@ class LatchSuspected(AsyncDesign):
         self.pins = tuple(pins)
 
 
+class Unsteady(AsyncDesign):
+    """The same walk read differently twice (.pins): a bad contact, a
+    floating pin, or an output that does not settle (osc.OscAnalysis)."""
+
+    def __init__(self, msg, pins=()):
+        super().__init__(msg)
+        self.pins = list(pins)
+
+
 class _Restart(Exception):
     """Explore again from scratch (the asynchronous reset term is known now)."""
 
@@ -524,8 +533,9 @@ class Analysis:
         unsteady = sorted(p for p in la if p not in self.hist
                           and (la[p] ^ la3[p]) | (lb[p] ^ lb3[p]))
         if unsteady:
-            raise AsyncDesign("the same walk read differently twice on %s: a bad contact, "
-                              "a floating pin or an oscillating output" % _pins(unsteady))
+            raise Unsteady("the same walk read differently twice on %s: a bad contact, "
+                           "a floating pin or an oscillating output" % _pins(unsteady),
+                           unsteady)
         xs = reduce(lambda a, b: a | b, diff.values())
         x = lowest(xs)
         raise LatchSuspected(
