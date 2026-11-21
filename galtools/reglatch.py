@@ -1203,9 +1203,40 @@ class RegLatchAnalysis(Analysis):
                 self._confirm()
         cut = [w for w in self.lwalks if w.cut]
         latches = [p for p in self.Lh if p not in self.readpins]
+        self.notes = []
         if self.follow:
             self.log("%s taken to move after the other latches of a step" % _pins(
                 sorted(self.follow)))
+            self.notes.append(
+                "Several latches change in one step of the inputs, and the chip is seen "
+                "only before and after.  %s %s taken to move after the others, which fits "
+                "the macrocells; a chip in which they move with the others reads the same "
+                "wherever it comes to rest." % (
+                    ", ".join(self.name(p) for p in sorted(self.follow)),
+                    "is" if len(self.follow) == 1 else "are"))
+        passing = {}
+        for p, term, pins in self._passing():
+            passing.setdefault((p, tuple(pins)), []).append(term)
+        for (p, pins), terms in passing.items():
+            one = len(terms) == 1
+            note = ("%s has %s that %s true only in passing: %s.  %s, so the term%s true "
+                    "only for the gate delay in which %s not followed yet.  The original "
+                    "relies on that delay; whether a copy behaves the same depends on its "
+                    "timing." % (
+                        self.name(p), "a product term" if one else "product terms",
+                        "is" if one else "are", "; ".join(terms),
+                        " and ".join("%s follows %s" % (self.name(q), expr)
+                                     for q, expr in pins),
+                        " is" if one else "s are",
+                        "%s has" % self.name(pins[0][0]) if len(pins) == 1 else "they have"))
+            self.log(note)
+            self.notes.append(note)
+        if self.unseen:
+            self.notes.append(
+                "Not seen on the chip, for no walk tried gets there (a term may lack a "
+                "literal): %s%s." % ("; ".join(self.unseen[:12]),
+                                     "; and %d more" % (len(self.unseen) - 12)
+                                     if len(self.unseen) > 12 else ""))
         self.log("latch model: latch pins %s, other outputs %s, from %d walks with pin 1 "
                  "enumerated%s" % (latches, [p for p in self.O if p not in latches],
                                    len(self.lwalks) - len(self.S),
@@ -1214,6 +1245,58 @@ class RegLatchAnalysis(Analysis):
         if self.rise:
             self.log("%d clock edges went another way than in the sweeps, with a latch at "
                      "another level: the register inputs read latch pins" % len(self.rise))
+
+    def _passing(self):
+        """The product terms of the latches that are never true where the
+        chip rests: [(latch pin, the term, [(output pin, its equation)])].
+        Such a term reads an output that holds no state together with
+        inputs at levels that the output does not have once it has
+        followed them (!P4 & P16, where P16 = P4): a pulse, for the gate
+        delay of that output.  Only with every output as a signal of its
+        own (deep) can a term read such an output."""
+        out = []
+        n1, m, first = self.n1, len(self.L), self.n1 + len(self.reg)
+        plain = [k for k, q in enumerate(self.L) if q not in self.Lh and q not in self.B]
+        if not self.deep or not plain:
+            return out
+        names = [self.name(q) for q in self.EV] + [self.name(r) for r in self.cvars]
+        text = {q: "!" * inv + expr.replace("\n    # ", " # ")
+                for q, kind, inv, expr, _ in self.eqs if kind == ""}
+        for p in self.Lh:
+            sup, cubes, inv = self.cover[(p, "")]
+            for care, val in cubes:
+                reads = [k for k in plain
+                         if any(care >> i & 1 and v == first + k for i, v in enumerate(sup))]
+                if not reads:
+                    continue
+                rests = False
+                for a in range(len(self.S)):
+                    for lv in range(1 << m):
+                        w = self.CW[(a, lv)]
+                        c = self.cfull
+                        for i, v in enumerate(sup):
+                            if care >> i & 1:
+                                want = val >> i & 1
+                                if v < n1:
+                                    c &= self.cv1[v] if want else self.cfull ^ self.cv1[v]
+                                elif w[v - n1] != want:
+                                    c = 0
+                                    break
+                        for k in reads:
+                            if not c:
+                                break
+                            t = self._cov((self.L[k], ""), w)
+                            c &= t if lv >> k & 1 else self.cfull ^ t
+                        if c:
+                            rests = True
+                            break
+                    if rests:
+                        break
+                if not rests:
+                    out.append((p, " & ".join(("" if val >> i & 1 else "!") + names[v]
+                                              for i, v in enumerate(sup) if care >> i & 1),
+                                [(self.L[k], text.get(self.L[k], "its inputs")) for k in reads]))
+        return out
 
     def _over(self):
         """The latch pins whose product terms do not fit their macrocell,
@@ -1438,6 +1521,8 @@ class RegLatchAnalysis(Analysis):
                 if al[ci] >> xp & 1
                 and (xp >> sup[i] & 1 if sup[i] < n1 else w[sup[i] - n1]) == side]
 
+    GUESS_STEPS = 8192      # of a candidate walk that are taken through the circuit
+
     def _guesses(self, cfg, lv):
         """The open claims that the walk cfg would settle, as the learned
         circuit takes it from the latch levels lv.  A walk shows what
@@ -1447,10 +1532,12 @@ class RegLatchAnalysis(Analysis):
         fire, arb, s0, rm = self.fire, self.arb, self.s0, range(len(self.L))
         new = set()
         pxp = None
-        for xp in gray_order(self.n1, rot, rev, start, mix):
+        for k, xp in enumerate(gray_order(self.n1, rot, rev, start, mix)):
             if pxp is None:
                 pxp = xp                    # the chip is there already
                 continue
+            if k > self.GUESS_STEPS:
+                break                       # enough of it to choose by
             d, x = xp ^ pxp, xp >> 1
             if d & xp & 1:                  # pin 1 rises
                 if d & (d - 1):
@@ -1480,10 +1567,10 @@ class RegLatchAnalysis(Analysis):
     def _guess_walk(self, shown):
         """A walk to check the learned circuit where it only guesses
         (_open_terms).  Candidates, from every state in turn and in other
-        Gray codes, are taken through the learned circuit, and the one
-        that would settle most open claims is the next walk.  Returns
-        (walk, those claims), or (None, None) when none are open or four
-        rounds of candidates settle none."""
+        Gray codes, are taken through the learned circuit, and the best
+        of the first that would settle an open claim and a few after it
+        is the next walk.  Returns (walk, those claims), or (None, None)
+        when none are open or four rounds of candidates settle none."""
         if not self.L:
             return None, None
         if self._tg is None:
@@ -1494,8 +1581,12 @@ class RegLatchAnalysis(Analysis):
         n1 = self.n1
         per = max(8, min(256, (1 << 17) >> n1))
         for _ in range(4):
-            best, most = None, set()
+            best, most, more = None, set(), 8
             for _ in range(per):
+                if best:
+                    more -= 1               # a few more, for a better one
+                    if not more:
+                        break
                 k = self._gk = self._gk + 1
                 a = k % len(self.S)
                 path = self.states[self.S[a]][0]
@@ -1963,8 +2054,14 @@ class RegLatchAnalysis(Analysis):
             at = [t for t in range(len(path)) if path[t] >> j & 1 == want]
             if not at:
                 need |= 1 << j                  # never gets to the chip's level
-            elif g[j][xx | path[at[-1]] << nn] == 0:
-                left.setdefault(at[-1], []).append(j)       # was there, and left
+            else:
+                # was there, and left: by a guess of the minimiser's, or by one
+                # of ours (an excitation added for another step, that this
+                # step now shows to be wrong)
+                i = xx | path[at[-1]] << nn
+                if g[j][i] == 0 or (self._base[0][j][i] == 0
+                                    and self.extra.get((j, i), want) != want):
+                    left.setdefault(at[-1], []).append(j)
         if left:
             # The circuit moved a latch that the chip held, by a guess of the
             # minimiser's.  What it does after the first such move is no
@@ -1976,8 +2073,8 @@ class RegLatchAnalysis(Analysis):
             t = min(left)
             for j in left[t]:
                 i = xx | path[t] << nn
-                if (j, i) not in self.extra:
-                    self.extra[(j, i)] = lc >> j & 1
+                if self.extra.get((j, i)) != lc >> j & 1:
+                    self.extra[(j, i)] = lc >> j & 1       # also in place of our guess
                     added = True
             return added
         if need:

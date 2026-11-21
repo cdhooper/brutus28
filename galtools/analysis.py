@@ -45,6 +45,7 @@ from there.  It keeps the pins that change without a clock in self.hist:
 they are no state candidates, and the transition sweeps do not read them.
 """
 
+import textwrap
 from functools import reduce
 
 from bitsim import litmasks
@@ -419,6 +420,7 @@ class Analysis:
         self.ar_cand = []         # its pins that would be state candidates
         self.oe_const = []        # registers with a constant input (reglatch, pin 11 held)
         self.lsig = ()            # latch pins whose levels are part of a state (reglatch)
+        self.notes = []           # what a reader of the source should know, as comments
         self.cvar = {}            # state -> its sweeps with the latches at other levels
         self.cmap = {}            # state -> the state with latch levels that stands for it
         self._wsig = {}
@@ -1624,6 +1626,11 @@ class Analysis:
         latches = self._latch_names()
         if latches:
             lines += [KEEP, "MIN [%s] = 0;" % ", ".join(latches), ""]
+        for note in self.notes:
+            text = textwrap.wrap(note, 72)
+            lines += ["/* " + text[0]] + ["   " + t for t in text[1:]]
+            lines[-1] += " */"
+            lines.append("")
         for p, kind, inv, expr, n in self.eqs:
             if self.dev.get("oe") and clocked and p in regs and kind == "oe":
                 continue

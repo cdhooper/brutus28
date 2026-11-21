@@ -129,6 +129,15 @@ LATCHFOLLOW = ("12-14=0,19=0", {
     (17, ""): {"P1 & P2", "P1 & P3", "P8 & P9", "P4 & P17"},
     (18, ""): {"P1 & P2", "P1 & P3", "P6 & P7", "P4 & P18"}})
 
+# an edge detector made from an output's delay: the pins held, and what
+# galre must find
+EDGELATCH = ("7-9=0,11-14=0,19=0", {
+    (15, ""): "P5",
+    (15, "oe"): "!P6",
+    (16, ""): "P4",
+    (17, ""): "P2 & !P3 & !P4 & P16\n    # P2 & !P16 & P17\n    # P2 & P4 & P17",
+    (18, ""): "P3 & !P16 & P17\n    # P3 & P4 & P17"})
+
 # a register input that reads a latch which must have been set on the way
 # to the state: the pins held, and what galre must find
 ROUTELATCH = ("5-11=0,13-20=0", {
@@ -500,6 +509,49 @@ class SimulatedChip(unittest.TestCase):
         w = a._event(*cfg)
         self.assertIsNone(a._predict(w))
 
+    def test_edge_detector_from_an_output_delay(self):
+        """Pin 16 is a copy of pin 4, a gate delay late, and pin 17 is set
+        by !P4 & P16: a flip-flop clocked by the falling edge of pin 4.
+        With every output as a signal of its own galre finds the term,
+        and says in the source that it is true only in passing."""
+        fix, eqs = EDGELATCH
+        a = galre.analyse(SimRig(jed("edgelatch16v8")), "GAL16V8",
+                          fixed=galre.parse_fixed(fix), log=quiet)
+        self.assertIsInstance(a, RegLatchAnalysis)
+        self.assertTrue(a.deep)
+        self.assertEqual(a.Lh, [17])
+        self.assertEqual({(p, kind): "!" * inv + expr for p, kind, inv, expr, _ in a.eqs}, eqs)
+        self.assertEqual(len(a.notes), 1)
+        self.assertIn("P17 has a product term that is true only in passing: "
+                      "P2 & !P3 & !P4 & P16.  P16 follows P4,", a.notes[0])
+        src = a.cupl("edge")
+        self.assertIn("/* P17 has a product term that is true only in passing:", src)
+        self.assertIn("depends on its timing. */\n\nP15 = P5;", src)
+        self.assertEqual(a.check_equations(), [])
+        self.assertEqual(verify.check_captures(a, jed("edgelatch16v8")), [])
+
+    def test_guess_taken_back(self):
+        """What galre adds to explain a step is a guess, and a later step
+        may show it to be wrong: the latch that it moves there, the chip
+        left alone.  The guess then gives way.  Here a wrong one is put
+        in by hand: pin 17 rising where pin 4 rises."""
+        fix, _ = EDGELATCH
+        a = galre.analyse(SimRig(jed("edgelatch16v8")), "GAL16V8",
+                          fixed=galre.parse_fixed(fix), log=quiet)
+        j, b2, b4 = a.L.index(17), a.Vc.index(2), a.Vc.index(4)
+        rec = next(r for r in a.steps
+                   if r[0][3] != r[0][4] and not (r[0][3] | r[0][4]) >> j & 1
+                   and a._base[0][j][r[1]] == 0 and r[0][0] >> b2 & 1 and r[0][0] >> b4 & 1
+                   and (r[0][0] ^ r[0][1]) >> b4 & 1)
+        e = rec[1]
+        a.extra[(j, e)] = 1
+        a._apply()
+        a.equations()
+        self.assertTrue(a._refine())
+        self.assertEqual(a.extra[(j, e)], 0)
+        a._solve()
+        self.assertEqual(a.check_equations(), [])
+
     def test_skipped_vectors_are_not_driven_pins(self):
         """A walk around the reset term skips vectors, which read as 0.
         An enumerated I/O pin that the design does not use (19) is not
@@ -599,7 +651,8 @@ class SimulatedChip(unittest.TestCase):
         cases += [("racelatch16v8", "GAL16V8", galre.parse_fixed("6-9=0,11-14=0,18-19=0")),
                   ("oelatch16v8", "GAL16V8", galre.parse_fixed(OELATCH[0])),
                   ("routelatch22v10", "GAL22V10", galre.parse_fixed(ROUTELATCH[0])),
-                  ("latchfollow16v8", "GAL16V8", galre.parse_fixed(LATCHFOLLOW[0]))]
+                  ("latchfollow16v8", "GAL16V8", galre.parse_fixed(LATCHFOLLOW[0])),
+                  ("edgelatch16v8", "GAL16V8", galre.parse_fixed(EDGELATCH[0]))]
         try:
             for name, device, fixed in cases:
                 with self.subTest(design=name):

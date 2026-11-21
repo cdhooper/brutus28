@@ -1,0 +1,35 @@
+Name     edgelatch16v8;
+Partno   x;
+Date     2026-11-20;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g16v8ma;
+
+/* Test design: GAL16V8, an edge detector made from an output's delay.
+   TD is a copy of T on a pin of its own, one gate delay late.  The term
+   !T & TD is true only for that delay after T falls, and Q takes !D
+   then: a flip-flop clocked by the falling edge of T, without a clock
+   pin.  While EN is low Q is clear.  Z has an enable: when the chip
+   lets go of it, it is for a moment still at the level it had, at
+   inputs and levels at which Q is set after an edge. */
+
+Pin 2  = EN;
+Pin 3  = D;
+Pin 4  = T;
+Pin 5  = A;
+Pin 6  = X;
+Pin 15 = Z;
+Pin 16 = TD;
+Pin 17 = Q;
+Pin 18 = Y;
+
+TD = T;
+Q = EN & !D & !T & TD
+  # EN & Q & !TD
+  # EN & Q & T;
+Y = Q & D;
+Z = A;
+Z.oe = !X;
