@@ -511,7 +511,11 @@ class BrutusRig:
         self.follow, self.dclk = follow, dclk
         self.pins = [p for p in range(1, npins + 1) if p not in (vcc, gnd)]
         self.sbit = {p: 1 << (smap(p) - 1) for p in range(1, npins + 1)}
-        self.vcc_bit, self.gnd_bit = self.sbit[vcc], self.sbit[gnd]
+        # the device's VCC and GND pins, and the rails as the jobs name them
+        self.vcc_pin, self.gnd_pin = self.sbit[vcc], self.sbit[gnd]
+        self.vcc_bit, self.gnd_bit = self.vcc_pin, self.gnd_pin
+        # socket pins that are no pin of the device in this socket
+        self.spare = 0x0fffffff & ~reduce(lambda a, b: a | b, self.sbit.values())
         self.readmask = self._mask(self.pins)
         self.crcs = {}               # observation -> signature CRCs seen
         self.detected = None         # (vcc mask, gnd mask, supply mV or None)
@@ -530,17 +534,52 @@ class BrutusRig:
         mv = None if m.group(3) == "-" else int(m.group(3))
         return int(m.group(1), 16), int(m.group(2), 16), mv
 
-    def preflight(self):
-        """Check the jumpers before anything powers the chip."""
-        self.detected = None
+    def _detect(self):
         self._cmd("pld capture clear")
         self._cmd("pld capture set vcc=%x gnd=%x supply=%d" % (
             self.vcc_bit, self.gnd_bit, SUPPLY_MV))
         out = self.t.command("pld capture jumpers")
         self.jumper_readings = [l for l in out.strip().splitlines()
                                 if not l.startswith("jumpers vcc=")]
-        self.detected = vcc, gnd, mv = self._parse_jumpers(out)
+        return self._parse_jumpers(out)
+
+    def _spare_rails(self, vcc, gnd):
+        """The device's VCC and GND pins are among those detected, and
+        every other detected pin is no pin of the device."""
+        extra = (vcc & ~self.vcc_pin) | (gnd & ~self.gnd_pin)
+        return bool(vcc & self.vcc_pin and gnd & self.gnd_pin and not vcc & gnd
+                    and not extra & ~self.spare)
+
+    def preflight(self):
+        """Check the jumpers before anything powers the chip.
+
+        A part may tie socket pins that are none of its signal pins to
+        its rails inside: an ATF22V10C in a PLCC28 has VCC on pin 1 too
+        and GND on pins 8, 15 and 22, where a GAL22V10 has no
+        connection.  They then read as jumpered.  With the VCC and GND
+        pins themselves as expected, and nothing else on a pin of the
+        device, the jobs name the rails as detected (the firmware wants
+        them exactly), and the supply is measured.  Such a pin may read
+        as a rail one time and not the next (pin 1 of that part came
+        within 40 mV of the VCC pin's reading, and once not within 250):
+        a job that the firmware refuses for that alone is run again with
+        the rails as it found them (_run)."""
+        self.detected = None
+        want = self.vcc_bit, self.gnd_bit = self.vcc_pin, self.gnd_pin
+        self.detected = vcc, gnd, mv = self._detect()
+        for _ in range(3):
+            if (vcc, gnd) == (self.vcc_bit, self.gnd_bit) or not self._spare_rails(vcc, gnd):
+                break
+            if (self.vcc_bit, self.gnd_bit) == want:
+                both = [("%s (VCC)" % socket_pins(vcc & ~want[0])) if vcc & ~want[0] else "",
+                        ("%s (GND)" % socket_pins(gnd & ~want[1])) if gnd & ~want[1] else ""]
+                self.log("jumper check: %s: no pin of a %s in the %s socket, and tied to the "
+                         "rail inside the part, as in an ATF22V10C.  Taken as detected." % (
+                             " and ".join(b for b in both if b), self.device, self.socket))
+            self.vcc_bit, self.gnd_bit = vcc, gnd
+            self.detected = vcc, gnd, mv = self._detect()
         if (vcc, gnd) != (self.vcc_bit, self.gnd_bit) or not supply_ok(mv):
+            self.vcc_bit, self.gnd_bit = want
             raise CaptureError(
                 "the jumpers do not suit a %s in the %s socket\n"
                 "  expected: VCC on %s, GND on %s, supply %g V\n"
@@ -645,7 +684,21 @@ class BrutusRig:
                 nret += 1
 
     def _run(self, what):
-        cap = self.t.capture("pld capture " + what)
+        for attempt in range(4):
+            try:
+                cap = self.t.capture("pld capture " + what)
+                break
+            except CaptureError as e:
+                # rails on pins that are no pins of the device: see preflight
+                m = re.search(r"preflight: jumpers vcc=([0-9a-fA-F]+) gnd=([0-9a-fA-F]+), "
+                              r"job expects", str(e))
+                if not m or attempt == 3 or not self.jumper_check:
+                    raise
+                vcc, gnd = int(m.group(1), 16), int(m.group(2), 16)
+                if not self._spare_rails(vcc, gnd):
+                    raise
+                self.vcc_bit, self.gnd_bit = vcc, gnd
+                self._cmd("pld capture set vcc=%x gnd=%x" % (vcc, gnd))
         self.ops["runs"] += 1
         self.ops["power_cycles"] += 1 + cap.power_cycles
         self.ops["ret_ok"] += cap.ret_ok

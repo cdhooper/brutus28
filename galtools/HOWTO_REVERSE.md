@@ -101,6 +101,15 @@ jumpers do not suit the chip, it stops with exit code 2 and prints what it
 expected and what it found. The chip only ever sees 1K-limited drives
 until the jumpers are right.
 
+Some parts tie socket pins that are none of their signal pins to the
+rails inside. An ATF22V10C in a PLCC28 has VCC on pin 1 as well and GND
+on pins 8, 15 and 22, where a GAL22V10 has no connection, and the check
+finds them as jumpered. galre takes rails on such pins as they are, if
+the VCC and GND pins themselves are found, and says so ("jumper check:
+socket pin 1 (VCC) and socket pins 8, 15, 22 (GND): no pin of a
+GAL22V10 in the plcc28 socket ..."). A rail on a pin of the device is
+still refused.
+
 ## 4. Decide which pins to hold
 
 galre walks every input combination of the pins it enumerates, so each

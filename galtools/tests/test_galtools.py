@@ -995,6 +995,53 @@ class Firmware(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "socket plcc20 does not fit a GAL22V10"):
             BrutusRig(t, "GAL22V10", "plcc20", log=quiet)
 
+    def test_rails_on_spare_socket_pins(self):
+        """An ATF22V10C in a PLCC28 ties pin 1 to VCC and pins 8, 15 and 22
+        to GND inside, where a GAL22V10 has no connection: the board
+        finds them as jumpered.  They are no pins of the device, so the
+        check passes, and the jobs name the rails as detected.  The same
+        on a pin of the device is refused."""
+        t = self.transport("fsm22v10", "plcc28")
+        logs = []
+        rig = BrutusRig(t, "GAL22V10", "plcc28", log=logs.append)
+        vcc, gnd = rig.vcc_bit, rig.gnd_bit
+        t.dev.jumper_vcc = vcc | 1 << 0
+        t.dev.jumper_gnd = gnd | 1 << 7 | 1 << 14 | 1 << 21
+        self.assertEqual(rig.preflight(), (vcc | 1, gnd | 0x204080, 4950))
+        self.assertEqual(logs, [
+            "jumper check: socket pin 1 (VCC) and socket pins 8, 15, 22 (GND): no pin of a "
+            "GAL22V10 in the plcc28 socket, and tied to the rail inside the part, as in an "
+            "ATF22V10C.  Taken as detected."])
+        self.assertEqual(rig.metadata()["jumpers"]["gnd"], [8, 14, 15, 22])
+        # Pin 1 is found as VCC one time and not the next: the firmware
+        # refuses a job whose rails are not exactly those it finds, and
+        # the job is run again with them
+        found = t.dev.jumper_pins
+        calls = []
+
+        def flaky():
+            calls.append(1)
+            vcc_now, gnd_now = found()
+            return (vcc_now & ~1 if len(calls) % 3 == 0 else vcc_now), gnd_now
+        t.dev.jumper_pins = flaky
+        a = Analysis(rig, "GAL22V10", fixed=CASES["fsm22v10"][3], log=quiet)
+        a.run()
+        self.assertEqual(len(a.states), CASES["fsm22v10"][1])
+        self.assertGreater(len(calls), rig.ops["runs"])      # some jobs took two tries
+        self.assertTrue(all(w & 1 << 27 and not w & 0x204080 for w in t.dev.writes))
+        t.dev.jumper_pins = found
+        # GND on socket pin 3, a pin of the device
+        t.dev.jumper_gnd = gnd | 1 << 2
+        rig = BrutusRig(t, "GAL22V10", "plcc28", log=quiet)
+        with self.assertRaisesRegex(
+                CaptureError, "detected: VCC on socket pins 1, 28, GND on socket pins 3, 14"):
+            rig.preflight()
+        self.assertEqual((rig.vcc_bit, rig.gnd_bit), (vcc, gnd))
+        # the VCC pin itself not found
+        t.dev.jumper_vcc, t.dev.jumper_gnd = 1 << 0, gnd
+        with self.assertRaisesRegex(CaptureError, "detected: VCC on socket pin 1, GND"):
+            BrutusRig(t, "GAL22V10", "plcc28", log=quiet).preflight()
+
     def test_record_and_replay(self):
         name, (device, nstates, regs, fixed) = "fsm22v10", CASES["fsm22v10"]
         out = tempfile.mkdtemp(prefix="galre")
