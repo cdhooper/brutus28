@@ -927,6 +927,7 @@ class Analysis:
             queue.append(s2)
             if len(self.states) > self.max_states:
                 raise Limit("more than %d states (--max-states)" % self.max_states)
+            self._check_power_up()
         return True
 
     SWEEPS = 5                # runs of a sweep that did not read the same twice
@@ -1008,6 +1009,45 @@ class Analysis:
                 "differently when the sweep was run again.  These equations are for what "
                 "most of %d sweeps said." % (n, "" if n == 1 else "s", k,
                                              "" if k == 1 else "s", self.SWEEPS)]
+
+    def _check_power_up(self, regs=None):
+        """A GAL16V8 or GAL20V8 resets its registers at power-up, and they
+        stand behind an inverting buffer: every registered output is high
+        then, whatever its polarity.  A register that is low after power-up
+        belongs to another device, one that sets the polarity behind the
+        register, as a 22V10 does.  Such a chip gives equations here that
+        no GAL16V8 or GAL20V8 can be programmed with.
+
+        It is the state after a power cycle that is looked at: a chip that
+        the power cycle does not reset looks the same (BrutusRig.
+        check_power_cycle is there to see to that), and the message says
+        so.
+
+        regs: the registers, once they are known; before that, the pins
+        that are driven exactly while the enable pin is low (which only a
+        register is in these devices) and that have another level in
+        another state."""
+        oe = self.dev.get("oe")
+        if oe is None or self.clock_in_v or oe not in self.V:
+            return
+        t0 = self.states[self.power_up_state][1]
+        low = self.full ^ self.v1[self.V.index(oe)]
+        for r in self.cand if regs is None else regs:
+            if not t0.driven[r] or t0.value[r] & t0.driven[r]:
+                continue                    # not driven, or high somewhere
+            tables = [t for _, t in self.states.values()]
+            if regs is None and not (
+                    all(t.driven[r] == t.care[r] & low for t in tables)
+                    and any(t.value[r] & t.driven[r] for t in tables)):
+                continue
+            raise Limit(
+                "pin %d is a register and low after power-up.  The registers of a %s are "
+                "high then (they are reset, and stand behind an inverting buffer): this "
+                "chip is another device%s.  Or the power cycle does not reset it: a longer "
+                "--off shows" % (
+                    r, self.device,
+                    ".  A 22V10 has the same pins, and sets the polarity behind the "
+                    "register: run again with -d GAL22V10" if self.device == "GAL20V8" else ""))
 
     def _explore_once(self):
         self._walks, self._wsig, self.cmap, self.cvar = {}, {}, {}, {}
@@ -1110,6 +1150,7 @@ class Analysis:
                     self.comb.append(r)
         self.log("%d states reachable from power-up; inputs %s, registered %s, "
                  "combinational %s" % (len(self.states), self.inputs, self.reg, self.comb))
+        self._check_power_up(self.reg)
         self.ar_on = {s for s, (path, _) in self.states.items() if path in self.ar_paths}
         if self.ar:
             self.log("the asynchronous reset term fires in %d of them" % len(self.ar_on))

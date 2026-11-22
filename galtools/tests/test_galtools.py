@@ -891,6 +891,26 @@ class SimulatedChip(unittest.TestCase):
         finally:
             shutil.rmtree(out)
 
+    def test_register_low_after_power_up(self):
+        """A 22V10 whose outputs look like those of a GAL20V8 in its
+        registered mode is not taken for one: a register that is low after
+        power-up is none of a GAL20V8.  galre stops as soon as it has seen
+        the register change, and names the device to try."""
+        fix = galre.parse_fixed("4-11=0,14-19=0,23=0")
+        logs = []
+        with self.assertRaises(Limit) as e:
+            galre.analyse(SimRig(jed("lowreg22v10")), "GAL20V8", fixed=fix, survey=16,
+                          log=logs.append)
+        self.assertIn("pin 22 is a register and low after power-up", str(e.exception))
+        self.assertIn("-d GAL22V10", str(e.exception))
+        self.assertFalse(any("states reachable" in line for line in logs))    # before the sweeps
+        a = galre.analyse(SimRig(jed("lowreg22v10")), "GAL22V10", fixed=fix, survey=16, log=quiet)
+        self.assertEqual(sorted(a.reg), [20, 21, 22])
+        self.assertEqual(verify.check_captures(a, jed("lowreg22v10")), [])
+        # a GAL20V8's own registers, of either polarity, are high after power-up
+        galre.analyse(SimRig(jed("cnt20v8")), "GAL20V8", survey=16, log=quiet,
+                      fixed=galre.parse_fixed("5-11=0,14=0,23=0"))
+
     def test_sweep_that_reads_wrongly_now_and_then(self):
         """On a board every sweep of clock edges is run twice, and five
         times where the two differ: an input vector leads where most of
