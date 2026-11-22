@@ -1,0 +1,43 @@
+Name     edge2latch16v8;
+Partno   x;
+Date     2026-11-21;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g16v8ma;
+
+/* Test design: GAL16V8, an edge detector made from the delay of two
+   outputs, which a real chip takes.  TD is a copy of T on a pin of its
+   own, one output delay late, and TD2 a copy of TD, two late.  The term
+   !T & TD2 is true for those two delays after T falls, and Q takes !D
+   then: a flip-flop clocked by the falling edge of T, without a clock
+   pin.  Q is back at the array after one delay, while the term is still
+   true, and EN & Q & !D holds it from then on.  While EN is low Q is
+   clear.  In edgelatch16v8 the term is true for one delay only, and a
+   real GAL16V8 never took the edge.
+
+   Compile with cupl -jaxm0: the last term of Q only holds it while
+   another takes over, and minimising removes it. */
+
+Pin 2  = EN;
+Pin 3  = D;
+Pin 4  = T;
+Pin 5  = A;
+Pin 6  = X;
+Pin 14 = TD2;
+Pin 15 = Z;
+Pin 16 = TD;
+Pin 17 = Q;
+Pin 18 = Y;
+
+TD = T;
+TD2 = TD;
+Q = EN & !D & !T & TD2
+  # EN & Q & !TD2
+  # EN & Q & T
+  # EN & Q & !D;
+Y = Q & D;
+Z = A;
+Z.oe = !X;

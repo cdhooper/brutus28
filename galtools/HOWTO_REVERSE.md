@@ -336,7 +336,14 @@ clock is high, with an output of the latch on pin 20:
   have once it has followed them, so it is true only for that output's
   gate delay: a pulse, as in an edge detector. The equations reproduce
   it, and the source says so in a comment. Check a copy on the board;
-  its delays decide whether the pulse is long enough.
+  its delays decide whether the pulse is long enough. A real GAL16V8
+  with `designs/edgelatch16v8` in it never took the edge; with the two
+  delays of `designs/edge2latch16v8` it does. Settled pins do not show
+  how late a copy is, so if other outputs read the same as the one in
+  the term, galre writes them as a chain ("P16 is written as following
+  P14, not the inputs"), for the longest pulse the original can have
+  had. If the copy then misbehaves elsewhere, write that output with
+  its inputs again.
 - "pins ... taken to move after the other latches of a step": several
   latches change in one step, and with these following the others the
   equations fit the macrocells; they read the others' pins.
@@ -405,6 +412,7 @@ designs in `designs/`, with the pins the tests hold:
 | `routelatch22v10` | a register that loads only with a latch set on the way to the state: explored by registers and latch level together | `5-11=0,13-20=0` |
 | `latchfollow16v8` | two latches that set together, and a third that follows them through one term | `12-14=0,19=0` |
 | `edgelatch16v8` | an edge detector made from an output's gate delay, an output with an enable | `7-9=0,11-14=0,19=0` |
+| `edge2latch16v8` | the same with the delay of two outputs: a real GAL16V8 takes the edge with it, and never did with `edgelatch16v8` | `7-9=0,11-13=0,19=0` |
 | `osc16v8` | an output that feeds back inverted and oscillates, and one that follows it | `5-9=0,11-16=0,19=0` |
 | `oscstate16v8` | an oscillating output and a latch in one chip: galre stops | `6-9=0,11-16=0,19=0` |
 | `buried22v10` | a register that never reaches its pin: galre stops | `5-11=0,13-21=0` |

@@ -619,6 +619,30 @@ is never true where the chip rests is named in the report and in a
 comment in the source, because a copy behaves the same only if its
 delays allow it.
 
+On a real GAL16V8 the delays do not allow it for `designs/edgelatch16v8`
+itself. The term is true for one output delay, the latch is back at the
+array after one output delay, and the chip that was tried never took
+the edge: 3,840 falling edges of pin 4, slow and fast, left pin 17 low,
+and galre gave two constant outputs, which is what that chip does.
+`designs/edge2latch16v8` has margin: pin 14 is a copy of pin 16, the
+term reads pin 14 and is true for two delays, and a further term holds
+the latch from the first. The same kind of chip takes the edge with it,
+and galre gives from the chip what it gives from the simulator: a latch
+set by a term that reads pin 16, and pins 14 and 16 as copies of pin 4.
+Once the pins have settled, one delay reads the same as two. Written
+like that, with one delay, and burned into another chip, the copy did
+not take the edge.
+
+So where a term is true only in passing and other outputs read the same
+as the one it reads, galre writes them as a chain, the term's output
+last (`P14 = P4; P16 = P14;`): the term is then true for as many delays
+as there are copies, which is the most the original can have had. It
+does so only if the chain still explains every walk, and the comment in
+the source says which output was written to follow which. A chip burned
+from that source took the edge, and galre gave the same source from it.
+Whether the original has the outputs in that order does not show; a
+copy of an edge detector still has to be tried on its board.
+
 If the power-up walk does read differently in another order, galre first
 tries latches alone, and then registers and latches together
 (`designs/reglatch16v8`). A design without registers goes the same way if

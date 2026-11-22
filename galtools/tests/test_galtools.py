@@ -145,6 +145,20 @@ EDGELATCH = ("7-9=0,11-14=0,19=0", {
     (17, ""): "P2 & !P3 & !P4 & P16\n    # P2 & !P16 & P17\n    # P2 & P4 & P17",
     (18, ""): "P3 & !P16 & P17\n    # P3 & P4 & P17"})
 
+# the same with the delay of two outputs, which a real GAL16V8 takes (the
+# one above it does not): the pins held, and what galre finds, in the
+# simulator and on the chip.  Pin 14 copies pin 16 in the original; settled
+# levels do not show which of the two is later, and galre writes pin 16,
+# which its term reads, as following pin 14.
+EDGE2LATCH = ("7-9=0,11-13=0,19=0", {
+    (14, ""): "P4",
+    (15, ""): "P5",
+    (15, "oe"): "!P6",
+    (16, ""): "P14",
+    (17, ""): "P2 & !P16 & P18\n    # P2 & P4 & P18\n    # P2 & !P3 & !P4 & P16"
+              "\n    # P2 & P17 & !P18",
+    (18, ""): "P3 & !P16 & P17\n    # P3 & P4 & P17"})
+
 # a register input that reads a latch which must have been set on the way
 # to the state: the pins held, and what galre must find
 ROUTELATCH = ("5-11=0,13-20=0", {
@@ -671,6 +685,42 @@ class SimulatedChip(unittest.TestCase):
         self.assertEqual(a.check_equations(), [])
         self.assertEqual(verify.check_captures(a, jed("edgelatch16v8")), [])
 
+    def test_edge_detector_with_margin(self):
+        """Pin 14 is a copy of pin 16, two gate delays behind pin 4, the
+        latch is set by !P4 & P14 and holds itself after one: the circuit
+        a real GAL16V8 takes the edge with.  galre finds a latch set in
+        passing by pin 16, and pins 14 and 16 as copies of pin 4: one
+        delay or two read the same once the pins have settled.  A real
+        chip with that source, one delay, did not take the edge.  So the
+        copies are written as a chain (P16 = P14), the term's pin last,
+        and the source says so."""
+        fix, eqs = EDGE2LATCH
+        a = galre.analyse(SimRig(jed("edge2latch16v8")), "GAL16V8",
+                          fixed=galre.parse_fixed(fix), log=quiet)
+        self.assertIsInstance(a, RegLatchAnalysis)
+        self.assertEqual(a.Lh, [17])
+        self.assertEqual(a.chain, {16: 14})
+        self.assertEqual({(p, kind): "!" * inv + expr for p, kind, inv, expr, _ in a.eqs}, eqs)
+        note = [n for n in a.notes if n.startswith(
+            "P17 has a product term that is true only in passing: P2 & !P3 & !P4 & P16.")]
+        self.assertEqual(len(note), 1, a.notes)
+        self.assertIn("P14 reads the same as P16 wherever the chip rests, and whether one "
+                      "follows the other in the chip does not show.  P16 is written as "
+                      "following P14, not the inputs, so that the term is true for 2 gate "
+                      "delays: the longer pulse is the safer guess.", note[0])
+        self.assertIn("\nP14 = P4;\n", a.cupl("edge2"))
+        self.assertIn("\nP16 = P14;\n", a.cupl("edge2"))
+        self.assertEqual(a.check_equations(), [])
+        self.assertEqual(verify.check_captures(a, jed("edge2latch16v8")), [])
+        # without the terms that only hold a latch through a step, too (a
+        # retry of the compiler computes the equations again)
+        a.hold_terms = False
+        self.assertIn((16, "", False, "P14", 1), a.equations())
+        # one output only that follows pin 4: nothing to chain
+        b = galre.analyse(SimRig(jed("edgelatch16v8")), "GAL16V8",
+                          fixed=galre.parse_fixed(EDGELATCH[0]), log=quiet)
+        self.assertEqual(b.chain, {})
+
     def test_guess_taken_back(self):
         """What galre adds to explain a step is a guess, and a later step
         may show it to be wrong: the latch that it moves there, the chip
@@ -794,6 +844,7 @@ class SimulatedChip(unittest.TestCase):
                   ("routelatch22v10", "GAL22V10", galre.parse_fixed(ROUTELATCH[0])),
                   ("latchfollow16v8", "GAL16V8", galre.parse_fixed(LATCHFOLLOW[0])),
                   ("edgelatch16v8", "GAL16V8", galre.parse_fixed(EDGELATCH[0])),
+                  ("edge2latch16v8", "GAL16V8", galre.parse_fixed(EDGE2LATCH[0])),
                   ("osc16v8", "GAL16V8", galre.parse_fixed(OSC[0]))]
         try:
             for name, device, fixed in cases:

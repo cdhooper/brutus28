@@ -178,6 +178,7 @@ class RegLatchAnalysis(Analysis):
         self.oe_held = None       # a registered GAL16V8's pin 11, held low for the walks
         self.unseen = []          # what the latches' terms claim without having been seen to
         self.hold_terms = True    # covers get the terms that hold a latch through a step
+        self.chain = {}           # output -> the output it is written to follow (_chain)
         self.composite = False    # explore by register values and latch levels together
         self.var = []             # per state: its sweeps with the latches at other levels
 
@@ -1215,8 +1216,10 @@ class RegLatchAnalysis(Analysis):
                     ", ".join(self.name(p) for p in sorted(self.follow)),
                     "is" if len(self.follow) == 1 else "are"))
         passing = {}
+        self.chain = {}
         for p, term, pins in self._passing():
             passing.setdefault((p, tuple(pins)), []).append(term)
+        told = self._chain({q for _, pins in passing for q, _ in pins}) if passing else {}
         for (p, pins), terms in passing.items():
             one = len(terms) == 1
             note = ("%s has %s that %s true only in passing: %s.  %s, so the term%s true "
@@ -1229,6 +1232,16 @@ class RegLatchAnalysis(Analysis):
                                      for q, expr in pins),
                         " is" if one else "s are",
                         "%s has" % self.name(pins[0][0]) if len(pins) == 1 else "they have"))
+            for q, _ in pins:
+                before = told.pop(q, None)
+                if before:
+                    names = [self.name(c) for c in before]
+                    note += ("  %s read%s the same as %s wherever the chip rests, and whether "
+                             "one follows the other in the chip does not show.  %s is "
+                             "written as following %s, not the inputs, so that the term is "
+                             "true for %d gate delays: the longer pulse is the safer guess."
+                             % (" and ".join(names), "s" if len(names) == 1 else "",
+                                self.name(q), self.name(q), names[-1], len(names) + 1))
             self.log(note)
             self.notes.append(note)
         if self.unseen:
@@ -1739,9 +1752,58 @@ class RegLatchAnalysis(Analysis):
             return super().equations()
         self._tabs = {}               # of the covers before
         try:
-            return super().equations()
+            super().equations()
         except Limit as e:
             raise AsyncDesign("%s, pin 1 and the latch pins %s" % (e, self.L))
+        first = self.n1 + len(self.reg)
+        for q, r in self.chain.items():
+            self.cover[(q, "")] = ([first + self.L.index(r)], [(1, 1)], False)
+            self.nterms[(q, "")] = (1, self.nterms[(q, "")][1])
+            self.eqs = sorted([e for e in self.eqs if e[:2] != (q, "")]
+                              + [(q, "", False, self.name(r), 1)])
+        return self.eqs
+
+    def _copies(self, q):
+        """The other outputs that read the same as q wherever the chip
+        rests: always driven, holding no state, with q's equation, which
+        reads inputs only."""
+        cov = self.cover.get((q, ""))
+        if cov is None or (q, "oe") in self.cover or any(v >= self.n1 for v in cov[0]):
+            return []
+        return [r for r in self.L if r != q and r not in self.Lh and r not in self.B
+                and (r, "oe") not in self.cover and self.cover.get((r, "")) == cov]
+
+    def _chain(self, delayed):
+        """A term that is true only in passing lasts for the gate delay
+        of the output it reads (delayed: such outputs).  If other outputs
+        read the same wherever the chip rests, the chip may have one
+        follow the other, and the term true for as many delays; settled
+        pins do not show it.  A real GAL16V8 did not take an edge from a
+        term of one delay, and did from the same of two.  So the copies
+        are written as a chain, the output that the term reads last: the
+        longer pulse.  Only if that still explains every walk.  Returns
+        {output: [the outputs before it, the first reads the inputs]}."""
+        chain, told = {}, {}
+        for q in sorted(delayed):
+            if q in chain or any(q in v for v in told.values()):
+                continue
+            copies = self._copies(q)
+            if not copies:
+                continue
+            last = sorted(c for c in copies if c in delayed) + [q]
+            order = sorted(c for c in copies if c not in delayed) + sorted(last)
+            for a, b in zip(order, order[1:]):
+                chain[b] = a
+            told[order[-1]] = order[:-1]
+        if not chain:
+            return {}
+        self.chain = chain
+        self.equations()
+        if any(self._predict(w) for w in self.lwalks):
+            self.chain = {}
+            self.equations()
+            return {}
+        return told
 
     def _hold_pairs(self, j, sup):
         """The observed steps that hold latch j, as (minterm, minterm,
@@ -2149,7 +2211,11 @@ class RegLatchAnalysis(Analysis):
         return None
 
     def check_equations(self):
-        bad = super().check_equations()
+        # An output written to follow a copy of itself (_chain) differs
+        # from what was learned on the way, by intent, and nowhere the chip
+        # rests: the walks below decide.
+        bad = [b for b in super().check_equations()
+               if not (b[0] in self.chain and b[1] == "")]
         if self.mixed:
             for w in self.lwalks:
                 miss = self._predict(w)
