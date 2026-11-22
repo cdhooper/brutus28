@@ -86,6 +86,26 @@ Set the jumpers:
 
 Set the supply jumper to 5 V.
 
+**A 24-pin part whose type you do not know** (a protected chip, a label
+that is gone): read it as a GAL22V10. A GAL20V8 has the same pins, and
+read as a 22V10 it comes out complete, with pins 14 and 23 as inputs. A
+22V10 read as a GAL20V8 does not: galre then cannot write what only a
+22V10 can do. A 22V10 shows by any of these:
+
+- pin 14 or 23 is driven;
+- logic reads pin 1 or pin 13 in a design with registers;
+- a register is low after power-up;
+- the registers have an asynchronous reset.
+
+Nothing shows a GAL20V8 from the outside (the label does, if it is still
+there). If none of the above turns up, the chip may be one; a GAL22V10
+programmed with the result does the same either way.
+
+CUPL's "excessive number of product terms" at the end of a run does not
+show a 22V10. It says that galre's equations do not fit the device, and
+galre's equations are not the shortest: a PALCE20V8 with four latches
+came out with sixteen product terms on one pin, and needs six.
+
 **A PLCC20 part at 5 V: read this first.** The PLCC20 socket is wired
 pin for pin to socket pins 1 to 20, so the part's VCC is socket pin 20,
 not 28. On the rev 2 board every socket pin also goes straight to an
