@@ -71,8 +71,18 @@ class SocketDevice:
     a hundred times faster, but power() and io() are then not called, so
     the counters and writes below stay as they are."""
 
-    def __init__(self, jed, socket, fast=False, race=0, glitch=0, glitch_pin=13):
-        self.fast = fast and not glitch
+    def __init__(self, jed, socket, fast=False, race=0, glitch=0, glitch_pin=13, hold_ms=0):
+        self.fast = fast and not glitch and not hold_ms
+        self.hold_ms = hold_ms       # not 0: the chip keeps its charge for so long without
+                                     # power.  Powered again sooner, it is not reset: it comes
+                                     # up with its registers as they were, and as after one
+                                     # more clock edge with every input low.  A part in a
+                                     # PLCC28 did so on a board: after 20 ms without power it
+                                     # came up in the state that such a clock leads to from
+                                     # any state, after 50 ms in its power-up state.
+        self.clock = None            # () -> msec: the firmware's delays so far (the transport)
+        self.wire_ms = 0             # and the time its commands took on the wire
+        self.off_at = None           # when the supply went off; None: the rail was drained
         self.glitch = glitch         # not 0: a chip that now and then (about one time in
                                      # eight, by this seed) loses the state of its registers
                                      # when glitch_pin falls in one write with two or more
@@ -112,22 +122,42 @@ class SocketDevice:
         self.noise = 1               # for the level read of a pin that oscillates; it runs on
                                      # over power cycles, so that the same walk reads differently
 
+    def _now(self):
+        return (self.clock() if self.clock else 0) + self.wire_ms
+
+    def _come_up(self):
+        low = {p: 0 for p in self.pins}                # drivers come up low
+        if (self.hold_ms and self.off_at is not None
+                and self._now() - self.off_at < self.hold_ms):
+            self.g.apply(low)                          # not reset
+            self.g.apply({**low, 1: 1})
+            self.g.apply(low)
+        else:
+            self.g.power_up()
+            self.g.settle(low)
+        self.last = 0
+
     def jumper_pins(self):
+        self.off_at = None           # the detection drains the VCC rail through the pins
         if not self.jumpers_ok:
             return None
         return self.jumper_vcc, self.jumper_gnd
 
     def supply(self):
         self.supply_measured += 1
+        if self.hold_ms:
+            # the supply is on while it is measured, and off from now
+            self._come_up()
+            self.off_at = self._now()
         return self.supply_mv
 
     def power(self, on):
+        if self.powered and not on:
+            self.off_at = self._now()
         self.powered = bool(on)
         if on:
             self.power_ons += 1
-            self.g.power_up()
-            self.g.settle({p: 0 for p in self.pins})   # drivers come up low
-            self.last = 0
+            self._come_up()
 
     def io(self, value):
         self.io_count += 1
@@ -253,6 +283,8 @@ class HarnessTransport:
         self.lib.harness_run.argtypes = [ctypes.c_char_p]
         self.lib.harness_output.restype = ctypes.POINTER(ctypes.c_ubyte)
         self.lib.harness_gal.argtypes = [ctypes.c_void_p]
+        self.lib.harness_msec.restype = ctypes.c_ulong
+        device.clock = self.lib.harness_msec
 
     def _jumper_pins(self, vcc, gnd):
         j = self.dev.jumper_pins()
@@ -265,7 +297,10 @@ class HarnessTransport:
         rail[0] = self.dev.supply()
         return 0
 
+    WIRE_MS = 10                 # a command and its answer on the wire
+
     def _run(self, line):
+        self.dev.wire_ms += self.WIRE_MS
         self.lib.harness_init(self._io, self._pwr, self._pins, self._supply)
         self.lib.harness_gal(self.dev.cgal(self.lib) if self.dev.fast else None)
         n = self.lib.harness_run(line.encode())

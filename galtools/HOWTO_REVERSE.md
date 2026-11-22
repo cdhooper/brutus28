@@ -151,7 +151,10 @@ with the number of input combinations.
 progress and keeps the same text in `out/report.txt`. A run goes like
 this:
 
-1. **Jumper check**, as above.
+1. **Jumper check**, as above. Then galre checks that a power cycle
+   resets the chip: it reads the pins after one of 20 ms (`--off`) and
+   after one of a second, and makes the power cycles longer if the two
+   differ.
 2. **Power-up walk.** galre reads every pin for every input combination.
    Brutus drives every pin weakly, through 1K, so a pin the GAL drives
    reads the GAL's value instead of Brutus's. This finds the
@@ -479,10 +482,19 @@ reach the chip in no certain order, and a chip may now and then take that
 for a clock edge (see "the chip does not answer the same every time" in
 section 6). Install the firmware from the same commit (section 2).
 
+**"A power cycle of 20 ms does not reset this chip ...: power is now off
+for N ms in every power cycle".** The chip keeps its charge while the
+supply is off, and came up in another state than after a second without
+power. galre goes on with longer power cycles, which makes a run with many
+of them slower; hold more pins (section 4) if it takes too long. `--off N`
+sets the time to start from.
+
 **"two power cycles and the same clocks did not lead back to the state
 the job started from ...; running the job again".** A wrong reading, or a
-bad contact. The job is run again, twice at most; if that does not help,
-galre stops with "could not get back to the path state".
+bad contact. The job is run again, twice at most. If that does not help,
+galre stops with "could not get back to the path state": then the chip
+may keep its charge through the power cycles, in a way that the check at
+the start did not show. Give a longer `--off`, 200 for example.
 
 **Exit code 3.** The message before "no equations written" says why:
 

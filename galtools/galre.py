@@ -203,7 +203,9 @@ def main(argv=None):
                     help="sim: the inputs that one step changes reach the chip one after the "
                          "other, in an order that differs from time to time, as on a board "
                          "(a seed, not 0; for designs with latches)")
-    ap.add_argument("--off", type=int, default=20, help="msec power off per power cycle")
+    ap.add_argument("--off", type=int, default=20,
+                    help="msec power off per power cycle (default 20; board: raised if the "
+                         "chip is not reset by it)")
     ap.add_argument("--on", type=int, default=2, help="msec after power on")
     ap.add_argument("--no-jumper-check", action="store_true",
                     help="power the socket without checking the VCC, GND and supply "
@@ -304,6 +306,11 @@ def main(argv=None):
                     log("No capture was run.  Fix the jumpers, or pass --no-jumper-check "
                         "if the detection is wrong.")
                     return 2
+            try:
+                brutus.check_power_cycle(DEV[args.device]["io"], fixed)
+            except CaptureError as e:
+                log("power cycle check: %s" % e)
+                return 2
             meta = brutus.metadata()
             meta.update(title=args.title or "galre", date=time.strftime("%Y-%m-%d %H:%M:%S"),
                         fixed={str(p): v for p, v in sorted(fixed.items())}, survey=survey)
@@ -350,7 +357,8 @@ def main(argv=None):
         ops = rig.ops
         if args.mode != "replay":
             log("board work: %s; about %.0f s on a Brutus-28" % (
-                dict(ops), ops.seconds(args.off, args.on)))
+                dict(ops), ops.seconds(brutus.off_ms if args.mode == "board" else args.off,
+                                       args.on)))
         log("analysis %.1f s" % (time.time() - t0))
         if unsteady[0]:
             log("NOTE: the chip did not answer every clock edge the same way each time (%d "

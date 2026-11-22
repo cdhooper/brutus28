@@ -608,6 +608,60 @@ class BrutusRig:
                     "".join("\n  board: " + l for l in self.jumper_readings)))
         return self.detected
 
+    LONG_OFF_MS = 1000           # without power for so long, a chip is taken to be reset
+
+    def _power_up_reads(self, base, probes, cand, off_ms):
+        """What the pins read after a power cycle of off_ms."""
+        keep, self.off_ms = self.off_ms, off_ms
+        try:
+            self._job([], base, [], probes, cand)
+            return self._run("state").sigs[0]
+        finally:
+            self.off_ms = keep
+
+    def check_power_cycle(self, io, fixed=None):
+        """Does a power cycle of off_ms reset the chip?
+
+        A chip that keeps its charge while the supply is off is not reset
+        when it comes back: it comes up in some other state, the same one
+        every time, and every job then starts from that state as if it
+        were the power-up state.  (The supply is measured just before
+        each job, so the chip has been powered then.)  Seen with a part
+        in a PLCC28: after 20 ms it came up in the state that one clock
+        with every input low leads to, after 50 ms and more in its
+        power-up state, every registered output high.
+
+        Reads the pins after a power cycle of off_ms and after one of
+        LONG_OFF_MS, with every input low and with every input high (pin 1
+        low), each of the pins io driven both ways.  If they differ,
+        off_ms is doubled until they agree, and raised by half again.
+        Returns off_ms.  Without the jumper check nothing is powered
+        before a job, and the firmware itself goes on to ten times off_ms
+        where a power cycle does not lead back to the state of a job."""
+        if not self.jumper_check:
+            return self.off_ms
+        fixed = dict(fixed or {})
+        base = {p: fixed.get(p, 0) for p in self.pins}
+        high = {p: fixed.get(p, 0 if p == CLOCK else 1) for p in self.pins}
+        cand = [p for p in io if p not in fixed][:MAX_CAND]
+        reads = lambda ms: self._power_up_reads(base, [base, high], cand, ms)  # noqa: E731
+        cold = reads(self.LONG_OFF_MS)
+        if reads(self.LONG_OFF_MS) != cold:
+            self.log("The chip does not come up the same way twice after %d ms without "
+                     "power: the power-off time stays at %d ms." % (self.LONG_OFF_MS, self.off_ms))
+            return self.off_ms
+        first = off = self.off_ms
+        while off < self.LONG_OFF_MS and any(reads(off) != cold for _ in range(3)):
+            off *= 2
+        if off != first:
+            self.off_ms = min(self.LONG_OFF_MS, off + off // 2)
+            self.log("A power cycle of %d ms does not reset this chip: it comes up in another "
+                     "state than after %d ms without power (it keeps its charge), and every "
+                     "job would start from that state.  It does after %d ms: power is now off "
+                     "for %d ms in every power cycle, and the captures take longer." % (
+                         first, self.LONG_OFF_MS, min(off, self.LONG_OFF_MS), self.off_ms))
+        return self.off_ms
+
     def _serial(self):
         """Ask for one pin per write (after "pld capture clear", which turns
         it off).  A firmware that does not know the setting goes on as
@@ -751,6 +805,10 @@ class BrutusRig:
             self.log("%s: two power cycles and the same clocks did not lead back to the "
                      "state the job started from (vector %d of %d); running the job again" % (
                          what, cap.done, cap.count))
+        if cap.status == self.LOST:
+            raise CaptureError("pld capture %s: %s (a chip that keeps its charge through a power "
+                               "cycle of %d ms and of ten times that does this: give a longer "
+                               "--off)" % (what, STATUS[cap.status], self.off_ms))
         if cap.status != 0:
             raise CaptureError("pld capture %s: %s" % (what, STATUS.get(cap.status, cap.status)))
         if cap.done != cap.count:

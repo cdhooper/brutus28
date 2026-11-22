@@ -148,6 +148,8 @@ Options:
   states per sweep.
 - `--settle`, `--off` and `--on` set the firmware timing: µs after each
   write, ms with power off during a power cycle, and ms after power on.
+  `galre board` raises `--off` by itself for a chip that a power cycle of
+  that length does not reset (see How it works).
 - `--no-jumper-check` powers the socket without checking the jumpers.
 - `--once` runs every sweep of clock edges once. By default `galre board`
   runs each twice, and five times where the two differ (see How it works).
@@ -179,6 +181,18 @@ walk that counts. So the firmware changes one pin per write (`ser`), the
 lowest socket pin first: a vector that differs from the last one in n pins
 takes n writes. `--no-serial` turns that off, and firmware that does not
 have it is used as it is; the run says so.
+
+A power cycle has to reset the chip, and the default 20 ms without power
+do not reset every chip: the same part kept its charge. It then came up
+in the state that a clock with every input low leads to, every time, and
+every job started from that state as if it were the power-up state (the
+supply is measured just before a job, so the chip has been powered then).
+After 50 ms it came up as it should, every registered output high. So
+`galre board` first reads the pins after a power cycle of `--off` and
+after one of a second, and if they differ, doubles the power-off time
+until they agree and adds half again. The report says so ("A power cycle
+of 20 ms does not reset this chip"). It sees this only where the state
+shows on the pins with every input low or high.
 
 A wrong reading in a sweep of clock edges would pass for the chip's logic
 (one more product term), or for a latch. So `galre board` runs every sweep

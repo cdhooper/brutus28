@@ -22,7 +22,7 @@ sys.path.insert(0, HERE)
 import fwsim                                       # noqa: E402
 import galre                                       # noqa: E402
 import verify                                      # noqa: E402
-from analysis import Analysis, AsyncDesign, LatchSuspected, Limit   # noqa: E402
+from analysis import DEV, Analysis, AsyncDesign, LatchSuspected, Limit   # noqa: E402
 from capture import CaptureError                   # noqa: E402
 from latch import LatchAnalysis                    # noqa: E402
 from galsim import GAL                             # noqa: E402
@@ -1857,6 +1857,44 @@ class Firmware(unittest.TestCase):
         except (AsyncDesign, Limit):
             b = None
         self.assertTrue(b is None or b.trans != good)
+
+    def test_power_cycle_that_does_not_reset(self):
+        """A chip that keeps its charge while the supply is off is not
+        reset when it comes back soon (fwsim.SocketDevice, hold_ms): it
+        comes up in another state, and every job would start from that.
+        The rig finds a power-off time that resets it."""
+        io, fix = DEV["GAL22V10"]["io"], galre.parse_fixed("6-11=0,14-19=0,23=0")
+
+        def rig(hold, logs, **kw):
+            t = fwsim.HarnessTransport(self.lib, fwsim.SocketDevice(jed("lowreg22v10"), "dip24",
+                                                                 hold_ms=hold))
+            r = BrutusRig(t, "GAL22V10", log=logs.append, **kw)
+            if r.jumper_check:
+                r.preflight()
+            return r
+        for hold, off in ((0, 20), (30, 60), (70, 120), (300, 480)):
+            logs = []
+            r = rig(hold, logs)
+            self.assertEqual(r.check_power_cycle(io, fix), off)
+            self.assertEqual(r.metadata()["off_ms"], off)
+            said = [line for line in logs if "does not reset this chip" in line]
+            self.assertEqual(len(said), int(hold > 0))
+            if hold:
+                self.assertIn("power is now off for %d ms" % off, said[0])
+        # with it, the chip comes out as it is
+        r = rig(30, [])
+        r.check_power_cycle(io, fix)
+        a = galre.analyse(r, "GAL22V10", fixed=fix, survey=16, log=quiet)
+        self.assertEqual(verify.check_captures(a, jed("lowreg22v10")), [])
+        # without it, a power cycle leads back to the state of a job only if
+        # one clock with every input low leads to the same state from anywhere
+        with self.assertRaises(CaptureError) as e:
+            galre.analyse(rig(30, []), "GAL22V10", fixed=fix, survey=16, log=quiet)
+        self.assertIn("could not get back to the path state", str(e.exception))
+        self.assertIn("give a longer --off", str(e.exception))
+        # no jumper check: nothing is powered before a job, nothing to find
+        r = rig(30, [], jumper_check=False)
+        self.assertEqual(r.check_power_cycle(io, fix), 20)
 
     def test_dclk_refuses_supply_pin(self):
         t = self.transport("fsm22v10", "dip24")
