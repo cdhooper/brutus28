@@ -1063,6 +1063,55 @@ class Firmware(unittest.TestCase):
         finally:
             shutil.rmtree(out)
 
+    def test_board_asks_for_the_compiler(self):
+        """galre board does not start without a CUPL compiler that builds a
+        design for the device: its result would not be checked.  It says so
+        before it opens the port; --no-cupl records anyway."""
+        out = tempfile.mkdtemp(prefix="galre")
+
+        def opened(port):
+            raise AssertionError("the port was opened")
+
+        def board(*more):
+            with mock.patch.object(galre, "SerialTransport", opened), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                r = galre.main(["board", "-p", "-", "-d", "GAL16V8", "-o", out] + list(more))
+            with open(os.path.join(out, "report.txt")) as f:
+                return r, f.read()
+        try:
+            # no compiler
+            r, report = board("--cupl", "")
+            self.assertEqual(r, 2)
+            self.assertIn("no CUPL compiler", report)
+            self.assertIn("No capture was run", report)
+            # one that cannot be run
+            r, report = board("--cupl", os.path.join(out, "nocupl"))
+            self.assertEqual(r, 2)
+            self.assertIn("does not build a design for the GAL16V8", report)
+            self.assertIn("Nothing was run", report)
+            # one that runs and makes no JED (no device library, say)
+            fake = os.path.join(out, "fakecupl")
+            with open(fake, "w") as f:
+                f.write("#!/bin/sh\necho device not in library\n")
+            os.chmod(fake, 0o755)
+            r, report = board("--cupl", fake)
+            self.assertEqual(r, 2)
+            self.assertIn("device not in library", report)
+            self.assertIsNotNone(galre.check_cupl(fake, "GAL22V10"))
+            # --no-cupl goes on to the port, with or without a compiler
+            for more in (["--no-cupl"], ["--no-cupl", "--cupl", fake]):
+                with self.assertRaises(AssertionError):
+                    board(*more)
+        finally:
+            shutil.rmtree(out)
+
+    @unittest.skipUnless(CUPL, "no CUPL compiler")
+    def test_compiler_check(self):
+        """The check galre makes of the compiler passes with a real one, for
+        every device."""
+        for device in ("GAL16V8", "GAL20V8", "GAL22V10"):
+            self.assertIsNone(galre.check_cupl(CUPL, device))
+
     def test_async_designs_stop(self):
         """galre sim and board stop with exit code 3 on a chip with state
         that changes without a clock, and replay says the same."""
@@ -1070,7 +1119,7 @@ class Firmware(unittest.TestCase):
 
         def galre_main(*argv):
             with contextlib.redirect_stdout(io.StringIO()):
-                r = galre.main(list(argv) + ["--cupl", ""])
+                r = galre.main(list(argv) + ["--no-cupl"])
             with open(os.path.join(argv[argv.index("-o") + 1], "report.txt")) as f:
                 return r, f.read()
         try:
@@ -1103,7 +1152,7 @@ class Firmware(unittest.TestCase):
 
         def galre_main(*argv):
             with contextlib.redirect_stdout(io.StringIO()):
-                r = galre.main(list(argv) + ["--cupl", ""])
+                r = galre.main(list(argv) + ["--no-cupl"])
             with open(os.path.join(argv[argv.index("-o") + 1], "report.txt")) as f:
                 return r, f.read()
         try:
@@ -1141,7 +1190,7 @@ class Firmware(unittest.TestCase):
 
         def galre_main(*argv):
             with contextlib.redirect_stdout(io.StringIO()):
-                r = galre.main(list(argv) + ["--cupl", ""])
+                r = galre.main(list(argv) + ["--no-cupl"])
             with open(os.path.join(argv[argv.index("-o") + 1], "report.txt")) as f:
                 return r, f.read()
         try:
@@ -1179,7 +1228,7 @@ class Firmware(unittest.TestCase):
 
         def galre_main(*argv):
             with contextlib.redirect_stdout(io.StringIO()):
-                r = galre.main(list(argv) + ["--cupl", ""])
+                r = galre.main(list(argv) + ["--no-cupl"])
             with open(os.path.join(argv[argv.index("-o") + 1], "report.txt")) as f:
                 return r, f.read()
         try:
@@ -1219,7 +1268,7 @@ class Firmware(unittest.TestCase):
 
         def galre_main(*argv):
             with contextlib.redirect_stdout(io.StringIO()):
-                r = galre.main(list(argv) + ["--cupl", ""])
+                r = galre.main(list(argv) + ["--no-cupl"])
             with open(os.path.join(argv[argv.index("-o") + 1], "report.txt")) as f:
                 return r, f.read()
         try:
@@ -1256,7 +1305,7 @@ class Firmware(unittest.TestCase):
 
         def galre_main(*argv):
             with contextlib.redirect_stdout(io.StringIO()):
-                r = galre.main(list(argv) + ["--cupl", ""])
+                r = galre.main(list(argv) + ["--no-cupl"])
             with open(os.path.join(argv[argv.index("-o") + 1], "report.txt")) as f:
                 return r, f.read()
         try:
@@ -1537,7 +1586,7 @@ class Firmware(unittest.TestCase):
 
         def galre_main(*argv):
             with contextlib.redirect_stdout(io.StringIO()):
-                r = galre.main(list(argv) + ["--cupl", ""])
+                r = galre.main(list(argv) + ["--no-cupl"])
             with open(os.path.join(argv[argv.index("-o") + 1], "report.txt")) as f:
                 return r, f.read()
         try:

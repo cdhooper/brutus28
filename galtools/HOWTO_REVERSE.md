@@ -33,12 +33,15 @@ This guide covers what to do and how to read the result.
   that older firmware rejects.
 - Python 3.8 or newer. numpy is optional; with it, walk data decodes
   faster.
-- A CUPL compiler, optional but recommended: galre then builds the JED and
-  checks it against every capture. WinCUPL's `cupl` or a native build of it
-  will do. galre finds it through `--cupl`, `$CUPL`, or `cupl` on the PATH,
-  and runs it as `cupl -jaxm4 NAME.pld`. The `.pld` says so in a comment,
-  and carries what else CUPL needs (the device mode, and a `MIN` statement
-  for latches).
+- A CUPL compiler: galre builds the JED with it and checks it against
+  every capture. WinCUPL's `cupl` or a native build of it will do. galre
+  finds it through `--cupl`, `$CUPL`, or `cupl` on the PATH, and runs it as
+  `cupl -jaxm4 NAME.pld`. The `.pld` says so in a comment, and carries
+  what else CUPL needs (the device mode, and a `MIN` statement for
+  latches). A result that was not built is not checked, so `galre board`
+  does not start without a compiler that builds a design for the device.
+  With `--no-cupl` it records anyway; replay the recording where the
+  compiler is (section 8).
 - To build and install the firmware: `arm-none-eabi-gcc`, `make` and
   `dfu-util`.
 
@@ -427,6 +430,13 @@ designs in `designs/`, with the pins the tests hold:
 | `buried22v10` | a register that never reaches its pin: galre stops | `5-11=0,13-21=0` |
 
 ## 10. When galre stops
+
+**Exit code 2, "no CUPL compiler" or "CUPL does not build a design".**
+Nothing was run. galre found no compiler, or the one it found gave no JED
+for one gate on this device (the report has what it printed; a missing
+device library is the usual reason). Install it or name it with `--cupl`.
+`--no-cupl` records without it: the equations are then written, but not
+built and not checked, until the recording is replayed with a compiler.
 
 **Exit code 2, jumper check.** Set the jumpers as printed under
 "expected". The detection has been checked on one board only; the report

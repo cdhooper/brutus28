@@ -13,7 +13,10 @@
 
 Writes out/NAME.pld (CUPL) and out/report.txt; with a CUPL compiler (--cupl,
 $CUPL, or cupl on the PATH) also out/NAME.jed, checked against
-every captured state and input vector.
+every captured state and input vector.  A result that was not compiled is
+not checked, so "board" does not start without a compiler that builds a
+design for the device; --no-cupl records anyway, for a replay where the
+compiler is.
 """
 
 import argparse
@@ -22,11 +25,12 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from analysis import AsyncDesign, LatchSuspected, Limit, Settles, Unsteady     # noqa: E402
+from analysis import DEV, AsyncDesign, LatchSuspected, Limit, Settles, Unsteady     # noqa: E402
 from capture import CaptureError, SerialTransport          # noqa: E402
 from latch import LatchAnalysis                            # noqa: E402
 from osc import OscAnalysis                                # noqa: E402
@@ -152,6 +156,29 @@ def compile_cupl(cupl, pld, log, minimise=4):
     return jed
 
 
+def check_cupl(cupl, device):
+    """Does cupl build a design for device?  Compiles one gate.  Returns
+    None if that gives a JED, else what went wrong: a compiler that cannot
+    be run, or one that does not know the device (no device library),
+    would otherwise show only after the captures."""
+    dev = DEV[device]
+    d = tempfile.mkdtemp(prefix="galre")
+    said = []
+    try:
+        pld = os.path.join(d, "galrechk.pld")
+        with open(pld, "w") as f:
+            f.write("Name galrechk; Partno x; Date x; Revision 1; Designer galre; Company x; "
+                    "Assembly x; Location x;\nDevice %s;\nPin 2 = A;\nPin %d = Y;\nY = A;\n" % (
+                        dev["cupl"], dev["io"][-1]))
+        try:
+            jed = compile_cupl(cupl, pld, said.append)
+        except OSError as e:
+            return "%s: %s" % (cupl, e.strerror or e)
+        return None if jed else "\n".join(said).strip()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -183,13 +210,19 @@ def main(argv=None):
     ap.add_argument("--no-follow", dest="follow", action="store_false",
                     help="keep driving the enumerated levels at the clock edge, against "
                          "the pins the GAL drives (board)")
-    ap.add_argument("--cupl", default=os.environ.get("CUPL") or shutil.which("cupl"))
+    ap.add_argument("--cupl", default=os.environ.get("CUPL") or shutil.which("cupl"),
+                    help="the CUPL compiler (default: $CUPL, or cupl on the PATH)")
+    ap.add_argument("--no-cupl", action="store_true",
+                    help="do not compile the result: the equations are written, but not "
+                         "built and not checked against the captures")
     ap.add_argument("--csim", default=os.environ.get("CSIM") or shutil.which("csim"),
                     help="CUPL's simulator, for a second opinion on the result "
                          "(default: $CSIM, or csim on the PATH)")
     ap.add_argument("--steps", type=int, default=30000,
                     help="random steps to compare with the original (sim)")
     args = ap.parse_args(argv)
+    if args.no_cupl:
+        args.cupl = None
 
     os.makedirs(args.out, exist_ok=True)
     with open(os.path.join(args.out, "report.txt"), "w") as report:
@@ -198,6 +231,16 @@ def main(argv=None):
             print(msg)
             report.write(msg + "\n")
             report.flush()
+
+        def cupl_builds(device):
+            """The compiler builds a design for the device (or there is
+            none to ask)."""
+            why = check_cupl(args.cupl, device) if args.cupl else None
+            if why:
+                log("CUPL (%s) does not build a design for the %s:\n%s" % (args.cupl, device, why))
+                log("Nothing was run.  Give a working compiler (--cupl, $CUPL), or pass "
+                    "--no-cupl to go without the JED and its check against the captures.")
+            return not why
 
         fixed = parse_fixed(args.fix)
         survey = 64 if args.survey is None else args.survey
@@ -223,6 +266,16 @@ def main(argv=None):
         else:
             if not (args.device and args.port):
                 ap.error("board needs --device and --port")
+            # the captures take minutes to hours, and without the JED they are
+            # not checked: ask for the compiler first
+            if not args.cupl and not args.no_cupl:
+                log("no CUPL compiler (--cupl, $CUPL, or cupl on the PATH): the result could "
+                    "not be built and checked against the captures.")
+                log("No capture was run.  Install CUPL, or pass --no-cupl to record now and "
+                    "replay the recording where CUPL is.")
+                return 2
+            if not cupl_builds(args.device):
+                return 2
             t = SerialTransport(args.port)
             brutus = BrutusRig(t, args.device, args.socket, args.settle, args.off, args.on,
                                log, jumper_check=not args.no_jumper_check,
@@ -243,6 +296,8 @@ def main(argv=None):
             rig = RecordingRig(brutus, os.path.join(args.out, "capture.jsonl"), meta)
             device = args.device
         args.title = args.title or "galre"
+        if args.mode != "board" and not cupl_builds(device):
+            return 2
 
         t0 = time.time()
         try:
@@ -282,7 +337,9 @@ def main(argv=None):
         log("analysis %.1f s" % (time.time() - t0))
 
         if not args.cupl:
-            log("no CUPL compiler (--cupl or $CUPL): %s not compiled" % pld)
+            log("%s: %s not compiled, and not checked against the captures%s" % (
+                "--no-cupl" if args.no_cupl else "no CUPL compiler (--cupl or $CUPL)", pld,
+                "; replay the recording where CUPL is" if args.mode == "board" else ""))
             return 0 if not bad else 1
         # What CUPL needs to know is in the source: the MIN statement for
         # the latches, whose covers have product terms that only hold them

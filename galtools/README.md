@@ -24,10 +24,13 @@ reachable state. The firmware side is the `pld capture` command
 - Python 3.8 or newer, standard library only. With numpy installed, walk
   data decodes faster.
 - Brutus-28 firmware with `pld capture`.
-- Optional: a CUPL compiler, used to turn the result into a JED and check it
-  (`--cupl`, `$CUPL`, or `cupl` on the PATH). It is run as
+- A CUPL compiler, to turn the result into a JED and check it against the
+  captures (`--cupl`, `$CUPL`, or `cupl` on the PATH). It is run as
   `cupl -jaxm4 NAME.pld`, so WinCUPL's `cupl` or a native build of it
-  will do.
+  will do. `galre board` asks for it before it starts and tries it on one
+  gate for the device, because a result that was not built is not checked.
+  `--no-cupl` records without it, for a replay where the compiler is.
+  `sim` and `replay` run without one and say that nothing was checked.
 
 ## Use
 
