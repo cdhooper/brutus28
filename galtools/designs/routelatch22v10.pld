@@ -1,0 +1,29 @@
+Name     routelatch22v10;
+Partno   x;
+Date     2026-11-20;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g22v10;
+
+/* Test design: GAL22V10.  The input of Q1 reads the latch L, and loads a
+   one only while L is set and S is low again: L must have been set on
+   the way to the state.  Two ways to the same register values leave the
+   latch at different levels, and the state with Q1 set is reached from
+   one of them only. */
+
+Pin 1  = CLK;
+Pin 2  = S;
+Pin 3  = R;
+Pin 4  = D;
+Pin 21 = L;
+Pin 22 = Q1;
+Pin 23 = Q0;
+
+L = S & !R
+  # L & !R;
+Q0.d = D;
+Q1.d = Q0 & L & !S & !D
+     # Q1 & !R;

@@ -18,10 +18,13 @@ def check_captures(a, jed, notes=None):
     settle differently), and a walk that starts differently is added to
     notes.  Returns a list of differences (empty when the rebuilt JED
     matches the captures)."""
+    if hasattr(a, "check_jed"):
+        return a.check_jed(jed, notes)          # outputs that do not settle
     if hasattr(a, "walks"):
         return _check_walks(a, jed, notes)
     rig = SimRig(jed, careful=True)
     bad = []
+    hist = sorted(a.hist)             # latches: read in the walks with pin 1 instead
     for s, (path, t) in a.states.items():
         drives = a.drives(path)
         active = s in a.ar_on
@@ -31,22 +34,78 @@ def check_captures(a, jed, notes=None):
             if (sigs[0] != sigs[1]) != active:
                 bad.append(("asynchronous reset", s))
         la, lb, _ = rig.walk(a.V, a.base, drives, skip=a.ar if active else None,
-                             avoid=a.ar if path else None)
+                             avoid=a.ar if path else None, **a._wctx())
         t2 = Table(a.V, la, lb, a.full, a.v1, a.full ^ a.ar_set if active else None)
         for p in a.pins:
-            if p == 1 and not a.clock_in_v:
+            if (p == 1 and not a.clock_in_v) or p in hist:
                 continue
             if (t.driven[p] != t2.driven[p]
                     or (t.value[p] & t.driven[p]) != (t2.value[p] & t2.driven[p])):
                 bad.append(("pin %d" % p, s))
         if s in a.trans and not a.clock_in_v and a.probe_x:
-            obs, _ = rig.transitions(a.V, a.base, drives, a.probes(), a.cand, avoid=a.ar)
+            res = rig.transitions(a.V, a.base, drives, a.probes(), a.cand, avoid=a.ar,
+                                  pre=a.mixed, **a._tctx())
             m = {}
-            for o, xs in obs.items():
-                s2 = a._sig_obs(o)
+            for o, xs in res[0].items():
+                s2 = a._reg(a._sig_obs(o))
                 m[s2] = m.get(s2, 0) | xs
-            if m != a.trans[s]:
-                bad.append(("transitions", s))
+            if not a.mixed:
+                if m != a.trans[s]:
+                    bad.append(("transitions", s))
+            elif s in a.pre:
+                # where a clock edge goes may depend on the latches, and the
+                # sweep here need not leave them as the captured one did:
+                # compare the x clocked in with the outputs at the same levels
+                same = a.full
+                for p in a.O:
+                    same &= ~(res[2][p] ^ a.pre[s][p])
+                if any((m.get(s2, 0) ^ a.trans[s].get(s2, 0)) & same
+                       for s2 in set(m) | set(a.trans[s])):
+                    bad.append(("transitions", s))
+    if a.mixed:
+        bad += _check_events(a, rig, notes)
+    return bad
+
+
+def _check_events(a, rig, notes=None):
+    """Registers and latches: jed through the analysis's walks with pin 1
+    enumerated, from the first read where every pin agrees (the latches
+    may come out of power-up and the path differently)."""
+    from reglatch import _b01
+    bad = []
+    N = 1 << a.n1
+    for w in a.lwalks:
+        if w.order is None:
+            continue
+        s, rot, rev, start, mode, mix = w.cfg
+        path = a.states[a.S[s]][0]
+        kw = {}
+        if mode == a.AROUND:
+            kw = dict(skip=a.ar, avoid=a.ar)
+        elif mode == a.AVOID:
+            kw = dict(avoid=a.ar)
+        kw.update(a._wctx())
+        la, lb, _ = rig.walk(a.Vc, a.base, a.drives(path), gray=1, rot=rot, rev=rev,
+                             start=start, mix=mix, **kw)
+        name = "walk from state %s rot=%d rev=%d start=%x mix=%d" % (
+            "".join(map(str, a.S[s])), rot, rev, start, mix)
+        diff = 0
+        for p in la:
+            diff |= (la[p] ^ w.la[p]) | (lb[p] ^ w.lb[p])
+        if not diff:
+            continue
+        db = _b01(diff, N)
+        order = [xp for xp in w.order]
+        first = next((k for k, xp in enumerate(order) if not db[xp]), None)
+        if first is None:
+            bad.append((name, "never agrees"))
+            continue
+        later = [xp for xp in order[first:] if db[xp]]
+        if later:
+            pins = sorted(p for p in la if ((la[p] ^ w.la[p]) | (lb[p] ^ w.lb[p])) >> later[0] & 1)
+            bad.append((name, "pins %s at %s" % (pins, a._cinputs(later[0]))))
+        elif notes is not None:
+            notes.append("%s: the rebuilt chip agrees from read %d" % (name, first))
     return bad
 
 
@@ -56,10 +115,10 @@ def _check_walks(a, jed, notes=None):
     rig = SimRig(jed)
     bad = []
     for w in a.walks:
-        rot, rev, start = w.cfg
-        la, _, _ = rig.walk(a.V, a.wbase, [], gray=1, rot=rot, rev=rev, start=start)
+        rot, rev, start, mix = w.cfg
+        la, _, _ = rig.walk(a.V, a.wbase, [], gray=1, rot=rot, rev=rev, start=start, mix=mix)
         got = {p: _to_bytes(la[p], a.n) for p in a.outputs}
-        name = "walk rot=%d rev=%d start=%x" % w.cfg
+        name = "walk rot=%d rev=%d start=%x mix=%d" % w.cfg
         same = [all(got[p][x] == w.levels[p][x] for p in a.outputs) for x in w.xs]
         if True not in same:
             bad.append((name, "never agrees"))

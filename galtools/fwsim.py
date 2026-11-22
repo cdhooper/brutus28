@@ -40,12 +40,12 @@ def build(cc=None):
     d = tempfile.mkdtemp(prefix="capharness")
     for f in ("capture.c", "capture.h"):
         shutil.copy(os.path.join(FW, f), d)
-    for f in ("main.h", "cmdline.h", "printf.h", "harness.c"):
+    for f in ("main.h", "cmdline.h", "printf.h", "harness.c", "galmodel.c", "galmodel.h"):
         shutil.copy(os.path.join(HERE, "fwstub", f), d)
     lib = os.path.join(d, "libcapture.so")
     subprocess.run([cc, "-shared", "-fPIC", "-O2", "-Wall", "-Wextra", "-Werror",
-                    "-Wno-unused-parameter", "-o", lib, "capture.c", "harness.c"],
-                   cwd=d, check=True)
+                    "-Wno-unused-parameter", "-o", lib, "capture.c", "harness.c",
+                    "galmodel.c"], cwd=d, check=True)
     return lib
 
 
@@ -64,9 +64,21 @@ def library():
 
 
 class SocketDevice:
-    """A GAL in the Brutus-28 socket, as the firmware sees it."""
+    """A GAL in the Brutus-28 socket, as the firmware sees it.
 
-    def __init__(self, jed, socket):
+    With fast, the harness simulates the chip itself, in C (fwstub/
+    galmodel.c, the same model as galsim.py's GAL and this class): about
+    a hundred times faster, but power() and io() are then not called, so
+    the counters and writes below stay as they are."""
+
+    def __init__(self, jed, socket, fast=False, race=0):
+        self.fast = fast
+        self.race = race             # not 0: the pins that one port write changes arrive one
+                                     # after the other, in an order that this seed decides and
+                                     # that differs from write to write, as on a board, where
+                                     # every pin has its own 1K, capacitance and threshold.
+                                     # It runs on over power cycles.
+        self._cgal = None
         self.g = GAL(jed)
         npins, vcc, gnd, smap = SOCKETS[socket]
         self.pins = self.g.signal_pins()
@@ -84,6 +96,8 @@ class SocketDevice:
         self.writes = []             # every value written while powered
         self.transients = True       # model the port writes (PORT_GROUPS)
         self.last = 0                # the socket drive the chip sees
+        self.noise = 1               # for the level read of a pin that oscillates; it runs on
+                                     # over power cycles, so that the same walk reads differently
 
     def jumper_pins(self):
         if not self.jumpers_ok:
@@ -109,23 +123,94 @@ class SocketDevice:
         self.writes.append(value)
         if self.transients:
             done = 0
-            for g in PORT_GROUPS[:-1]:
+            for g in PORT_GROUPS:
                 done |= g
                 mid = (value & done) | (self.last & ~done)
+                self._arrive(mid)
                 if mid != self.last and mid != value:
                     self._apply(mid)
         levels = self._apply(value)
         out = self.vcc_bit
         for p in self.pins:
-            if levels[p]:
+            if p in self.g.unstable:
+                # The chip does not come to rest (an output that feeds back
+                # inverted): the pin oscillates, and what a read catches is
+                # arbitrary.  The simulator's level is what it stopped at,
+                # the same every time, which would pass for logic.
+                self.noise = (self.noise * 1664525 + 1013904223) & 0xffffffff
+                if self.noise >> 31:
+                    out |= self.sbit[p]
+            elif levels[p]:
                 out |= self.sbit[p]
         return out
 
+
+    def _arrive(self, mid):
+        """Go from the value last applied to mid, which differs in the pins
+        of one port write: all but the last pin one at a time, if the pins
+        race."""
+        diff = mid ^ self.last
+        while self.race and diff & (diff - 1):
+            self.race = (self.race * 1664525 + 1013904223) & 0xffffffff
+            d = diff
+            for _ in range((self.race >> 16) % bin(diff).count("1")):
+                d &= d - 1
+            d &= -d
+            diff ^= d
+            self._apply(self.last ^ d)
 
     def _apply(self, value):
         self.last = value
         levels, _ = self.g.apply({p: 1 if value & self.sbit[p] else 0 for p in self.pins})
         return levels
+
+    def cgal(self, lib):
+        """This chip as a galmodel.c GAL of the harness library lib."""
+        if self._cgal is None:
+            g = self.g
+            u8, u32, u64 = ctypes.c_uint8, ctypes.c_uint32, ctypes.c_uint64
+            ncols = len(g.cols)
+            regfb = [kind == "fb" and g._olmc(n).registered for kind, n in g.cols]
+            # a row mask has its true and complement fuses side by side, as galmodel.c
+            rows = [0 if m is None else m for m in g.rows]
+            sbit = [self.sbit.get(p, 0) for p in range(32)]
+            pins = sum(1 << p for p in self.pins)
+            lib.gal_new.restype = ctypes.c_void_p
+            lib.gal_new.argtypes = [ctypes.c_int] * 5 + [ctypes.c_void_p] * 2 + [ctypes.c_int] \
+                + [ctypes.c_void_p] * 2 + [u32, ctypes.c_void_p, u32, ctypes.c_int]
+            lib.gal_add_olmc.argtypes = [ctypes.c_void_p] + [ctypes.c_int] * 6 + [ctypes.c_void_p]
+            c = lib.gal_new(
+                g.kind != "GAL22V10", g.clock_pin or 0,
+                -1 if g.ar_row is None else g.ar_row, -1 if g.sp_row is None else g.sp_row,
+                ncols, (u8 * ncols)(*[n for _, n in g.cols]), (u8 * ncols)(*regfb),
+                len(rows), (u64 * len(rows))(*rows),
+                (u8 * len(rows))(*[m is not None for m in g.rows]),
+                pins, (u32 * 32)(*sbit), self.vcc_bit, self.transients)
+            if not c:
+                raise RuntimeError("galmodel.c does not take this GAL")
+            for o in g.olmcs:
+                mode = {"input": 0, "comb": 1, "reg": 2}[o.mode]
+                if o.mode == "reg" and g.oe_pin:
+                    oe, row = 3, g.oe_pin             # the OE pin
+                elif o.oe_row == "always":
+                    oe, row = 0, 0
+                elif o.oe_row == "never":
+                    oe, row = 1, 0
+                else:
+                    oe, row = 2, o.oe_row
+                if lib.gal_add_olmc(c, o.pin, mode, o.active_high, oe, row, len(o.live),
+                                    (u64 * max(1, len(o.live)))(*o.live)):
+                    raise RuntimeError("galmodel.c does not take this GAL")
+            lib.gal_free.argtypes = [ctypes.c_void_p]
+            self._cgal = ctypes.c_void_p(c)
+            self._lib = lib
+            lib.gal_set_race.argtypes = [ctypes.c_void_p, u32]
+            lib.gal_set_race(self._cgal, self.race)
+        return self._cgal
+
+    def __del__(self):
+        if getattr(self, "_cgal", None) is not None:
+            self._lib.gal_free(self._cgal)
 
 
 class HarnessTransport:
@@ -147,6 +232,7 @@ class HarnessTransport:
         self.lib.harness_run.restype = ctypes.c_size_t
         self.lib.harness_run.argtypes = [ctypes.c_char_p]
         self.lib.harness_output.restype = ctypes.POINTER(ctypes.c_ubyte)
+        self.lib.harness_gal.argtypes = [ctypes.c_void_p]
 
     def _jumper_pins(self, vcc, gnd):
         j = self.dev.jumper_pins()
@@ -161,6 +247,7 @@ class HarnessTransport:
 
     def _run(self, line):
         self.lib.harness_init(self._io, self._pwr, self._pins, self._supply)
+        self.lib.harness_gal(self.dev.cgal(self.lib) if self.dev.fast else None)
         n = self.lib.harness_run(line.encode())
         return bytes(ctypes.cast(self.lib.harness_output(),
                                  ctypes.POINTER(ctypes.c_ubyte * n)).contents) if n else b""

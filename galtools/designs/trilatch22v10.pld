@@ -1,0 +1,29 @@
+Name     trilatch22v10;
+Partno   x;
+Date     2026-11-19;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g22v10;
+
+/* Test design: GAL22V10, a latch on a bidirectional pin.  The GAL drives B
+   with a set/reset latch while EN is high; else B is an input.  An output
+   and a register input read B's level, whoever drives it. */
+
+Pin 1  = CLK;
+Pin 2  = S;
+Pin 3  = R;
+Pin 4  = EN;
+Pin 5  = A;
+Pin 6  = D;
+Pin 21 = Y;
+Pin 22 = B;
+Pin 23 = Q;
+
+B = S & !R
+  # B & !R;
+B.oe = EN;
+Y = B & A;
+Q.d = D & B;

@@ -1,6 +1,6 @@
 # How to reverse engineer a GAL with Brutus-28
 
-This guide takes you from a GAL16V8 or GAL22V10 pulled from a board to CUPL
+This guide takes you from a GAL16V8, GAL20V8 or GAL22V10 pulled from a board to CUPL
 source and a JED that behaves the same. `galre.py` treats the chip as a
 black box: it drives the pins, clocks the chip from state to state and
 reads what comes back. It never reads the fuses, so a read-protected chip
@@ -11,7 +11,8 @@ works as well as an open one. It recovers:
   from power-up;
 - the GAL22V10's asynchronous reset term;
 - latches built from combinational feedback (set/reset and transparent
-  latches, bits that set once).
+  latches, bits that set once), alone or in a registered design, where
+  they can also read the clock pin.
 
 [README.md](README.md) explains how each part works and lists every limit.
 This guide covers what to do and how to read the result.
@@ -35,7 +36,9 @@ This guide covers what to do and how to read the result.
 - A CUPL compiler, optional but recommended: galre then builds the JED and
   checks it against every capture. WinCUPL's `cupl` or a native build of it
   will do. galre finds it through `--cupl`, `$CUPL`, or `cupl` on the PATH,
-  and runs it as `cupl -jaxm4 NAME.pld`.
+  and runs it as `cupl -jaxm4 NAME.pld`. The `.pld` says so in a comment,
+  and carries what else CUPL needs (the device mode, and a `MIN` statement
+  for latches).
 - To build and install the firmware: `arm-none-eabi-gcc`, `make` and
   `dfu-util`.
 
@@ -73,10 +76,22 @@ Set the jumpers:
 | Chip | VCC jumper | GND jumper | galre option |
 |---|---|---|---|
 | GAL16V8 (DIP20) | socket pin 28 | socket pin 10 | `-d GAL16V8` |
+| GAL20V8 (DIP24) | socket pin 28 | socket pin 12 | `-d GAL20V8` |
 | GAL22V10 (DIP24) | socket pin 28 | socket pin 12 | `-d GAL22V10` |
-| GAL22V10 (PLCC28, in the PLCC socket) | socket pin 28 | socket pin 14 | `-d GAL22V10 -s plcc28` |
+| GAL20V8 or GAL22V10 (PLCC28, in the PLCC socket) | socket pin 28 | socket pin 14 | `-d GAL20V8 -s plcc28`, `-d GAL22V10 -s plcc28` |
+| GAL16V8 (PLCC20, in the small PLCC socket) | socket pin 20 | socket pin 10 | `-d GAL16V8 -s plcc20` |
 
 Set the supply jumper to 5 V.
+
+**A PLCC20 part at 5 V: read this first.** The PLCC20 socket is wired
+pin for pin to socket pins 1 to 20, so the part's VCC is socket pin 20,
+not 28. On the rev 2 board every socket pin also goes straight to an
+STM32 input, and those of socket pins 17 to 22 are PC0 to PC5, which
+ST's pin table does not mark as 5 V tolerant (the others are). With the
+VCC jumper on pin 20 and the supply jumper on 5 V, PC3 is tied to the
+5 V rail through R13 and R14 (22 ohms each, in parallel) only. This
+combination has not been run. A DIP part, or a PLCC20 part in a DIP
+adapter, has its VCC on socket pin 28 (PC11, 5 V tolerant).
 
 Before the first capture, galre checks the jumpers without switching the
 supply on. With only the GND rail switched on, it drives each socket pin
@@ -85,6 +100,15 @@ only then measures the supply. If the
 jumpers do not suit the chip, it stops with exit code 2 and prints what it
 expected and what it found. The chip only ever sees 1K-limited drives
 until the jumpers are right.
+
+Some parts tie socket pins that are none of their signal pins to the
+rails inside. An ATF22V10C in a PLCC28 has VCC on pin 1 as well and GND
+on pins 8, 15 and 22, where a GAL22V10 has no connection, and the check
+finds them as jumpered. galre takes rails on such pins as they are, if
+the VCC and GND pins themselves are found, and says so ("jumper check:
+socket pin 1 (VCC) and socket pins 8, 15, 22 (GND): no pin of a
+GAL22V10 in the plcc28 socket ..."). A rail on a pin of the device is
+still refused.
 
 ## 4. Decide which pins to hold
 
@@ -129,8 +153,9 @@ this:
    Brutus drives every pin weakly, through 1K, so a pin the GAL drives
    reads the GAL's value instead of Brutus's. This finds the
    combinational outputs and the candidates for registers. The power-up
-   state is then walked in three more orders. A clocked design reads the
-   same in all four.
+   state is then walked in six more orders, three of them with one pin
+   changing at a time. A clocked design reads the same in all seven.
+   Every other state is also walked a second time, one pin at a time.
 3. **Clocked designs.** galre clocks every input combination into every
    state it finds, walks each new state, and returns to the state under
    test by a clocked path or by power-cycling. If a state falls back to
@@ -140,6 +165,18 @@ this:
    the chip holds state without a clock. galre then walks the inputs in
    Gray code order (one pin changes per write) in many bit orders, and
    learns which outputs are latches and what sets and clears them.
+5. **Latches in a clocked design.** If a pin changes without a clock in a
+   clocked design, and it is not the reset term, galre takes it for a
+   latch. It explores the registers again without that pin, then walks
+   pin 1 together with the inputs, from every state, and learns the
+   latches with pin 1 and the registers as their inputs. It also learns
+   register inputs that read a latch, and latches on bidirectional pins.
+6. **Outputs that do not settle.** If the same walk reads differently
+   twice, a pin may be oscillating: an output that feeds back inverted.
+   galre reads every vector many times, takes a pin for its own
+   complement where it does not settle, and writes that. The source
+   says in a comment which pin it is, and which outputs it took to
+   follow it. A copy oscillates at its own frequency.
 
 It writes:
 
@@ -246,6 +283,80 @@ cross-coupled NOR gates (pins 16 and 17), an exclusive OR of one of them
 The result holds for inputs that change one at a time. Logic that reacts
 only when two inputs change at the same moment is not captured.
 
+### Latches in a registered design
+
+From `galre sim designs/reglatch22v10.jed --fix 7-11=0,13-19=0`, two
+registers (pins 22 and 23) and a latch (pin 21) that is set while the
+clock is high, with an output of the latch on pin 20:
+
+    asynchronous behaviour: reading the state 2 clocks from power-up (the last with ...) changed it: the chip changes state without a clock
+    pin 21 changed: taking it for latches built from combinational feedback, or outputs of latches, and exploring the registers again without
+    ...
+    4 states reachable from power-up; inputs [], registered [22, 23], combinational []
+    registers [22, 23]; walking pin 1 with the inputs for pins 20, 21
+    latch model: latch pins [21], other outputs [20], from 20 walks with pin 1 enumerated
+
+    P20 = P6 & P21;
+    P20.oe = P4;
+    P21 = CLK & !P3 & P4
+        # CLK & P3 & P22
+        # P3 & P22 & P21
+        # CLK & P4 & P22;
+    P22.d = P23;
+    P23.d = P2 & !P22;
+    P22.ar = !P5;
+    P23.ar = !P5;
+
+    rl22.jed against the captures (4 states x 32 input vectors, 20 walks with pin 1): identical
+
+- The first two lines are not an error: this is how galre notices the
+  latch. It may happen once per pin.
+- **Latch pins** hold state; **other outputs** are functions of the
+  inputs, the registers and the latch pins. Their equations may read
+  `CLK`, pin 1.
+- If a line says that a pin "is not always driven: enumerating it too,
+  and starting again", the latch is on a bidirectional pin, and galre
+  runs once more with that pin as an input too. Its `.oe` is the shortest
+  product term that fits what was seen.
+- "N clock edges went another way than in the sweeps" means that a
+  register input reads a latch pin; the `.d` equations then name it.
+- "pin N has an enable, and other logic reads it where the GAL lets go"
+  is an open-drain style output that is also read as an input. galre
+  runs once more with it enumerated.
+- The latch's equation may have more product terms than the original.
+  The extra ones (here `CLK & P4 & P22`) keep it from glitching when an
+  input changes; they do not change what it does. CUPL's minimiser would
+  remove them, so the `.pld` has a `MIN` statement for the latch pins;
+  compile it with the command in its first comment.
+- "exploring again by the registers and the levels of ... together":
+  where a clock edge leads depends on a latch. galre explores once more
+  with the latch levels as part of each state. This takes the firmware
+  from the same commit, and more jobs.
+- "N more walks, chosen to show product terms deciding a latch where no
+  walk had": galre checked what its equations only guessed, and learned
+  from the walks that came out otherwise.
+- "not seen, for no walk tried gets there (N): !P15 by ... with P8
+  high; ...": the named product term decides the latch with that pin at
+  that level, by the equations, but the chip was never seen there. The
+  term may lack a literal (`!P8` in the example). If the chip's
+  behaviour in such a case matters, look at it by hand.
+- "P17 has a product term that is true only in passing: ...": the term
+  reads an output together with inputs at levels the output does not
+  have once it has followed them, so it is true only for that output's
+  gate delay: a pulse, as in an edge detector. The equations reproduce
+  it, and the source says so in a comment. Check a copy on the board;
+  its delays decide whether the pulse is long enough. A real GAL16V8
+  with `designs/edgelatch16v8` in it never took the edge; with the two
+  delays of `designs/edge2latch16v8` it does. Settled pins do not show
+  how late a copy is, so if other outputs read the same as the one in
+  the term, galre writes them as a chain ("P16 is written as following
+  P14, not the inputs"), for the longest pulse the original can have
+  had. If the copy then misbehaves elsewhere, write that output with
+  its inputs again.
+- "pins ... taken to move after the other latches of a step": several
+  latches change in one step, and with these following the others the
+  equations fit the macrocells; they read the others' pins.
+
 ## 7. Check the result on a real chip
 
 The check against the captures shows that the JED reproduces everything
@@ -277,7 +388,8 @@ JED with the original under random stimulus:
 
 A design with an asynchronous reset term or latches is simulated through
 the firmware built for the host (needs a C compiler), one port write at a
-time. That is slow with many pins, so hold the unused ones. The test
+time, with the chip simulated in C too; that takes seconds, also with
+every pin enumerated. The test
 designs in `designs/`, with the pins the tests hold:
 
 | Design | What it shows | `--fix` |
@@ -285,14 +397,34 @@ designs in `designs/`, with the pins the tests hold:
 | `cnt16v8` | 2-bit counter | |
 | `fsm22v10` | 3-state machine, output enables | |
 | `comb16v8` | combinational only | |
+| `cnt20v8` | GAL20V8, registered mode: counter, pin 13 as the registers' enable | |
+| `comb20v8` | GAL20V8, complex mode: an output that reads another output's pin | |
+| `simple20v8` | GAL20V8, simple mode | |
 | `ar22v10` | asynchronous reset term `P3 & !P4` | `6-11=0,13-20=0` |
 | `arlow22v10` | active-low reset input and register outputs | `4=0,6-11=0,13-20=0` |
 | `arw22v10` | reset term that reads a register | `4=0,6-11=0,13-20=0` |
+| `aropen22v10` | reset term that reads an I/O pin, an open-drain copy of a register that a register input reads back | `5-11=0,13-15=0,17-18=0,20-21=0` |
 | `latch16v8` | set/reset and transparent latch | `7-9=0,11-15=0,19=0` |
 | `latch22v10` | three latches in a chain, an output of two of them | `7-11=0,13-19=0` |
 | `dlat22v10` | two transparent latches with one enable | `5-11=0,13=0,17-23=0` |
 | `srnor16v8` | cross-coupled NOR latch, a bit that sets once | `6-9=0,11-14=0,19=0` |
-| `reglatch16v8` | a register and a latch together: galre stops | `5-9=0,11=0,12-16=0,19=0` |
+| `reglatch16v8` | a register and a latch | `5-9=0,11=0,12-16=0,19=0` |
+| `reglatch22v10` | registers, and a latch that reads the clock pin | `7-11=0,13-19=0` |
+| `latchd16v8` | a register input that reads a latch | `5-9=0,11=0,12-16=0,19=0` |
+| `trilatch22v10` | a latch on a bidirectional pin, read by an output and a register | `7-11=0,13-20=0` |
+| `oeread22v10` | an enable that reads another output's pin | `4-11=0,13-20=0` |
+| `quietlatch16v8` | a latch that only shows when one pin changes at a time | `2=0,6-9=0,11-16=0,19=0` |
+| `racelatch16v8` | a latch held by another output's pin, with a race | `6-9=0,11-14=0,18-19=0` |
+| `chain16v8` | three latches that set each other off in one step, an output with an enable | `8-9=0,11-14=0,19=0` |
+| `clklatch22v10` | no registers: a latch that is open while pin 1 is high and looks like a register when clocked | `7-11=0,13-20=0` |
+| `oelatch16v8` | registered GAL16V8 with a latch, pin 11 not held: a register with a constant input, an output that shows a register | `6-9=0,12=0,14=0` |
+| `routelatch22v10` | a register that loads only with a latch set on the way to the state: explored by registers and latch level together | `5-11=0,13-20=0` |
+| `latchfollow16v8` | two latches that set together, and a third that follows them through one term | `12-14=0,19=0` |
+| `edgelatch16v8` | an edge detector made from an output's gate delay, an output with an enable | `7-9=0,11-14=0,19=0` |
+| `edge2latch16v8` | the same with the delay of two outputs: a real GAL16V8 takes the edge with it, and never did with `edgelatch16v8` | `7-9=0,11-13=0,19=0` |
+| `osc16v8` | an output that feeds back inverted and oscillates, and one that follows it | `5-9=0,11-16=0,19=0` |
+| `oscstate16v8` | an oscillating output and a latch in one chip: galre stops | `6-9=0,11-16=0,19=0` |
+| `buried22v10` | a register that never reaches its pin: galre stops | `5-11=0,13-21=0` |
 
 ## 10. When galre stops
 
@@ -313,14 +445,24 @@ commit (section 2).
 
 | Message | Meaning |
 |---|---|
-| "the same walk read differently twice on ..." | A pin reads differently on the same inputs: a bad contact in the socket, or an output that oscillates. Reseat the chip. |
-| "... is 1 once and 0 once: not a circuit of latches on those pins" | Registers and latches in one design, which galre does not model. |
+| "pin N read differently when the same walk is repeated (...), but the same every time when one input changes at a time" | Where a step changes several inputs, they reach the chip in another order each time, and a latch takes that differently. Not a fault: galre goes on with the latch analyses, which change one input at a time. If no circuit of latches explains the chip, it reads every vector many times, in case an output oscillates at few inputs. |
+| "the same walk read differently twice on ..." | A pin reads differently on the same inputs, also when one input changes at a time. galre goes on to see whether it is an output that oscillates ("trying an output that feeds back inverted"); this is the reason only if one of the next two follows. |
+| "pin N reads unsteadily at ... input vectors, and settles at ... of them in another walk order" | Not an oscillator, which fails to settle at the same inputs every time: a bad contact in the socket or a floating pin. Reseat the chip. |
+| "pin N settles at ..., but high in one walk order and low in another: the chip holds state as well as oscillating" | An oscillating output together with latches or registers, which galre does not model. |
+| "... is 1 once and 0 once: not a circuit of latches on those pins" | Not latches alone. galre goes on to try registers and latches together; this is the reason only if that fails too. |
+| "the registers do not follow the transitions the sweeps and the walks showed" | The registers go another way than learned, and no latch explains it: state that no pin shows, or readings that do not repeat. |
+| "... led to state ..., but the same clocks from power-up lead to ..." | The same: a register that never reaches a pin, or readings that do not repeat (reseat the chip). In a design with latches galre first explores again by the registers and the latch levels together ("exploring again by the registers and the levels of ..."); this is the reason only if it shows again after that. |
+| "... leads to a state the sweeps did not find (...): no sequence of clocked vectors leads there" | A state that is reached only with a latch at a level that it has after inputs changed without a clock. galre explores by registers and latch levels, but every state by clocked vectors. |
+| "... is 1 once and 0 once: the pin oscillates there ..., or it is not a circuit of registers and latches on those pins" | The same point was seen with two outcomes. galre first tries again with every output pin as a signal of its own ("trying again with every output pin ..."); this is the reason only if that fails too. Then: an output that oscillates, or state that no pin shows. |
+| "N steps are not explained by one circuit of latches (the first: pins ... change at ...)", "latch pins ... change together at ..., in no order that agrees with the other walks" or "checking the steps against the learned circuit keeps adding to it" | A step whose outcome depends on more than the levels galre sees, such as a race that the chip's delays decide. |
+| "the model of registers and latches did not predict ..." | Latches in a clocked design that behave in a way galre's model does not cover. |
+| "latch pin ... is not driven" | A latch in a clocked design with a tri-state output. |
 | "walks that change one input at a time do not" | The chip reacts only to several inputs changing at once. |
 | "latch pins ... change together ..., in no order that agrees with the other walks" | Latches that galre cannot separate. |
 | "outputs ... are not always driven" | A latch design with tri-state outputs. |
 | "the latch model did not predict ..." or "the latch model does not predict the walks" | Latches that behave in a way galre's model does not cover. |
 | "... returns to the power-up state without a clock, but not for the inputs of one product term" | Something other than the GAL22V10's reset term clears the registers. |
-| "walking the inputs in state ... changed it" or "reading the state ... changed it" | A registered design whose state changes without a clock in another way. |
+| "walking the inputs in state ... changed it" or "reading the state ... changed it" | If "taking it for latches" follows, galre goes on. Otherwise: a registered design whose state changes without a clock in a way that is neither the reset term nor a latch pin. |
 
 **Exit code 1.** The equations or the JED disagree with some capture; the
 report lists the first differences. A marginal contact or slow edges can
@@ -335,11 +477,14 @@ for example `--settle 5` (default 1 µs). If it persists, keep
 - States that cannot be reached from power-up. The rebuilt chip matches
   the original only on reachable states.
 - Registers that never reach a pin (buried registers).
-- A combinational use of pin 1 in a registered GAL22V10: pin 1 stays low
-  except for clock edges.
+- A combinational use of pin 1 in a registered GAL22V10 without latches:
+  pin 1 stays low except for clock edges. (With latches, galre walks pin 1
+  too.) A latch that is open while the clock is high and holds while it
+  is low looks like a register.
 - A combinational output that depends only on registers looks like a
   register and is written as one. It behaves the same on the pins.
 - For latches: inputs changing at the same moment, and the state at
-  power-up.
+  power-up. In a clocked design also: a state that is reached only with
+  a latch at a level that no sequence of clocked vectors leaves it at.
 
 See the Limits section of [README.md](README.md) for the full list.

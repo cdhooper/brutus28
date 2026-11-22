@@ -1,0 +1,26 @@
+Name     oscstate16v8;
+Partno   x;
+Date     2026-11-20;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g16v8ma;
+
+/* Test design: GAL16V8, an output that oscillates (R, as in osc16v8) and
+   a latch (M) in one chip.  Where its pins settle, their levels then
+   depend on the walk order, which galre's model of outputs that do not
+   settle does not take: it must say so. */
+
+Pin 2  = EN;
+Pin 3  = STOP;
+Pin 4  = S;
+Pin 5  = K;
+Pin 17 = M;
+Pin 18 = R;
+
+R = !EN & !STOP
+  # !R & !STOP;
+M = S
+  # M & !K;

@@ -36,13 +36,28 @@
  *        the lowest socket pin, or with rev set from the highest, so the
  *        pin that changes fastest becomes the one that changes slowest.
  *        With gray set, x runs in Gray code order instead (one pin changes
- *        per vector).  With rot set, x is rotated left by rot bits first,
+ *        per vector).  The usual Gray code changes its lowest bit at every
+ *        second vector and its highest once.  With mix set (not 0, and
+ *        gray), the order is another Gray code that mix decides: the
+ *        cube of all vectors is walked as one half, one pin's change, the
+ *        other half, and each half again so, down to single pins, with
+ *        the pin that splits a part chosen by a hash of mix and the
+ *        part's place (cap_mix_next).  The pin that splits the whole walk
+ *        still changes once, but which pins change often differs from
+ *        part to part, so most pins change about equally often, and
+ *        another mix makes another pin the rare one.  With rot set, x is rotated left by rot bits first,
  *        so bit 0 of the order drives the rot-th enumerated pin.  Every
  *        vector is XORed with start, so a Gray walk from the path's last
  *        vector changes one pin at a time from where the path left the
  *        chip.  Vectors v with (v & skm) == skv (skm not 0) are skipped:
  *        nothing is written and their reads are 0.
  *        With quiet set, only the signatures are reported.
+ *        The enumerated pins may include the clock pins: after the path,
+ *        which clocks as usual, the walk drives them like any other
+ *        enumerated pin (start says at which level it begins), so the
+ *        chip is clocked whenever the walk raises them.  The host uses
+ *        this for logic that reads the clock pin, and for latches in a
+ *        registered design.
  *        A result that depends on the order means the chip has state
  *        that changes without a clock (latches, the 22V10's AR).  With
  *        probes set,
@@ -52,14 +67,33 @@
  *        with x, read the signature, and get back to S.  Nothing to do if
  *        the signature is S's; otherwise clock along the return path the
  *        host gave for that signature (and check S's signature), else
- *        power-cycle and replay the path.  One byte per x: the index of
- *        its signature.  The first occurrence of a signature is followed
+ *        power-cycle and replay the path.  Two bytes per x (low byte
+ *        first): the index of its signature.  The first occurrence of a signature is followed
  *        by its reads.  x runs over (i * mul) mod 2^n for i < count.
  *        With chk set, x is also read right after the clock edge (clock
  *        pins low) and again after the signature; if the two reads
  *        differ, reading the signature changed the state, and x goes into
- *        an 'F' chunk (the first CAP_MAX_FLAGS of them).
+ *        an 'F' chunk, followed by the pins that read differently (the
+ *        first CAP_MAX_FLAGS of them).  The read mask decides which pins
+ *        count: the host leaves out the pins it knows to change without a
+ *        clock (latches).
+ *        With pre set, each x's byte (and its signature's reads, if they
+ *        follow) is followed by the read of every socket pin with x
+ *        driven, just before the clock edge, whatever the read mask: the
+ *        levels that the registers load from, for a register input that
+ *        reads a latch.
  * state  Report the signature of the path state.
+ * psig:  Where a clock edge leads may depend on a latch, and the latch on
+ *        the writes since the edge before: the signature reads move the
+ *        inputs.  With psig set, power-up and every clocked step (of the
+ *        path, of a return path, of trans) are followed by the same
+ *        writes: the step's vector with the clock low, the signature,
+ *        the vector again, the signature again.  So a step leaves the
+ *        latches the same way wherever it is taken, and a path leads to
+ *        the state that the sweep saw.  The second signature is the
+ *        state's: trans, walk and state report it without reading again.
+ *        With chk, trans flags the x whose two reads of the vector
+ *        differ; chkm (if not 0) limits that to its pins.
  * Avoid: with avm set, every write takes care never to pass through a
  *        vector v with (v & avm) == avv on the way, although the socket
  *        pins are written in three port writes (CAP_PORT_GROUPS): the
@@ -80,7 +114,8 @@
  *
  * Output: the line "---- CAPTURE ----", then binary chunks
  * <type:1> <length:2 LE> <payload>: 'H' header, 'P' signature reads,
- * 'D' data, 'F' flagged vectors (trans with chk), 'E' end.  Reads and
+ * 'D' data, 'F' flagged vectors, each with the mask of the pins that
+ * changed (trans with chk), 'E' end.  Reads and
  * vectors are 32-bit little endian.  The 'E' payload is status, 3 pad
  * bytes, then 32-bit counts of vectors done, power-cycle restores,
  * return-path restores, failed return paths, and the CRC-32 (as zlib) of
@@ -93,14 +128,14 @@
 #include <string.h>
 #include "capture.h"
 
-#define CAP_VERSION      1
-#define CAP_MAX_PATH     48
+#define CAP_VERSION      2
+#define CAP_MAX_PATH     512
 #define CAP_MAX_PROBES   8
 #define CAP_MAX_CAND     12
 #define CAP_MAX_READS    (CAP_MAX_PROBES * (1 + CAP_MAX_CAND))
 #define CAP_MAX_RET      32
 #define CAP_MAX_RET_LEN  16
-#define CAP_MAX_SIGS     255
+#define CAP_MAX_SIGS     2048
 #define CAP_MAX_WALK     24      /* enumerated pins for a walk */
 #define CAP_MAX_FLAGS    16
 #define CAP_SOCKET_PINS  0x0fffffff
@@ -129,6 +164,7 @@ static struct {
     uint32_t  mul;          /* trans, walk: x = i * mul (odd) */
     uint32_t  rev;          /* walk: bit 0 of x is the highest pin */
     uint32_t  gray;         /* walk: Gray code order */
+    uint32_t  mix;          /* walk: which Gray code (0: the usual one) */
     uint32_t  rot;          /* walk: x rotated left by this many bits */
     uint32_t  start;        /* walk: vectors XORed with this */
     uint32_t  skm;          /* walk: skip vectors with (v & skm) == skv */
@@ -137,6 +173,9 @@ static struct {
     uint32_t  avv;
     uint32_t  quiet;        /* walk: report the signatures only */
     uint32_t  chk;          /* trans: flag x whose state the signature changed */
+    uint32_t  chkm;         /* trans: the pins that count for chk (0: all read) */
+    uint32_t  psig;         /* steps: followed by the signature reads */
+    uint32_t  pre;          /* trans: report the read before the clock edge */
     uint32_t  follow;       /* steps: drive the read levels before the edge */
     uint32_t  dclk;         /* clock pins driven directly, not through 1K */
     uint32_t  vcc;          /* preflight: socket pins jumpered to VCC */
@@ -166,12 +205,15 @@ static uint32_t cap_ref[CAP_MAX_READS];
 static uint32_t cap_cur[CAP_MAX_READS];
 static uint32_t cap_sigs[CAP_MAX_SIGS];
 static uint32_t cap_last;            /* the vector last written */
+static uint32_t cap_raw;             /* the last read, every socket pin */
+static uint32_t cap_pre;             /* the read before the last clock edge */
 
 const char cmd_pld_capture_help[] =
 "pld capture clear              - reset the job to defaults\n"
 "pld capture set <key>=<value>  - pins base inv clk cand mask count mul rev\n"
-"                                 gray rot start skm skv avm avv quiet chk\n"
-"                                 follow dclk vcc gnd (hex)\n"
+"                                 gray mix rot start skm skv avm avv quiet\n"
+"                                 chk chkm psig\n"
+"                                 pre follow dclk vcc gnd (hex)\n"
 "                                 settle (usec) off on (msec) supply (mV)\n"
 "pld capture path [+] <v>...    - clocked vectors from power-up to the state\n"
 "pld capture probe [+] <v>...   - probe vectors for signatures\n"
@@ -402,7 +444,8 @@ cap_io(uint32_t v)
     if (cap.avm != 0)
         cap_avoid(v);
     cap_last = v;
-    return (cap_hw_io(v, cap.settle_usec) & cap.mask);
+    cap_raw = cap_hw_io(v, cap.settle_usec) & CAP_SOCKET_PINS;
+    return (cap_raw & cap.mask);
 }
 
 static void
@@ -418,22 +461,8 @@ cap_step(uint32_t v)
             (void) cap_io(f);
         v = f;
     }
+    cap_pre = cap_raw;
     (void) cap_io(v | cap.clk);
-}
-
-static void
-cap_power_up(uint off_msec)
-{
-    uint i;
-
-    cap_hw_power(0);
-    cap_hw_delay_msec(off_msec);
-    cap_hw_direct(cap.dclk ? cap.clk : 0);
-    cap_hw_power(1);                     /* drives every pin low */
-    cap_last = 0;
-    cap_hw_delay_msec(cap.on_msec);
-    for (i = 0; i < cap.npath; i++)
-        cap_step(cap.path[i]);
 }
 
 static uint
@@ -451,6 +480,44 @@ cap_signature(uint32_t *r)
             r[n++] = cap_io(w ^ (c & -c));
     }
     return (n);
+}
+
+/*
+ * What follows power-up and every clocked step with psig: v with the
+ * clock low, the signature, v again, the signature again (in cap_cur).
+ * Returns the pins that read differently at v before and after the first
+ * signature.
+ */
+static uint32_t
+cap_after_step(uint32_t v)
+{
+    uint32_t r1 = cap_io(v & ~cap.clk);
+    uint32_t r2;
+
+    (void) cap_signature(cap_cur);
+    r2 = cap_io(v & ~cap.clk);
+    (void) cap_signature(cap_cur);
+    return (r1 ^ r2);
+}
+
+static void
+cap_power_up(uint off_msec)
+{
+    uint i;
+
+    cap_hw_power(0);
+    cap_hw_delay_msec(off_msec);
+    cap_hw_direct(cap.dclk ? cap.clk : 0);
+    cap_hw_power(1);                     /* drives every pin low */
+    cap_last = 0;
+    cap_hw_delay_msec(cap.on_msec);
+    if (cap.psig)
+        (void) cap_after_step(cap.base & ~cap.pins);
+    for (i = 0; i < cap.npath; i++) {
+        cap_step(cap.path[i]);
+        if (cap.psig)
+            (void) cap_after_step(cap.path[i]);
+    }
 }
 
 static uint32_t
@@ -492,9 +559,13 @@ cap_restore(uint32_t crc, uint nreads)
     for (k = 0; k < cap.nret; k++) {
         if (cap.ret[k].crc != crc)
             continue;
-        for (i = 0; i < cap.ret[k].len; i++)
+        for (i = 0; i < cap.ret[k].len; i++) {
             cap_step(cap.ret[k].vec[i]);
-        cap_signature(cap_cur);
+            if (cap.psig)
+                (void) cap_after_step(cap.ret[k].vec[i]);
+        }
+        if (!cap.psig)
+            cap_signature(cap_cur);
         if (memcmp(cap_cur, cap_ref, nreads * 4) == 0) {
             cap_ret_ok++;
             return (0);
@@ -504,7 +575,8 @@ cap_restore(uint32_t crc, uint nreads)
     }
     for (i = 0; i < 2; i++) {
         cap_power_up((i == 0) ? cap.off_msec : cap.off_msec * 10);
-        cap_signature(cap_cur);
+        if (!cap.psig)
+            cap_signature(cap_cur);
         if (memcmp(cap_cur, cap_ref, nreads * 4) == 0) {
             cap_pcycles++;
             return (0);
@@ -609,6 +681,66 @@ cap_jumpers(void)
     return (RC_SUCCESS);
 }
 
+/* -- mixed Gray code ----------------------------------------------------- */
+
+/*
+ * A part of the walk at level k covers 2^(k+1) vectors that differ in the
+ * k+1 bits of mix_rem[k].  It walks half of them, changes its split bit
+ * mix_split[k], and walks the other half; the halves are parts at level
+ * k-1 over the other k bits, each with a split bit of its own.  The part
+ * at level k that vector number i lies in is number i >> (k+1).
+ */
+static uint8_t mix_rem[CAP_MAX_WALK][CAP_MAX_WALK];
+static uint8_t mix_split[CAP_MAX_WALK];
+
+static uint32_t
+cap_mix_hash(uint32_t seed, uint level, uint32_t part)
+{
+    uint32_t h = seed ^ (part * 0x9e3779b1UL) ^ ((level + 1) * 0x85ebca6bUL);
+
+    h ^= h >> 15;
+    h *= 0x2c1b3c6dUL;
+    h ^= h >> 12;
+    h *= 0x297a2d39UL;
+    h ^= h >> 15;
+    return (h);
+}
+
+/* Choose the split bits of the parts at the levels below `level` that
+ * vector number i lies in (level nbits: of all parts, for i = 0) */
+static void
+cap_mix_enter(uint nbits, uint level, uint32_t i)
+{
+    uint k;
+    uint j;
+
+    if (level == nbits)
+        for (j = 0; j < nbits; j++)
+            mix_rem[nbits - 1][j] = j;
+    for (k = level; k-- > 0; ) {
+        uint pick;
+        uint n = 0;
+
+        if (k + 1 < nbits)
+            for (j = 0; j < k + 2; j++)        /* the part above, less its split bit */
+                if (mix_rem[k + 1][j] != mix_split[k + 1])
+                    mix_rem[k][n++] = mix_rem[k + 1][j];
+        pick = ((cap_mix_hash(cap.mix, k, i >> (k + 1)) >> 16) * (k + 1)) >> 16;
+        mix_split[k] = mix_rem[k][pick];
+    }
+}
+
+/* The bit that changes from vector number i - 1 to i (i not 0) */
+static uint
+cap_mix_next(uint nbits, uint32_t i)
+{
+    uint level = __builtin_ctz(i);
+    uint bit = mix_split[level];
+
+    cap_mix_enter(nbits, level, i);
+    return (bit);
+}
+
 /* -- runs ---------------------------------------------------------------- */
 
 static rc_t
@@ -636,20 +768,33 @@ cap_walk(void)
         printf("walk: rot must be below the number of enumerated pins\n");
         return (RC_BAD_PARAM);
     }
+    if ((cap.mix != 0) && !cap.gray) {
+        printf("walk: mix needs gray\n");
+        return (RC_BAD_PARAM);
+    }
+    if (cap.psig && (cap.nprobe == 0)) {
+        printf("walk: psig needs probe vectors\n");
+        return (RC_BAD_PARAM);
+    }
     if ((rc = cap_preflight()) != RC_SUCCESS)
         return (rc);
+    if (cap.mix != 0)
+        cap_mix_enter(nbits, nbits, 0);
     cap_begin('W', cap.quiet ? 0 : cap.inv ? 2 : 1, sig_reads, nbits,
               1UL << nbits);
     cap_power_up(cap.off_msec);
     if (cap.nprobe != 0) {
-        cap_signature(cap_ref);
+        if (cap.psig)
+            memcpy(cap_ref, cap_cur, sig_reads * 4);
+        else
+            cap_signature(cap_ref);
         cap_put_reads('P', cap_ref, sig_reads);
         cap_flush();
     }
     do {
         uint32_t w = ((cur ^ cap.start) & cap.pins) | (cap.base & ~cap.pins);
 
-        w &= ~cap.clk;
+        w &= ~(cap.clk & ~cap.pins);
         if ((cap.skm != 0) && ((w & cap.skm) == cap.skv)) {
             if (!cap.quiet) {
                 cap_put32('D', 0);
@@ -673,7 +818,10 @@ cap_walk(void)
             break;
         }
         i = (i + 1) & xmask;
-        x = cap.gray ? (i ^ (i >> 1)) : ((x + cap.mul) & xmask);
+        if (cap.gray && (cap.mix != 0))
+            x = (i == 0) ? 0 : (x ^ (1UL << cap_mix_next(nbits, i)));
+        else
+            x = cap.gray ? (i ^ (i >> 1)) : ((x + cap.mul) & xmask);
         r = x;
         if (cap.rot != 0)
             r = ((x << cap.rot) | (x >> (nbits - cap.rot))) & xmask;
@@ -715,11 +863,18 @@ cap_trans(void)
         printf("trans: mul must be odd\n");
         return (RC_BAD_PARAM);
     }
+    if (cap.pins & cap.clk) {
+        printf("trans: pins and clk must not overlap\n");
+        return (RC_BAD_PARAM);
+    }
     if ((rc = cap_preflight()) != RC_SUCCESS)
         return (rc);
     cap_begin('T', 0, nreads, nbits, count);
     cap_power_up(cap.off_msec);
-    cap_signature(cap_ref);
+    if (cap.psig)
+        memcpy(cap_ref, cap_cur, nreads * 4);
+    else
+        cap_signature(cap_ref);
     cap_put_reads('P', cap_ref, nreads);
     cap_flush();
 
@@ -727,17 +882,28 @@ cap_trans(void)
         uint32_t x = (i * cap.mul) & xmask;
         uint32_t w = cap_expand(x) | (cap.base & ~cap.pins);
         uint32_t r1 = 0;
+        uint32_t pre;
         uint32_t crc;
         uint     k;
-        uint8_t  idx;
+        uint8_t  idx[2];
 
         cap_step(w);
-        if (cap.chk)
-            r1 = cap_io(w & ~cap.clk);
-        cap_signature(cap_cur);
-        if (cap.chk && (cap_io(w & ~cap.clk) != r1) &&
-            (nflags++ < CAP_MAX_FLAGS))
+        pre = cap_pre;
+        if (cap.psig) {
+            r1 = cap_after_step(w);
+        } else {
+            if (cap.chk)
+                r1 = cap_io(w & ~cap.clk);
+            cap_signature(cap_cur);
+            if (cap.chk)
+                r1 ^= cap_io(w & ~cap.clk);
+        }
+        if (cap.chkm != 0)
+            r1 &= cap.chkm;
+        if (cap.chk && (r1 != 0) && (nflags++ < CAP_MAX_FLAGS)) {
             cap_put32('F', x);
+            cap_put32('F', r1);
+        }
         crc = cap_crc32_words(cap_cur, nreads);
         for (k = 0; k < nsigs; k++)
             if (cap_sigs[k] == crc)
@@ -746,13 +912,16 @@ cap_trans(void)
             status = CAP_STATUS_TOO_MANY;
             break;
         }
-        idx = k;
-        cap_put('D', &idx, 1);
+        idx[0] = k;
+        idx[1] = k >> 8;
+        cap_put('D', idx, 2);
         if (k == nsigs) {
             /* First occurrence: the reads follow the index */
             cap_sigs[nsigs++] = crc;
             cap_put_reads('D', cap_cur, nreads);
         }
+        if (cap.pre)
+            cap_put32('D', pre);
         if (memcmp(cap_cur, cap_ref, nreads * 4) != 0) {
             if (cap_restore(crc, nreads) != 0) {
                 status = CAP_STATUS_LOST;
@@ -782,7 +951,8 @@ cap_state(void)
         return (rc);
     cap_begin('S', 0, nreads, cap_popcount(cap.pins), 1);
     cap_power_up(cap.off_msec);
-    cap_signature(cap_cur);
+    if (!cap.psig)
+        cap_signature(cap_cur);
     cap_put_reads('P', cap_cur, nreads);
     cap_done = 1;
     return (cap_end(CAP_STATUS_OK));
@@ -862,6 +1032,7 @@ cap_set(int argc, char * const *argv)
         { "mul",    &cap.mul,   NULL },
         { "rev",    &cap.rev,   NULL },
         { "gray",   &cap.gray,  NULL },
+        { "mix",    &cap.mix,   NULL },
         { "rot",    &cap.rot,   NULL },
         { "start",  &cap.start, NULL },
         { "skm",    &cap.skm,   NULL },
@@ -870,6 +1041,9 @@ cap_set(int argc, char * const *argv)
         { "avv",    &cap.avv,   NULL },
         { "quiet",  &cap.quiet, NULL },
         { "chk",    &cap.chk,   NULL },
+        { "chkm",   &cap.chkm,  NULL },
+        { "psig",   &cap.psig,  NULL },
+        { "pre",    &cap.pre,   NULL },
         { "follow", &cap.follow, NULL },
         { "dclk",   &cap.dclk,  NULL },
         { "vcc",    &cap.vcc,   NULL },
@@ -906,8 +1080,8 @@ cap_set(int argc, char * const *argv)
         cap.cand = 0;
         return (RC_BAD_PARAM);
     }
-    if ((cap.pins & cap.clk) || (cap.inv & (cap.pins | cap.clk))) {
-        printf("pins, clk and inv must not overlap\n");
+    if (cap.inv & (cap.pins | cap.clk)) {
+        printf("inv must not overlap pins or clk\n");
         return (RC_BAD_PARAM);
     }
     if (cap.dclk && (cap.clk & (cap.vcc | cap.gnd))) {
@@ -987,21 +1161,23 @@ cap_show(void)
     uint k;
 
     printf("pins=%07lx base=%07lx inv=%07lx clk=%07lx cand=%07lx "
-           "mask=%07lx\ncount=%lx mul=%lx rev=%lx gray=%lx rot=%lx "
+           "mask=%07lx\ncount=%lx mul=%lx rev=%lx gray=%lx mix=%lx rot=%lx "
            "start=%07lx\n"
            "skm=%07lx skv=%07lx avm=%07lx avv=%07lx quiet=%lx chk=%lx\n"
-           "follow=%lx dclk=%lx\n"
+           "chkm=%07lx psig=%lx pre=%lx follow=%lx dclk=%lx\n"
            "settle=%u off=%u on=%u vcc=%07lx gnd=%07lx supply=%u\n",
            (unsigned long) cap.pins, (unsigned long) cap.base,
            (unsigned long) cap.inv, (unsigned long) cap.clk,
            (unsigned long) cap.cand, (unsigned long) cap.mask,
            (unsigned long) cap.count, (unsigned long) cap.mul,
            (unsigned long) cap.rev, (unsigned long) cap.gray,
-           (unsigned long) cap.rot,
+           (unsigned long) cap.mix, (unsigned long) cap.rot,
            (unsigned long) cap.start, (unsigned long) cap.skm,
            (unsigned long) cap.skv, (unsigned long) cap.avm,
            (unsigned long) cap.avv, (unsigned long) cap.quiet,
-           (unsigned long) cap.chk, (unsigned long) cap.follow,
+           (unsigned long) cap.chk, (unsigned long) cap.chkm,
+           (unsigned long) cap.psig, (unsigned long) cap.pre,
+           (unsigned long) cap.follow,
            (unsigned long) cap.dclk, cap.settle_usec, cap.off_msec,
            cap.on_msec, (unsigned long) cap.vcc, (unsigned long) cap.gnd,
            cap.supply_mv);

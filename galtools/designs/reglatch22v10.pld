@@ -1,0 +1,36 @@
+Name     reglatch22v10;
+Partno   x;
+Date     2026-11-19;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g22v10;
+
+/* Test design: GAL22V10, registers and a latch in one design.  The latch
+   reads pin 1: it is set while the clock is high and Q1 is set, and holds
+   itself until Q1 or HOLD lets go; with SEL and without HOLD it is open
+   while the clock is high.  The reset term clears the registers, which
+   lets go of the latch.  Y is an output of the latch, with an enable. */
+
+Pin 1  = CLK;
+Pin 2  = GO;
+Pin 3  = HOLD;
+Pin 4  = SEL;
+Pin 5  = !RST;
+Pin 6  = A;
+Pin 20 = Y;
+Pin 21 = LAT;
+Pin 22 = Q1;
+Pin 23 = Q0;
+
+Q0.d = GO & !Q1;
+Q1.d = Q0;
+Q0.ar = RST;
+Q1.ar = RST;
+LAT = Q1 & HOLD & CLK
+    # Q1 & HOLD & LAT
+    # SEL & !HOLD & CLK;
+Y = LAT & A;
+Y.oe = SEL;

@@ -2,8 +2,9 @@
 
 The firmware answers a run ("pld capture walk / trans / state") with the
 line "---- CAPTURE ----" and binary chunks <type:1> <length:2 LE> <payload>:
-'H' header, 'P' signature reads, 'D' data, 'F' flagged vectors, 'E' end with
-status, counters and a CRC-32 over all chunk bytes before it.  Configuration commands ("pld
+'H' header, 'P' signature reads, 'D' data, 'F' flagged vectors (each with
+the mask of the pins that changed), 'E' end with status, counters and a
+CRC-32 over all chunk bytes before it.  Configuration commands ("pld
 capture set / path / probe / ret") print nothing unless they fail.
 """
 
@@ -14,9 +15,10 @@ import termios
 import time
 import zlib
 
+VERSION = 2                 # CAP_VERSION in fw/capture.c
 MARKER = b"---- CAPTURE ----\r\n"
 PROMPT = b"CMD> "
-STATUS = {0: "ok", 1: "aborted", 2: "more than 255 different signatures",
+STATUS = {0: "ok", 1: "aborted", 2: "more than 2048 different signatures",
           3: "could not get back to the path state"}
 
 
@@ -30,7 +32,7 @@ class Capture:
     def __init__(self):
         self.sigs = []          # signatures, each a list of sig_reads reads
         self.data = bytearray()  # all 'D' payloads
-        self.flags = []          # 'F' vectors
+        self.flags = []          # 'F': (vector, mask of the pins that changed)
         self.status = None
 
     def _header(self, p):
@@ -38,6 +40,10 @@ class Capture:
          self.count, self.pins, self.base, self.inv, self.clk, self.cand,
          self.mask, self.mul) = struct.unpack("<BcBBIIIIIIIII", p)
         self.kind = kind.decode()
+        if self.version != VERSION:
+            raise CaptureError("the firmware's captures are version %d, galtools reads version "
+                               "%d: install the firmware from the same commit" % (
+                                   self.version, VERSION))
 
     def _end(self, p):
         (self.status, self.done, self.power_cycles, self.ret_ok,
@@ -70,7 +76,10 @@ def read_capture(read_exact):
         elif kind == "D":
             cap.data += payload
         elif kind == "F":
-            cap.flags.extend(struct.unpack("<%dI" % (n // 4), payload))
+            words = struct.unpack("<%dI" % (n // 4), payload)
+            if len(words) & 1:
+                raise CaptureError("flag chunk without pin masks (older firmware?)")
+            cap.flags.extend(zip(words[0::2], words[1::2]))
         else:
             raise CaptureError("unknown chunk type %r" % kind)
 

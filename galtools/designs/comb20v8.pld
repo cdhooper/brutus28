@@ -1,0 +1,39 @@
+Name     comb20v8;
+Partno   x;
+Date     2026-11-19;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g20v8ma;
+
+/* Test design: GAL20V8 in complex mode: combinational outputs with
+   enables, pins 1, 13, 14 and 23 as inputs, and an output that reads
+   another output's pin (W needs nine product terms without it) */
+
+Pin 1  = A;
+Pin 2  = B;
+Pin 3  = C;
+Pin 4  = D;
+Pin 5  = E;
+Pin 13 = F;
+Pin 14 = G;
+Pin 23 = H;
+Pin 15 = !X;
+Pin 20 = P;
+Pin 21 = W;
+Pin 22 = Y;
+
+P = A & !B & !C
+  # !A & B & !C
+  # !A & !B & C
+  # A & B & C;
+W = P & !D & !E
+  # !P & D & !E
+  # !P & !D & E
+  # P & D & E;
+X = F & G
+  # H;
+Y = A & H;
+Y.oe = G;

@@ -1,0 +1,36 @@
+Name     oelatch16v8;
+Partno   x;
+Date     2026-11-20;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g16v8;
+
+/* Test design: registered GAL16V8 with a latch (L) that a register input
+   reads.  Pin 11 enables the registers, so while it is high no register
+   shows on its pin.  K is a register with a constant input; Y is a
+   combinational output with an enable of its own that shows Q.  Pin 13
+   is an input. */
+
+Pin 1  = CLK;
+Pin 2  = S;
+Pin 3  = R;
+Pin 4  = E;
+Pin 5  = A;
+Pin 11 = !OE;
+Pin 13 = B;
+Pin 15 = K;
+Pin 16 = Y;
+Pin 17 = L;
+Pin 18 = Q;
+Pin 19 = Z;
+
+Q.d = !L;
+L = S
+  # L & R;
+K.d = 'b'1;
+Y = Q;
+Y.oe = E & !S;
+Z = A & B;

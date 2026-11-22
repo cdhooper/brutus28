@@ -47,9 +47,10 @@ pair races there); verify compares walks from the first read where the
 rebuilt chip agrees.
 """
 
-from analysis import DEV, AsyncDesign, _cube_set, popcount, sop, swap
+from analysis import (DEV, HOW, KEEP, Analysis, AsyncDesign, _cube_set, popcount, sop,
+                      sop_lits, swap, tight)
 from bitsim import litmasks
-from rig import bitrev, survey_mul, walk_x
+from rig import bitrev, gray_order, survey_mul
 
 _BITS = bytes.maketrans(b"\x00\x01", b"01")
 _ONES = bytes.maketrans(b"\x00\x01\x02", b"001")
@@ -153,27 +154,37 @@ class LatchAnalysis:
         self.log("latch model: inputs %s, outputs %s" % (self.V, self.outputs))
 
     def configs(self):
-        """(rot, rev, start) of the walks to learn from: every rotation,
-        spread out, both ways, from power-up."""
+        """(rot, rev, start, mix) of the walks to learn from, all from
+        power-up: every rotation of the usual Gray code, spread out, both
+        ways, and some mixed Gray codes, in which most pins change often
+        (rig.mix_bits)."""
         n = self.n
         nb = max(1, (n - 1).bit_length())
         rots = sorted(range(n), key=lambda r: (bitrev(r, nb), r))
-        return [(r, v, 0) for r in rots for v in (0, 1)]
+        return [(r, v, 0, 0) for r in rots for v in (0, 1)] + [(0, 0, 0, k) for k in (1, 2, 3, 4)]
 
     def checks(self):
-        """Walks to check the model with: from other start vectors."""
+        """Walks to check the model with: mixed Gray codes from other start
+        vectors."""
         n, m = self.n, (1 << self.n) - 1
         mul = survey_mul(n)
         k = 0
         while True:
             k += 1
-            yield ((k * 3) % n, k & 1, (k * mul) & m)
+            yield ((k * 3) % n, k & 1, (k * mul) & m, 100 + k)
+
+    def need(self):
+        """How many check walks in a row the model must predict: confirm,
+        or as many as make 131072 steps (at most 128).  A circuit that is
+        wrong in one step of 10000 still passes 16384 steps one time in
+        five."""
+        return max(self.confirm, min(128, -(-131072 >> self.n)))
 
     def _walk(self, cfg):
-        rot, rev, start = cfg
-        la, _, _ = self.rig.walk(self.V, self.wbase, [], gray=1, rot=rot, rev=rev, start=start)
-        xs = [walk_x(i, self.n, gray=1, rot=rot, rev=rev, start=start)
-              for i in range(1 << self.n)]
+        rot, rev, start, mix = cfg
+        la, _, _ = self.rig.walk(self.V, self.wbase, [], gray=1, rot=rot, rev=rev, start=start,
+                                 mix=mix)
+        xs = list(gray_order(self.n, rot, rev, start, mix))
         return _Walk(cfg, xs, {p: _to_bytes(la[p], self.n) for p in self.outputs})
 
     # learning ---------------------------------------------------------------
@@ -223,7 +234,8 @@ class LatchAnalysis:
                 x, lv = i & ((1 << n) - 1), i >> n
                 raise AsyncDesign(
                     "%s at %s with latch pins %s at %s is %d once and %d once: not a circuit "
-                    "of latches on those pins (registers, or a latch that is not seen?)" % (
+                    "of latches on those pins (registers, an oscillating output, or a latch "
+                    "that is not seen?)" % (
                         what, self._inputs(x), self.L,
                         "".join(str(lv >> j & 1) for j in range(m)), old - 1, v))
 
@@ -240,7 +252,26 @@ class LatchAnalysis:
                 if j not in moving:
                     pairs[j].add((min(a, b), max(a, b), lv >> j & 1))
 
-        multi = []
+        # What a step proves.  The chip is seen at rest only: before the
+        # step at (x', L'), after it at (x, L).  At rest every latch is
+        # excited to the level it has (rest()).
+        # - Nothing changed: the same, at (x, L'), and no latch may glitch
+        #   between the two points (hold).
+        # - One latch changed: it is taken to be excited at (x, L').  What
+        #   the others do there is NOT known: one of them may be excited
+        #   for one gate delay and fall back when the first has moved (in
+        #   a board's GAL, pin 14 pulsed low while pin 18 rose).  Recording
+        #   "holds" there bends its equation.
+        # - Several changed: in which order, and through which levels, is
+        #   not seen.
+        # So the circuit is learned from the first two, and every step is
+        # then checked: the learned circuit, every excited latch moving at
+        # once as in the chip's simulator (one gate delay each), must come
+        # to rest where the chip did.  Where it does not, the step says
+        # more: a latch that did not change but moves in the learned
+        # circuit holds at (x, L'); a step with several changes is split
+        # into rounds (_step).  Then all are checked again.
+        steps = set()
         for w in self.walks:
             xp = w.xs[0]
             lp = self._lstate(w, xp)
@@ -250,27 +281,75 @@ class LatchAnalysis:
                 rest(x, lc, w)
                 e = x | lp << n
                 ch = lc ^ lp
-                if popcount(ch) <= 1:
-                    for j in range(m):
-                        put(g[j], e, lc >> j & 1, "the excitation of pin %d" % self.L[j])
-                    f1 = (ch.bit_length() - 1,) if ch else ()
-                    hold(xp | lp << n, e, lp, f1)
-                    if ch:
-                        hold(e, x | lc << n, lp, f1)
+                if not ch:
+                    hold(xp | lp << n, e, lp)
                 else:
-                    multi.append((xp, x, lp, lc))
+                    if ch & (ch - 1) == 0:
+                        q = ch.bit_length() - 1
+                        put(g[q], e, lc >> q & 1, "the excitation of pin %d" % self.L[q])
+                    steps.add((xp, x, lp, lc))
                 xp, lp = x, lc
-        k = n + m
-        full, v1 = litmasks(k)
-        proj = [self._supported(_from_bytes(g[j], _ONES), _from_bytes(g[j], _ZEROS),
-                                k, full, v1) for j in range(m)]
-        for xp, x, lp, lc in multi:
-            if not self._step(g, proj, x, lp, lc, hold, xp | lp << n):
-                bits = [self.L[j] for j in range(m) if (lp ^ lc) >> j & 1]
-                raise AsyncDesign("latch pins %s change together at %s, in no order that "
-                                  "agrees with the other walks" % (bits, self._inputs(x)))
         self.g, self.f, self.pairs = g, f, pairs
         self._minimise()
+        self._tables()
+        k = n + m
+        full, v1 = litmasks(k)
+        todo = sorted(steps)
+        self.races = sum(1 for t in todo if (t[2] ^ t[3]) & ((t[2] ^ t[3]) - 1))
+        for _ in range(24):
+            wrong = [t for t in todo if self._settle(t[1], t[2]) != t[3]]
+            if not wrong:
+                break
+            proj = None
+            for xp, x, lp, lc in wrong:
+                ch = lc ^ lp
+                e = x | lp << n
+                if ch & (ch - 1) == 0:
+                    # the latches that the learned circuit moves, but the chip did not
+                    for j in range(m):
+                        if j != ch.bit_length() - 1 and self.tab[self.L[j]][lp][x] != lp >> j & 1:
+                            put(g[j], e, lp >> j & 1, "the excitation of pin %d" % self.L[j])
+                    continue
+                if proj is None:
+                    proj = [self._supported(_from_bytes(g[j], _ONES), _from_bytes(g[j], _ZEROS),
+                                            k, full, v1) for j in range(m)]
+                if not self._step(g, proj, x, lp, lc, hold, xp | lp << n):
+                    bits = [self.L[j] for j in range(m) if ch >> j & 1]
+                    raise AsyncDesign("latch pins %s change together at %s, in no order that "
+                                      "agrees with the other walks" % (bits, self._inputs(x)))
+            done = {t for t in wrong if (t[2] ^ t[3]) & ((t[2] ^ t[3]) - 1)}
+            todo = [t for t in todo if t not in done]
+            self._minimise()
+            self._tables()
+        else:
+            xp, x, lp, lc = wrong[0]
+            raise AsyncDesign(
+                "%d steps are not explained by one circuit of latches (the first: pins %s "
+                "change at %s): what happens there depends on more than the levels seen" % (
+                    len(wrong), [self.L[j] for j in range(m) if (lp ^ lc) >> j & 1],
+                    self._inputs(x)))
+
+    def _settle(self, x, lv):
+        """Where the learned latches come to rest with the inputs at x,
+        from the levels lv: every excited latch moves at once, as in the
+        chip's simulator (one gate delay each); if that does not settle,
+        one at a time.  None if they never rest."""
+        m = len(self.L)
+        gt = [self.tab[p] for p in self.L]
+        rm = range(m)
+        for _ in range(m + 6):
+            nxt = 0
+            for j in rm:
+                nxt |= gt[j][lv][x] << j
+            if nxt == lv:
+                return lv
+            lv = nxt
+        for _ in range(4 * m + 8):
+            exc = [j for j in rm if gt[j][lv][x] != lv >> j & 1]
+            if not exc:
+                return lv
+            lv ^= 1 << exc[0]
+        return None
 
     def _step(self, g, proj, x, lp, lc, hold, prev):
         """Several latches changed in one step: fire them in rounds, the
@@ -356,7 +435,7 @@ class LatchAnalysis:
             best = None
             for inv in (False, True):
                 a, b = (off, on) if inv else (on, off)
-                cubes = sop(a, b, k)
+                cubes = tight(sop(a, b, k), a, k, n + j)
                 cubes = self._hazard_free(cubes, [(x, y) for x, y, v in self.pairs[j]
                                                   if v == (0 if inv else 1)], b, k, full, v1)
                 if best is None or len(cubes) < len(best[0]):
@@ -365,14 +444,73 @@ class LatchAnalysis:
         for p, arr in self.f.items():
             on, off = self._supported(_from_bytes(arr, _ONES), _from_bytes(arr, _ZEROS),
                                       k, full, v1)
-            pos, neg = sop(on, off, k), sop(off, on, k)
+            pos, neg = tight(sop(on, off, k), on, k), tight(sop(off, on, k), off, k)
             self.cover[p] = (neg, True) if len(neg) < len(pos) else (pos, False)
+        self._read_outputs()
+
+    def _budget(self, p):
+        """The product terms pin p's macrocell has for its logic."""
+        return Analysis.TERMS22[23 - p] if self.device == "GAL22V10" else 7
+
+    def _read_outputs(self):
+        """An output that needs more product terms over the inputs and
+        latch pins than its macrocell has, again over those and the pins
+        of the other outputs.  A latch that is held while another output
+        is high (!P13 = ... # P14 & !P13, with pin 14 a decode of nine
+        inputs) needs nine hold terms over the inputs, and one with the
+        pin.  The latch then follows that output a gate delay later, as
+        it does in the chip; whether the walks still come out is checked
+        on the rebuilt JED."""
+        n, m = self.n, len(self.L)
+        k = n + m
+        full, v1 = litmasks(k)
+        self.rcover = {}
+        over = [p for p, (cubes, _) in self.cover.items() if len(cubes) > self._budget(p)]
+        if not over:
+            return
+
+        def covered(p):
+            cubes, inv = self.cover[p]
+            s = 0
+            for care, val in cubes:
+                s |= _cube_set(care, val, k, full, v1)
+            return full ^ s if inv else s
+        names = [self.name(q) for q in self.V] + [self.name(q) for q in self.L]
+        lits = []
+        for b in range(k):
+            lits.append((names[b], {0: v1[b]}))
+            lits.append(("!" + names[b], {0: full ^ v1[b]}))
+        fed = self.dev.get("fed", self.dev["io"])
+        for y in self.outputs:
+            if y not in self.L and y not in over and y in fed:
+                s = covered(y)
+                lits.append((self.name(y), {0: s}))
+                lits.append(("!" + self.name(y), {0: full ^ s}))
+        for p in over:
+            arr = self.g[self.L.index(p)] if p in self.L else self.f[p]
+            on, off = _from_bytes(arr, _ONES), _from_bytes(arr, _ZEROS)
+            pos = sop_lits({0: on}, {0: off}, lits, full)
+            neg = sop_lits({0: off}, {0: on}, lits, full)
+            cubes, inv = (neg, True) if len(neg) < len(pos) else (pos, False)
+            if len(cubes) < len(self.cover[p][0]):
+                self.log("pin %d needs %d product terms over the inputs and latch pins, more "
+                         "than its %d: %d with other outputs' pins" % (
+                             p, len(self.cover[p][0]), self._budget(p), len(cubes)))
+                self.rcover[p] = (cubes, inv, lits)
 
     @staticmethod
     def _hazard_free(cubes, pairs, off, k, full, v1):
         """Add, for every pair of neighbouring points that no single cube
-        covers, a cube through both, as large as off allows."""
+        covers, a cube through both.  It is as large as the cover allows:
+        it stays within what the cubes cover already, so it adds no point
+        to the function, as the consensus term of two cubes does.  (As
+        large as off allows, it reached into points that no walk had
+        visited: !P13 held with pin 4 low, where the chip lets go.)"""
         cubes = list(cubes)
+        cov = 0
+        for care, val in cubes:
+            cov |= _cube_set(care, val, k, full, v1)
+        out = full & ~cov                # outside the function as covered
 
         def covers(c, a):
             return a & c[0] == c[1]
@@ -381,12 +519,12 @@ class LatchAnalysis:
                 continue
             care = ((1 << k) - 1) & ~(a ^ b)
             val = a & care
-            if _cube_set(care, val, k, full, v1) & off:
-                raise RuntimeError("hazard pair %x %x crosses the off set" % (a, b))
+            if _cube_set(care, val, k, full, v1) & (off | out):
+                continue        # not both in the function: from a step split by guess
             for bit in range(k):
                 if care >> bit & 1:
                     c2 = care & ~(1 << bit)
-                    if not _cube_set(c2, val & c2, k, full, v1) & off:
+                    if not _cube_set(c2, val & c2, k, full, v1) & out:
                         care, val = c2, val & c2
             cubes.append((care, val))
         return cubes
@@ -397,7 +535,20 @@ class LatchAnalysis:
         n, m = self.n, len(self.L)
         fulln, v1n = litmasks(n)
         self.tab = {}
+        for p, (cubes, inv, lits) in getattr(self, "rcover", {}).items():
+            full = (1 << (1 << (n + m))) - 1
+            cov = 0
+            for cube in cubes:
+                v = full
+                for i in cube:
+                    v &= lits[i][1][0]
+                cov |= v
+            if inv:
+                cov ^= full
+            self.tab[p] = [_to_bytes(cov >> (lv << n) & fulln, n) for lv in range(1 << m)]
         for p, (cubes, inv) in self.cover.items():
+            if p in self.tab:
+                continue
             per = []
             for lv in range(1 << m):
                 bits = 0
@@ -419,12 +570,8 @@ class LatchAnalysis:
         others = [p for p in self.outputs if p not in self.L]
         lv = self._lstate(w, w.xs[0])
         for i, x in enumerate(w.xs):
-            for _ in range(m + 2):
-                exc = [j for j in range(m) if gt[j][lv][x] != lv >> j & 1]
-                if not exc:
-                    break
-                lv ^= 1 << exc[0]
-            else:
+            lv = self._settle(x, lv)
+            if lv is None:
                 return (i, x, None, None, None)
             for j, p in enumerate(self.L):
                 if w.levels[p][x] != lv >> j & 1:
@@ -445,9 +592,10 @@ class LatchAnalysis:
         self.walks = [self._walk(c) for c in self.configs()]
         self.learn()
         self._tables()
-        good = 0
+        good, need = 0, self.need()
+        limit = len(self.walks) + max(self.max_walks, 3 * need)
         for c in self.checks():
-            if good >= self.confirm or len(self.walks) >= self.max_walks:
+            if good >= need or len(self.walks) >= limit:
                 break
             w = self._walk(c)
             self.walks.append(w)
@@ -456,8 +604,8 @@ class LatchAnalysis:
                 good += 1
                 continue
             good = 0
-            self.log("walk with rot=%d rev=%d start=%x: step %d (%s) %s; learning again "
-                     "from %d walks" % (
+            self.log("walk with rot=%d rev=%d start=%x mix=%d: step %d (%s) %s; learning "
+                     "again from %d walks" % (
                          c + (miss[0], self._inputs(miss[1]),
                               "does not settle" if miss[2] is None else
                               "pin %d reads %d, predicted %d" % miss[2:], len(self.walks))))
@@ -466,9 +614,9 @@ class LatchAnalysis:
         bad = self.check_equations()
         if bad:
             raise AsyncDesign("the latch model does not predict the walks: %s" % bad[:3])
-        if good < self.confirm:
+        if good < need:
             raise AsyncDesign("the latch model did not predict %d walks in a row within %d "
-                              "walks" % (self.confirm, self.max_walks))
+                              "walks" % (need, len(self.walks)))
         self._check_driven()
         self.log("latch model: latch pins %s, combinational %s, from %d walks" % (
             self.L, [p for p in self.outputs if p not in self.L], len(self.walks)))
@@ -502,6 +650,13 @@ class LatchAnalysis:
         k = len(names)
         eqs = []
         for p, (cubes, inv) in sorted(self.cover.items()):
+            if p in self.rcover:
+                cubes, inv, lits = self.rcover[p]
+                expr = "\n    # ".join(" & ".join(lits[i][0] for i in c) or "'b'1"
+                                       for c in cubes) if cubes else "'b'0"
+                eqs.append((p, "", inv, expr, len(cubes)))
+                continue
+
             def lit(c):
                 if c[0] == 0:
                     return "'b'1"
@@ -515,10 +670,10 @@ class LatchAnalysis:
     def cupl(self, title="galre"):
         lines = ["Name %s; Partno x; Date x; Revision 1; Designer galre; Company x; "
                  "Assembly x; Location x;" % title,
-                 "Device %s;" % self.dev["cupl"], ""]
+                 "Device %s;" % self.dev["cupl"], "", HOW % title, ""]
         for p in sorted(set(self.V) | set(self.outputs)):
             lines.append("Pin %d = %s;" % (p, self.name(p)))
-        lines.append("")
+        lines += ["", KEEP, "MIN [%s] = 0;" % ", ".join(self.name(p) for p in self.L), ""]
         for p, _, inv, expr, _ in self.eqs:
             lines.append("%s%s = %s;" % ("!" if inv else "", self.name(p), expr))
         return "\n".join(lines) + "\n"

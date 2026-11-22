@@ -1,0 +1,25 @@
+Name     buried22v10;
+Partno   x;
+Date     2026-11-19;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g22v10;
+
+/* Test design: GAL22V10, a register that never reaches its pin (its output
+   is never enabled) and decides whether a latch can be set.  galre sees
+   the latch go two ways from the same inputs and levels, and stops. */
+
+Pin 1  = CLK;
+Pin 2  = D;
+Pin 3  = S;
+Pin 4  = R;
+Pin 22 = L;
+Pin 23 = Q1;
+
+Q1.d = D;
+Q1.oe = 'b'0;
+L = Q1 & S
+  # L & !R;
