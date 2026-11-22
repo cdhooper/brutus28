@@ -68,7 +68,7 @@ This builds `fw/objs/fw.bin`. To install it over USB:
 The board's serial port is `/dev/ttyACM0` or similar on Linux, and
 `/dev/cu.usbmodemXXXX` on macOS. To check the firmware, type
 `pld capture ?` on the board's console: the keys listed under `set` must
-include `gray rot start skm skv avm avv quiet chk follow dclk`.
+include `gray rot start skm skv avm avv quiet chk follow dclk ser`.
 
 ## 3. Put the chip in
 
@@ -401,6 +401,7 @@ designs in `designs/`, with the pins the tests hold:
 | `fsm22v10` | 3-state machine, output enables | |
 | `comb16v8` | combinational only | |
 | `cnt20v8` | GAL20V8, registered mode: counter, pin 13 as the registers' enable | |
+| `lowreg22v10` | a 22V10 that looks like a registered GAL20V8, but for a register that is low after power-up | `4-11=0,14-19=0,23=0` |
 | `comb20v8` | GAL20V8, complex mode: an output that reads another output's pin | |
 | `simple20v8` | GAL20V8, simple mode | |
 | `ar22v10` | asynchronous reset term `P3 & !P4` | `6-11=0,13-20=0` |
@@ -450,6 +451,11 @@ commit (section 2).
 
 **"pin N is held at V, but the GAL drives it".** Remove that pin from
 `--fix`.
+
+**"This firmware changes several pins in one write (it has no ser=)".**
+The run goes on. With that firmware, the pins that change in one write
+reach the chip in no certain order, and a chip may now and then take that
+for a clock edge. Install the firmware from the same commit (section 2).
 
 **Exit code 3.** The message before "no equations written" says why:
 

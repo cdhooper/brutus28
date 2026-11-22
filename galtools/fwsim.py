@@ -71,8 +71,18 @@ class SocketDevice:
     a hundred times faster, but power() and io() are then not called, so
     the counters and writes below stay as they are."""
 
-    def __init__(self, jed, socket, fast=False, race=0):
-        self.fast = fast
+    def __init__(self, jed, socket, fast=False, race=0, glitch=0, glitch_pin=13):
+        self.fast = fast and not glitch
+        self.glitch = glitch         # not 0: a chip that now and then (about one time in
+                                     # eight, by this seed) loses the state of its registers
+                                     # when glitch_pin falls in one write with two or more
+                                     # other input pins, and no input pin rises.  A part in a
+                                     # PLCC28 did so on a board when the pin that enables its
+                                     # outputs fell together with four inputs: where a state
+                                     # is read after a clock, and at a carry of a walk that
+                                     # counts.  Never when the pins fell in two writes.  The
+                                     # seed runs on over power cycles.
+        self.glitch_pin = glitch_pin
         self.race = race             # not 0: the pins that one port write changes arrive one
                                      # after the other, in an order that this seed decides and
                                      # that differs from write to write, as on a board, where
@@ -83,6 +93,9 @@ class SocketDevice:
         npins, vcc, gnd, smap = SOCKETS[socket]
         self.pins = self.g.signal_pins()
         self.sbit = {p: 1 << (smap(p) - 1) for p in range(1, npins + 1)}
+        half = self.g.npins // 2     # the pins that are inputs only: 1 to 9 and 11, or 1 to
+        self.glitch_mask = sum(      # 11 and 13
+            self.sbit[p] for p in self.pins if p < half or p == half + 1)
         self.vcc_bit = self.sbit[vcc]
         self.gnd_bit = self.sbit[gnd]
         # What the board's jumper detection reports; tests change these.
@@ -121,6 +134,13 @@ class SocketDevice:
         if not self.powered:
             return 0
         self.writes.append(value)
+        if self.glitch:
+            moved = (value ^ self.last) & self.glitch_mask
+            if (not (moved & value) and moved & self.sbit[self.glitch_pin]
+                    and bin(moved).count("1") >= 3):
+                self.glitch = (self.glitch * 1664525 + 1013904223) & 0xffffffff
+                if self.glitch >> 29 == 0:
+                    self.g.q = {p: 0 for p in self.g.q}
         if self.transients:
             done = 0
             for g in PORT_GROUPS:

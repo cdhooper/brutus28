@@ -149,6 +149,8 @@ Options:
 - `--settle`, `--off` and `--on` set the firmware timing: µs after each
   write, ms with power off during a power cycle, and ms after power on.
 - `--no-jumper-check` powers the socket without checking the jumpers.
+- `--no-serial` changes all pins of a vector in one write, as firmware
+  without `ser=` does.
 
 ## How it works
 
@@ -163,6 +165,17 @@ pin 1 of a GAL is always an input. Also, just before each clock edge, it
 drives every pin at the level it reads (`follow`), so no pin the GAL
 drives is fought through its 1K at the edge. `--no-dclk` and `--no-follow`
 turn these off.
+
+The firmware writes the 28 socket pins in three port writes, and the pins
+of one port write reach the chip in no certain order. A chip can take that
+for something else: a GAL in a PLCC28 loaded its registers, as on a clock
+edge, in one of 20 writes in which the pin that enables its outputs fell
+together with four inputs, and never when they fell in two writes. That
+happened where a state was read after a clock, and at the carries of a
+walk that counts. So the firmware changes one pin per write (`ser`), the
+lowest socket pin first: a vector that differs from the last one in n pins
+takes n writes. `--no-serial` turns that off, and firmware that does not
+have it is used as it is; the run says so.
 
 1. **Power-up walk.** galre walks every signal pin except pin 1 (the clock,
    held low) and the held pins. Every pin is driven weakly through Brutus's
@@ -720,14 +733,15 @@ needed about 3 million power cycles.
   the three counting orders (descending, bit-reversed, both) together
   show every latch that can leave its power-up value. No two of them do.
   In a counting order, though, a pin never rises alone: every faster pin
-  falls with it. A latch that holds only while another signal keeps
-  still (`!P14 = !P8 # !P14 & !P13`, from a graphics card's GAL) never
-  holds then, and the chip reads as combinational. So the power-up state
-  is also walked in Gray code order and in two mixed Gray code orders,
-  and every other state once in a mixed one, from the vector the path
-  left it at; these must read the same as the counting walk. A latch in
-  a registered design that acts only in other states also shows when
-  reading a new state changes it.
+  falls with it (in the same write, with firmware that has no `ser=`; just
+  before it, with one pin per write). A latch that holds only while
+  another signal keeps still (`!P14 = !P8 # !P14 & !P13`, from a graphics
+  card's GAL) may never hold then, and the chip reads as combinational. So
+  the power-up state is also walked in Gray code order and in two mixed
+  Gray code orders, and every other state once in a mixed one, from the
+  vector the path left it at; these must read the same as the counting
+  walk. A latch in a registered design that acts only in other states also
+  shows when reading a new state changes it.
 
   A mixed Gray code changes one pin per vector like the usual one, but
   is walked as one half, one pin's change, the other half, and each half
@@ -791,7 +805,7 @@ The host first configures a job:
 
 - `set pins= base= inv= clk= cand= mask= count= mul= rev= gray= rot=
   mix= start= skm= skv= avm= avv= quiet= chk= chkm= psig= pre= follow=
-  dclk= settle= off= on= vcc= gnd= supply=`
+  dclk= ser= settle= off= on= vcc= gnd= supply=`
 - `path`
 - `probe`
 - `ret <crc> <vectors>`
@@ -837,6 +851,10 @@ read pin is driven at the level it read before the clock rises. With
 `dclk=1`, the clock pins are driven directly by the CPU's PLD_* pins
 instead of through the 1K, and only while the chip is powered; a clock
 pin may not be a VCC or GND pin.
+
+With `ser=1`, every write changes one pin, the lowest socket pin first: a
+vector that differs from the last one in n pins takes n writes, and is
+read after the last. Without it, a vector is written in three port writes.
 
 With `avm` set, no write passes through a vector v with v & `avm` = `avv`
 on its way to the next vector, in any of the three port writes; a target

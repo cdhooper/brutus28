@@ -1,0 +1,20 @@
+Name lowreg22v10; Partno x; Date x; Revision 1; Designer x; Company x; Assembly x; Location x;
+Device g22v10;
+
+/* A 22V10 that looks like a GAL20V8 in its registered mode: only pins 15
+   to 22 are outputs, and every one is enabled by pin 13 low.  But Q0 is
+   active high and so low after power-up, which no register of a GAL20V8
+   is: galre told that the chip is a GAL20V8 stops and says so. */
+
+Pin 1 = CLK;
+Pin 2 = A;
+Pin 3 = B;
+Pin 13 = P13;
+Pin 22 = Q0;
+Pin 21 = !Q1;
+Pin 20 = !Q2;
+
+Q0.d = A & !Q0 # B;
+Q1.d = Q0 $ A;
+Q2.d = Q1 & B # !Q0 & !A;
+[Q0, Q1, Q2].oe = !P13;

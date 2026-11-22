@@ -94,6 +94,15 @@
  *        state's: trans, walk and state report it without reading again.
  *        With chk, trans flags the x whose two reads of the vector
  *        differ; chkm (if not 0) limits that to its pins.
+ * ser:   With ser set, every write changes one pin, the lowest socket pin
+ *        first: a vector that differs from the last one in n pins takes n
+ *        writes (and one read, after the last).  Without it, the socket
+ *        pins are written in three port writes, and the pins of one port
+ *        write reach the PLD in no certain order.  A part can take that
+ *        for something else: one in a PLCC28 loaded its registers, as on
+ *        a clock edge, in one of 20 writes in which the pin that enables
+ *        its outputs fell together with four inputs, and never when they
+ *        fell in two writes.
  * Avoid: with avm set, every write takes care never to pass through a
  *        vector v with (v & avm) == avv on the way, although the socket
  *        pins are written in three port writes (CAP_PORT_GROUPS): the
@@ -178,6 +187,7 @@ static struct {
     uint32_t  pre;          /* trans: report the read before the clock edge */
     uint32_t  follow;       /* steps: drive the read levels before the edge */
     uint32_t  dclk;         /* clock pins driven directly, not through 1K */
+    uint32_t  ser;          /* writes: one pin changes per write */
     uint32_t  vcc;          /* preflight: socket pins jumpered to VCC */
     uint32_t  gnd;          /* preflight: socket pins jumpered to GND */
     uint      supply_mv;    /* preflight: PLD supply (mV), 0 = any */
@@ -213,7 +223,7 @@ const char cmd_pld_capture_help[] =
 "pld capture set <key>=<value>  - pins base inv clk cand mask count mul rev\n"
 "                                 gray mix rot start skm skv avm avv quiet\n"
 "                                 chk chkm psig\n"
-"                                 pre follow dclk vcc gnd (hex)\n"
+"                                 pre follow dclk ser vcc gnd (hex)\n"
 "                                 settle (usec) off on (msec) supply (mV)\n"
 "pld capture path [+] <v>...    - clocked vectors from power-up to the state\n"
 "pld capture probe [+] <v>...   - probe vectors for signatures\n"
@@ -406,17 +416,23 @@ cap_end(uint status)
 /* -- PLD access ---------------------------------------------------------- */
 
 /*
- * Move from the last vector written towards v without passing through the
- * avm/avv cube: pins leaving the cube first, then the others, then pins
- * entering it, one port group at a time.  Writes every step but v itself.
+ * Move from the last vector written towards v in steps, and write every
+ * step but v itself.
+ *
+ * With avm set, without passing through the avm/avv cube: the pins that
+ * leave the cube first, then the others, then the pins that enter it.
+ *
+ * A step is one port group, or with ser one pin, the lowest socket pin
+ * first (see ser at the top).
  */
 static void
-cap_avoid(uint32_t v)
+cap_move(uint32_t v)
 {
     static const uint32_t groups[] = CAP_PORT_GROUPS;
-    uint32_t ch = cap_last ^ v;
+    uint32_t rails = cap.vcc | cap.gnd;
+    uint32_t cur = (cap_last & ~rails) | (v & rails);   /* never off their level */
+    uint32_t ch = cur ^ v;
     uint32_t cls[3];
-    uint32_t cur = cap_last;
     uint     c;
     uint     g;
 
@@ -424,6 +440,16 @@ cap_avoid(uint32_t v)
     cls[1] = ch & ~cap.avm;
     cls[2] = ch & cap.avm & ~(v ^ cap.avv);     /* enter the cube */
     for (c = 0; c < 3; c++) {
+        if (cap.ser) {
+            uint32_t m;
+
+            for (m = cls[c]; m != 0; m &= m - 1) {
+                cur ^= m & -m;
+                if (cur != v)
+                    (void) cap_hw_io(cur, cap.settle_usec);
+            }
+            continue;
+        }
         for (g = 0; g < CAP_NELEM(groups); g++) {
             uint32_t m = cls[c] & groups[g];
 
@@ -441,8 +467,8 @@ static uint32_t
 cap_io(uint32_t v)
 {
     v = (v & ~cap.gnd) | cap.vcc;
-    if (cap.avm != 0)
-        cap_avoid(v);
+    if ((cap.avm != 0) || (cap.ser != 0))
+        cap_move(v);
     cap_last = v;
     cap_raw = cap_hw_io(v, cap.settle_usec) & CAP_SOCKET_PINS;
     return (cap_raw & cap.mask);
@@ -1046,6 +1072,7 @@ cap_set(int argc, char * const *argv)
         { "pre",    &cap.pre,   NULL },
         { "follow", &cap.follow, NULL },
         { "dclk",   &cap.dclk,  NULL },
+        { "ser",    &cap.ser,   NULL },
         { "vcc",    &cap.vcc,   NULL },
         { "gnd",    &cap.gnd,   NULL },
         { "settle", NULL,       &cap.settle_usec },
@@ -1164,7 +1191,7 @@ cap_show(void)
            "mask=%07lx\ncount=%lx mul=%lx rev=%lx gray=%lx mix=%lx rot=%lx "
            "start=%07lx\n"
            "skm=%07lx skv=%07lx avm=%07lx avv=%07lx quiet=%lx chk=%lx\n"
-           "chkm=%07lx psig=%lx pre=%lx follow=%lx dclk=%lx\n"
+           "chkm=%07lx psig=%lx pre=%lx follow=%lx dclk=%lx ser=%lx\n"
            "settle=%u off=%u on=%u vcc=%07lx gnd=%07lx supply=%u\n",
            (unsigned long) cap.pins, (unsigned long) cap.base,
            (unsigned long) cap.inv, (unsigned long) cap.clk,
@@ -1178,7 +1205,8 @@ cap_show(void)
            (unsigned long) cap.chk, (unsigned long) cap.chkm,
            (unsigned long) cap.psig, (unsigned long) cap.pre,
            (unsigned long) cap.follow,
-           (unsigned long) cap.dclk, cap.settle_usec, cap.off_msec,
+           (unsigned long) cap.dclk, (unsigned long) cap.ser,
+           cap.settle_usec, cap.off_msec,
            cap.on_msec, (unsigned long) cap.vcc, (unsigned long) cap.gnd,
            cap.supply_mv);
     cap_show_list("path", cap.path, cap.npath);

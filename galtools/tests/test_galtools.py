@@ -22,7 +22,7 @@ sys.path.insert(0, HERE)
 import fwsim                                       # noqa: E402
 import galre                                       # noqa: E402
 import verify                                      # noqa: E402
-from analysis import Analysis, LatchSuspected      # noqa: E402
+from analysis import Analysis, AsyncDesign, LatchSuspected, Limit   # noqa: E402
 from capture import CaptureError                   # noqa: E402
 from latch import LatchAnalysis                    # noqa: E402
 from galsim import GAL                             # noqa: E402
@@ -346,15 +346,22 @@ class SimulatedChip(unittest.TestCase):
 
     def test_latch_that_counting_walks_miss(self):
         """quietlatch16v8's latch holds only while another signal keeps
-        still.  In the counting orders the chip reads as combinational,
-        with a wrong equation; the Gray code orders show the latch."""
+        still.  Where the pins of a vector change in one write, the chip
+        reads as combinational in the counting orders, with a wrong
+        equation; the Gray code orders show the latch.  Where one pin
+        changes per write, a counting order shows it too."""
         fixed = galre.parse_fixed(LATCH_CASES["quietlatch16v8"][1])
         with mock.patch.object(Analysis, "ORDERS", Analysis.ORDERS[:3]):
-            a = Analysis(SimRig(jed("quietlatch16v8")), "GAL16V8", fixed=fixed, log=quiet)
+            a = Analysis(SimRig(jed("quietlatch16v8"), serial=False), "GAL16V8", fixed=fixed,
+                         log=quiet)
             a.run()
         self.assertIn((18, "", False, "P4", 1), a.eqs)        # L = A: wrong
-        a = Analysis(SimRig(jed("quietlatch16v8")), "GAL16V8", fixed=fixed, log=quiet)
+        a = Analysis(SimRig(jed("quietlatch16v8"), serial=False), "GAL16V8", fixed=fixed,
+                     log=quiet)
         with self.assertRaisesRegex(LatchSuspected, "pin 18 read differently .* Gray code"):
+            a.run()
+        a = Analysis(SimRig(jed("quietlatch16v8")), "GAL16V8", fixed=fixed, log=quiet)
+        with self.assertRaisesRegex(LatchSuspected, "pin 18 read differently .* descending"):
             a.run()
 
     def test_reads_another_output(self):
@@ -636,7 +643,9 @@ class SimulatedChip(unittest.TestCase):
         GAL16V8 with oelatch16v8 in it (L = S # L & R) kept L in two
         steps of three in which S fell and R rose, so the same walk read
         differently twice.  One input at a time it reads the same every
-        time: latches, and no bad contact."""
+        time: latches, and no bad contact.  That is firmware which
+        changes the pins of a vector in one write (serial=False); with
+        one pin per write there is no such race."""
         from analysis import Unsteady
         for name, device, fix, eqs in (
                 ("oelatch16v8", "GAL16V8", OELATCH[0], OELATCH[1]),
@@ -646,7 +655,7 @@ class SimulatedChip(unittest.TestCase):
                 fixed = galre.parse_fixed(fix)
                 plain = galre.analyse(SimRig(jed(name)), device, fixed=fixed, log=quiet)
                 logs = []
-                a = galre.analyse(SimRig(jed(name), race=1), device, fixed=fixed,
+                a = galre.analyse(SimRig(jed(name), race=1, serial=False), device, fixed=fixed,
                                   log=logs.append)
                 self.assertRegex(
                     logs[0], r"^asynchronous behaviour: pins? [\d, ]+ read differently when the "
@@ -659,8 +668,14 @@ class SimulatedChip(unittest.TestCase):
                 if eqs:
                     self.assertEqual(got, eqs)
                 self.assertEqual(verify.check_captures(a, jed(name)), [])
+                logs = []
+                b = galre.analyse(SimRig(jed(name), race=1), device, fixed=fixed,
+                                  log=logs.append)
+                self.assertFalse(any("same walk is repeated" in line for line in logs))
+                self.assertEqual({(p, kind): "!" * inv + expr for p, kind, inv, expr, _ in b.eqs},
+                                 got)
         # a pin that reads wrong now and then does so one input at a time too
-        rig = OddReads(SimRig(jed("comb16v8"), race=1), 19, 0.01)
+        rig = OddReads(SimRig(jed("comb16v8"), race=1, serial=False), 19, 0.01)
         with self.assertRaises(Unsteady):
             Analysis(rig, "GAL16V8", fixed=galre.parse_fixed("11-16=0"), log=quiet).run()
 
@@ -1693,6 +1708,80 @@ class Firmware(unittest.TestCase):
         self.assertEqual(direct, 1 << 0)    # socket pin 1, the clock
         self.assertEqual(a.equations(), plain.equations())
         self.assertEqual(a.trans, plain.trans)
+
+    def _most_pins_per_write(self, serial):
+        """fsm22v10 explored through the firmware: the analysis, and per
+        kind of job the most device pins that one write changed."""
+        t = self.transport("fsm22v10", "dip24")
+        dev, io, capture = t.dev, t.dev.io, t.capture
+        pins = sum(dev.sbit[p] for p in dev.pins)
+        most, job = {}, [None]
+
+        def logged(value):
+            if dev.powered:
+                n = bin((value ^ dev.last) & pins).count("1")
+                most[job[0]] = max(most.get(job[0], 0), n)
+            return io(value)
+
+        def run(line):
+            job[0] = line.split()[-1]
+            return capture(line)
+        dev.io, t.capture = logged, run
+        rig = BrutusRig(t, "GAL22V10", log=quiet, serial=serial)
+        a = Analysis(rig, "GAL22V10", fixed=CASES["fsm22v10"][3], log=quiet)
+        a.run()
+        return a, most
+
+    def test_one_pin_per_write(self):
+        """With ser set, no write changes more than one pin: the vectors
+        of a walk, clocked steps, the clock edge, the reads of a state,
+        the way back."""
+        a, most = self._most_pins_per_write(serial=True)
+        self.assertEqual((most["walk"], most["trans"]), (1, 1))
+        b, most = self._most_pins_per_write(serial=False)
+        self.assertGreater(most["walk"], 1)
+        self.assertGreater(most["trans"], 1)
+        self.assertEqual(a.equations(), b.equations())
+        self.assertEqual(a.trans, b.trans)
+
+    def test_firmware_without_ser(self):
+        """A firmware that does not know ser= is used as it is, and the
+        run says so once."""
+        t = self.transport("fsm22v10", "dip24")
+        command = t.command
+        t.command = lambda line: ("Unknown setting ser=1\n" if "ser=" in line
+                                  else command(line))
+        logs = []
+        rig = BrutusRig(t, "GAL22V10", log=logs.append)
+        self.assertFalse(rig.metadata()["serial"])
+        a = Analysis(rig, "GAL22V10", fixed=CASES["fsm22v10"][3], log=quiet)
+        a.run()
+        self.assertIsNone(rig.serial)
+        self.assertEqual(sum("it has no ser=" in line for line in logs), 1)
+        b, _ = self._most_pins_per_write(serial=True)
+        self.assertEqual(a.equations(), b.equations())
+        self.assertTrue(BrutusRig(self.transport("fsm22v10", "dip24"), "GAL22V10",
+                                  log=quiet).metadata()["serial"])
+
+    def test_inputs_that_fall_with_the_enable(self):
+        """A chip that now and then loses the state of its registers when
+        the pin that enables its outputs falls in one write with other
+        inputs (fwsim.SocketDevice, glitch), as a part did on a board.
+        With one pin per write it never does; with all pins of a vector
+        in one write, galre gets a chip that it is not."""
+        fix = galre.parse_fixed("6-11=0,14-19=0,23=0")
+        for seed in (1, 2):
+            a = galre.analyse(SimRig(jed("lowreg22v10"), glitch=seed), "GAL22V10", fixed=fix,
+                              survey=16, log=quiet)
+            self.assertEqual(sorted(a.reg), [20, 21, 22])
+            self.assertEqual(verify.check_captures(a, jed("lowreg22v10")), [])
+        good = a.trans
+        try:
+            b = galre.analyse(SimRig(jed("lowreg22v10"), glitch=1, serial=False),
+                              "GAL22V10", fixed=fix, survey=16, log=quiet)
+        except (AsyncDesign, Limit):
+            b = None
+        self.assertTrue(b is None or b.trans != good)
 
     def test_dclk_refuses_supply_pin(self):
         t = self.transport("fsm22v10", "dip24")

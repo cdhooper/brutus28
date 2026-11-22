@@ -268,11 +268,18 @@ class SimRig:
     chip one after the other, in an order that differs from write to
     write, as on a board (fwsim.SocketDevice).  Only a design with
     asynchronous parts can tell.
+
+    glitch (a seed, not 0): the chip now and then loses the state of its
+    registers when the pin that enables its outputs falls in one write
+    with other inputs (fwsim.SocketDevice).  serial: the firmware changes
+    one pin per write (BrutusRig), so that this cannot happen.
     """
 
-    def __init__(self, jed, off_ms=20, on_ms=2, socket=None, careful=False, race=0):
+    def __init__(self, jed, off_ms=20, on_ms=2, socket=None, careful=False, race=0,
+                 glitch=0, serial=True):
         self.g = GAL(jed)
         self.race = race
+        self.glitch, self.serial = glitch, serial
         self.device = self.g.kind
         self.bits = Bits(self.g)
         self.pins = self.g.signal_pins()
@@ -284,7 +291,7 @@ class SimRig:
         self.fw = None
         self._fw_args = (jed, socket)
         loops = [a for a in self.async_parts if a.startswith("combinational")]
-        if loops or (self.async_parts and not careful):
+        if loops or (self.async_parts and not careful) or glitch:
             self._firmware()
 
     def _firmware(self):
@@ -297,10 +304,11 @@ class SimRig:
             raise RuntimeError("%s has %s: simulating it needs a C compiler" % (
                 jed, " and ".join(self.async_parts) or "pin 1 walked in a registered design"))
         socket = socket or DEFAULT_SOCKET[self.device]
-        self.socket_device = fwsim.SocketDevice(jed, socket, fast=True, race=self.race)
+        self.socket_device = fwsim.SocketDevice(jed, socket, fast=True, race=self.race,
+                                                glitch=self.glitch)
         self.fw = BrutusRig(fwsim.HarnessTransport(lib, self.socket_device), self.device,
                             socket, off_ms=self.off_ms, on_ms=self.on_ms, log=lambda *a: None,
-                            jumper_check=False)
+                            jumper_check=False, serial=self.serial)
         for k, v in self.ops.items():
             self.fw.ops[k] += v
         self.ops = self.fw.ops
@@ -500,7 +508,7 @@ class BrutusRig:
     """
 
     def __init__(self, transport, device, socket=None, settle_us=1, off_ms=20,
-                 on_ms=2, log=print, jumper_check=True, follow=True, dclk=True):
+                 on_ms=2, log=print, jumper_check=True, follow=True, dclk=True, serial=True):
         self.socket = socket or DEFAULT_SOCKET[device]
         npins, vcc, gnd, smap = SOCKETS[self.socket]
         if npins != PACKAGE[device][0]:
@@ -509,6 +517,9 @@ class BrutusRig:
         self.settle_us, self.off_ms, self.on_ms = settle_us, off_ms, on_ms
         self.jumper_check = jumper_check
         self.follow, self.dclk = follow, dclk
+        # every write changes one pin (firmware with ser=); None once the
+        # firmware turned out to be older
+        self.serial = serial
         self.pins = [p for p in range(1, npins + 1) if p not in (vcc, gnd)]
         self.sbit = {p: 1 << (smap(p) - 1) for p in range(1, npins + 1)}
         # the device's VCC and GND pins, and the rails as the jobs name them
@@ -592,11 +603,27 @@ class BrutusRig:
                     "".join("\n  board: " + l for l in self.jumper_readings)))
         return self.detected
 
+    def _serial(self):
+        """Ask for one pin per write (after "pld capture clear", which turns
+        it off).  A firmware that does not know the setting goes on as
+        before, and the run says so once."""
+        if not self.serial:
+            return
+        try:
+            self._cmd("pld capture set ser=1")
+        except CaptureError:
+            self.serial = None
+            self.log("This firmware changes several pins in one write (it has no ser=).  "
+                     "They reach the chip in no certain order, and a chip may now and then "
+                     "take that for a clock edge: install the firmware from the same commit.")
+
     def metadata(self):
         """The setup, for the recording."""
+        self._cmd("pld capture clear")
+        self._serial()
         meta = {"device": self.device, "socket": self.socket, "settle_us": self.settle_us,
                 "off_ms": self.off_ms, "on_ms": self.on_ms, "jumper_check": self.jumper_check,
-                "follow": self.follow, "dclk": self.dclk,
+                "follow": self.follow, "dclk": self.dclk, "serial": bool(self.serial),
                 "firmware": self.t.command("version").strip()}
         if self.detected:
             vcc, gnd, mv = self.detected
@@ -660,6 +687,7 @@ class BrutusRig:
             extra.append("pre=1")
         if extra:
             self._cmd("pld capture set " + " ".join(extra))
+        self._serial()
         new = []
         if psig:
             new.append("psig=1")
