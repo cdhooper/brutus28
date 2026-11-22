@@ -17,6 +17,7 @@ int      gal_add_olmc(gal_t *g, int pin, int mode, int active_high,
                       int oe_kind, int oe_row, int nlive, const uint64_t *live);
 void     gal_free(gal_t *g);
 void     gal_power(gal_t *g, int on);
+void     gal_set_race(gal_t *g, uint32_t seed);
 uint32_t gal_io(gal_t *g, uint32_t value);
 
 #endif /* _GALMODEL_H */

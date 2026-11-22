@@ -428,7 +428,8 @@ commit (section 2).
 
 | Message | Meaning |
 |---|---|
-| "the same walk read differently twice on ..." | A pin reads differently on the same inputs. galre goes on to see whether it is an output that oscillates ("trying an output that feeds back inverted"); this is the reason only if one of the next two follows. |
+| "pin N read differently when the same walk is repeated (...), but the same every time when one input changes at a time" | Where a step changes several inputs, they reach the chip in another order each time, and a latch takes that differently. Not a fault: galre goes on with the latch analyses, which change one input at a time. If no circuit of latches explains the chip, it reads every vector many times, in case an output oscillates at few inputs. |
+| "the same walk read differently twice on ..." | A pin reads differently on the same inputs, also when one input changes at a time. galre goes on to see whether it is an output that oscillates ("trying an output that feeds back inverted"); this is the reason only if one of the next two follows. |
 | "pin N reads unsteadily at ... input vectors, and settles at ... of them in another walk order" | Not an oscillator, which fails to settle at the same inputs every time: a bad contact in the socket or a floating pin. Reseat the chip. |
 | "pin N settles at ..., but high in one walk order and low in another: the chip holds state as well as oscillating" | An oscillating output together with latches or registers, which galre does not model. |
 | "... is 1 once and 0 once: not a circuit of latches on those pins" | Not latches alone. galre goes on to try registers and latches together; this is the reason only if that fails too. |

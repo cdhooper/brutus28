@@ -71,8 +71,13 @@ class SocketDevice:
     a hundred times faster, but power() and io() are then not called, so
     the counters and writes below stay as they are."""
 
-    def __init__(self, jed, socket, fast=False):
+    def __init__(self, jed, socket, fast=False, race=0):
         self.fast = fast
+        self.race = race             # not 0: the pins that one port write changes arrive one
+                                     # after the other, in an order that this seed decides and
+                                     # that differs from write to write, as on a board, where
+                                     # every pin has its own 1K, capacitance and threshold.
+                                     # It runs on over power cycles.
         self._cgal = None
         self.g = GAL(jed)
         npins, vcc, gnd, smap = SOCKETS[socket]
@@ -118,9 +123,10 @@ class SocketDevice:
         self.writes.append(value)
         if self.transients:
             done = 0
-            for g in PORT_GROUPS[:-1]:
+            for g in PORT_GROUPS:
                 done |= g
                 mid = (value & done) | (self.last & ~done)
+                self._arrive(mid)
                 if mid != self.last and mid != value:
                     self._apply(mid)
         levels = self._apply(value)
@@ -138,6 +144,20 @@ class SocketDevice:
                 out |= self.sbit[p]
         return out
 
+
+    def _arrive(self, mid):
+        """Go from the value last applied to mid, which differs in the pins
+        of one port write: all but the last pin one at a time, if the pins
+        race."""
+        diff = mid ^ self.last
+        while self.race and diff & (diff - 1):
+            self.race = (self.race * 1664525 + 1013904223) & 0xffffffff
+            d = diff
+            for _ in range((self.race >> 16) % bin(diff).count("1")):
+                d &= d - 1
+            d &= -d
+            diff ^= d
+            self._apply(self.last ^ d)
 
     def _apply(self, value):
         self.last = value
@@ -184,6 +204,8 @@ class SocketDevice:
             lib.gal_free.argtypes = [ctypes.c_void_p]
             self._cgal = ctypes.c_void_p(c)
             self._lib = lib
+            lib.gal_set_race.argtypes = [ctypes.c_void_p, u32]
+            lib.gal_set_race(self._cgal, self.race)
         return self._cgal
 
     def __del__(self):

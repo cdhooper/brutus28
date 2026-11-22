@@ -61,6 +61,7 @@ struct gal {
     int      powered;
     uint32_t last;                      /* the socket value last applied */
     uint32_t noise;                     /* for the level read of a pin that oscillates */
+    uint32_t race;                      /* not 0: pins of one write arrive in any order */
 };
 
 static uint64_t
@@ -332,12 +333,48 @@ gal_power(gal_t *g, int on)
     }
 }
 
+/* SocketDevice.race: with a seed (not 0), the pins that one port write
+ * changes arrive one after the other, in an order that the seed decides
+ * and that differs from write to write, as on a board, where every pin
+ * has its own 1K, capacitance and threshold.  The seed runs on over
+ * power cycles. */
+void
+gal_set_race(gal_t *g, uint32_t seed)
+{
+    g->race = seed;
+}
+
+/* SocketDevice._arrive: go from the value last applied to mid, which
+ * differs in the pins of one port write; all but the last pin one at a
+ * time, if the pins race */
+static void
+gal_arrive(gal_t *g, uint32_t mid)
+{
+    uint32_t diff = mid ^ g->last;
+
+    while (g->race && (diff & (diff - 1))) {
+        uint32_t d = diff;
+        unsigned n = 0;
+        unsigned k;
+
+        for (d = diff; d != 0; d &= d - 1)
+            n++;
+        g->race = g->race * 1664525U + 1013904223U;
+        k = (g->race >> 16) % n;
+        for (d = diff; k != 0; k--)
+            d &= d - 1;
+        d &= -d;
+        diff ^= d;
+        (void) gal_apply_socket(g, g->last ^ d, 0);
+    }
+}
+
 /* SocketDevice.io: one write of the 28 socket pins (three port writes,
  * CAP_PORT_GROUPS), then the read */
 uint32_t
 gal_io(gal_t *g, uint32_t value)
 {
-    static const uint32_t groups[] = { 0x000ffff, 0x0ff0000 };
+    static const uint32_t groups[] = { 0x000ffff, 0x0ff0000, 0xf000000 };
     uint32_t done = 0;
     unsigned i;
 
@@ -349,6 +386,7 @@ gal_io(gal_t *g, uint32_t value)
 
             done |= groups[i];
             mid = (value & done) | (g->last & ~done);
+            gal_arrive(g, mid);
             if ((mid != g->last) && (mid != value))
                 (void) gal_apply_socket(g, mid, 0);
         }

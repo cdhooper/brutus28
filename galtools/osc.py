@@ -48,7 +48,7 @@ to swing at all; that pin then reads as a level, and nothing shows it.
 import math
 import textwrap
 
-from analysis import HOW, AsyncDesign, sop, _pins
+from analysis import HOW, AsyncDesign, Settles, sop, _pins
 from bitsim import litmasks
 from latch import LatchAnalysis, _Walk
 from rig import popcount
@@ -125,6 +125,9 @@ class OscAnalysis(LatchAnalysis):
             if len(per[self.outputs[0]]) == orders:
                 # An oscillator fails to settle at the same inputs every time
                 orders = self._orders_needed(un, per, log)
+        if not any(un.values()):
+            raise Settles("a walk read differently twice, but walked one input at a time "
+                          "every pin settles: several inputs changing at once matter")
         for p in self.outputs:
             hi[p] &= ~un[p]
             lo[p] &= ~un[p]
@@ -152,9 +155,6 @@ class OscAnalysis(LatchAnalysis):
         self.walks = [_Walk(c, [], {}) for c in orders]
         n = self.n
         unsteady = [p for p in self.outputs if un[p]]
-        if not unsteady:
-            raise AsyncDesign("a walk read differently twice, but walked one input at a time "
-                              "every pin settles: several inputs changing at once matter")
         # the loop pins: unsteady at more vectors than any pin that is unsteady with them
         loops = []
         for p in unsteady:

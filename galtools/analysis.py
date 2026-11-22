@@ -66,11 +66,15 @@ class Limit(RuntimeError):
 class LatchSuspected(AsyncDesign):
     """The power-up walk depends on its order, as latches built from
     combinational feedback make it (latch.LatchAnalysis takes over).
-    pins: those that read differently."""
+    pins: those that read differently.  raced: the same walk also read
+    differently twice, but a walk that changes one input at a time did
+    not: the inputs that one step changes reach the chip in an order
+    that differs from time to time."""
 
-    def __init__(self, message, pins=()):
+    def __init__(self, message, pins=(), raced=False):
         super().__init__(message)
         self.pins = tuple(pins)
+        self.raced = raced
 
 
 class Unsteady(AsyncDesign):
@@ -80,6 +84,11 @@ class Unsteady(AsyncDesign):
     def __init__(self, msg, pins=()):
         super().__init__(msg)
         self.pins = list(pins)
+
+
+class Settles(AsyncDesign):
+    """Read many times, one input changing at a time, every pin settles:
+    no output oscillates (osc.OscAnalysis)."""
 
 
 class _Restart(Exception):
@@ -533,9 +542,31 @@ class Analysis:
         unsteady = sorted(p for p in la if p not in self.hist
                           and (la[p] ^ la3[p]) | (lb[p] ^ lb3[p]))
         if unsteady:
-            raise Unsteady("the same walk read differently twice on %s: a bad contact, "
-                           "a floating pin or an oscillating output" % _pins(unsteady),
-                           unsteady)
+            # Counting order changes several inputs in one step.  On a
+            # board each of them has its own 1K, capacitance and threshold,
+            # and a rising pin crosses the threshold at another time than a
+            # falling one: where a latch holds or lets go by which of two
+            # inputs it sees first, it does so differently from time to
+            # time.  One input at a time, such a chip reads the same every
+            # time; a pin that oscillates or has no contact does not.
+            ga, gb, _ = self.rig.walk(V, self.base, [], gray=1)
+            ga2, gb2, _ = self.rig.walk(V, self.base, [], gray=1)
+            if any((ga[p] ^ ga2[p]) | (gb[p] ^ gb2[p]) for p in la if p not in self.hist):
+                raise Unsteady("the same walk read differently twice on %s: a bad contact, "
+                               "a floating pin or an oscillating output" % _pins(unsteady),
+                               unsteady)
+            xs = reduce(lambda a, b: a | b,
+                        ((la[p] ^ la3[p]) | (lb[p] ^ lb3[p]) for p in unsteady))
+            x = lowest(xs)
+            raise LatchSuspected(
+                "%s read differently when the same walk is repeated (%d of %d input vectors, "
+                "the first %s), but the same every time when one input changes at a time: "
+                "where several inputs change in one step, the chip sees them in another "
+                "order each time, and holds state without a clock, like a latch built from "
+                "combinational feedback" % (
+                    _pins(unsteady), popcount(xs), 1 << n,
+                    " ".join("P%d=%d" % (p, x >> i & 1) for i, p in enumerate(V))),
+                pins=sorted(pins | set(unsteady)), raced=True)
         xs = reduce(lambda a, b: a | b, diff.values())
         x = lowest(xs)
         raise LatchSuspected(

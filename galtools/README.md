@@ -175,6 +175,19 @@ turn these off.
    changes slowest), and both. A clocked chip reads the same in every
    order. One that does not holds state without a clock, and galre models
    it as latches (see Latches).
+
+   On a board such a chip may also read differently when the same walk
+   is repeated. Counting order changes several inputs in one step, every
+   pin has its own 1K, capacitance and threshold, and a rising pin
+   crosses the threshold at another time than a falling one. A real
+   GAL16V8 with `designs/oelatch16v8` in it (`L = S # L & R`) dropped L
+   in about one of three steps in which S fell while R rose, and kept it
+   in the others. galre then walks one input at a time, twice. If that
+   reads the same both times, the chip has latches, and neither a bad
+   contact nor an output that does not settle; the latch analyses change
+   one input at a time throughout. `sim --race SEED` simulates such a
+   chip: the inputs of one step arrive one after the other, in an order
+   that differs from time to time.
 2. **States.** A state is the value or Z of each candidate. It is read
    through probe vectors: for each candidate, one input vector that enables
    it, taken from the walks. Each probe is read once as driven, then once

@@ -615,6 +615,41 @@ class SimulatedChip(unittest.TestCase):
         self.assertIn("trying an output that feeds back inverted: where does each pin settle?",
                       logs)
 
+    def test_inputs_of_one_step_race(self):
+        """On a board every pin has its own 1K, capacitance and threshold:
+        where a step changes several inputs, the chip sees them one after
+        the other, in an order that differs from time to time.  A real
+        GAL16V8 with oelatch16v8 in it (L = S # L & R) kept L in two
+        steps of three in which S fell and R rose, so the same walk read
+        differently twice.  One input at a time it reads the same every
+        time: latches, and no bad contact."""
+        from analysis import Unsteady
+        for name, device, fix, eqs in (
+                ("oelatch16v8", "GAL16V8", OELATCH[0], OELATCH[1]),
+                ("latch16v8", "GAL16V8", LATCH_CASES["latch16v8"][1], None),
+                ("chain16v8", "GAL16V8", MIXED_CASES["chain16v8"][1], None)):
+            with self.subTest(design=name):
+                fixed = galre.parse_fixed(fix)
+                plain = galre.analyse(SimRig(jed(name)), device, fixed=fixed, log=quiet)
+                logs = []
+                a = galre.analyse(SimRig(jed(name), race=1), device, fixed=fixed,
+                                  log=logs.append)
+                self.assertRegex(
+                    logs[0], r"^asynchronous behaviour: pins? [\d, ]+ read differently when the "
+                    r"same walk is repeated \(\d+ of \d+ input vectors, the first .*\), but "
+                    r"the same every time when one input changes at a time: ")
+                self.assertIs(type(a), type(plain))
+                got = {(p, kind): "!" * inv + expr for p, kind, inv, expr, _ in a.eqs}
+                self.assertEqual(got, {(p, kind): "!" * inv + expr
+                                       for p, kind, inv, expr, _ in plain.eqs})
+                if eqs:
+                    self.assertEqual(got, eqs)
+                self.assertEqual(verify.check_captures(a, jed(name)), [])
+        # a pin that reads wrong now and then does so one input at a time too
+        rig = OddReads(SimRig(jed("comb16v8"), race=1), 19, 0.01)
+        with self.assertRaises(Unsteady):
+            Analysis(rig, "GAL16V8", fixed=galre.parse_fixed("11-16=0"), log=quiet).run()
+
     def test_edge_detector_from_an_output_delay(self):
         """Pin 16 is a copy of pin 4, a gate delay late, and pin 17 is set
         by !P4 & P16: a flip-flop clocked by the falling edge of pin 4.
@@ -1165,9 +1200,11 @@ class Firmware(unittest.TestCase):
         for path in sorted(glob.glob(os.path.join(DESIGNS, "*.jed"))):
             for socket in (["dip20", "plcc20"] if GAL(path).kind == "GAL16V8"
                            else ["dip24", "plcc28"]):
+                # also with the pins of one write arriving in any order
+                race = 5 if socket in ("dip20", "dip24") else 0
                 with self.subTest(design=os.path.basename(path), socket=socket):
-                    dev = fwsim.SocketDevice(path, socket)
-                    cdev = fwsim.SocketDevice(path, socket)
+                    dev = fwsim.SocketDevice(path, socket, race=race)
+                    cdev = fwsim.SocketDevice(path, socket, race=race)
                     c = cdev.cgal(lib)
                     rnd = random.Random(7)
                     bits = [dev.sbit[p] for p in dev.pins]

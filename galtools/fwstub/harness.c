@@ -23,6 +23,8 @@ static unsigned char *out;
 static size_t         out_len;
 static size_t         out_cap;
 static uint32_t       direct_seen;
+static uint32_t       direct_pins;    /* driven by the CPU's pins, without the 1K */
+static uint32_t       last_value;     /* of cap_hw_io since power-up */
 static gal_t         *fast_gal;       /* the chip in C, instead of io_cb / power_cb */
 
 static void
@@ -58,19 +60,33 @@ harness_printf(const char *fmt, ...)
 void
 cap_hw_power(int on)
 {
+    last_value = 0;                      /* the drivers come up low */
     if (fast_gal != NULL)
         gal_power(fast_gal, on);
     else
         power_cb(on);
 }
 
-uint32_t
-cap_hw_io(uint32_t value, uint settle_usec)
+static uint32_t
+harness_io(uint32_t value)
 {
-    (void) settle_usec;
     if (fast_gal != NULL)
         return (gal_io(fast_gal, value));
     return (io_cb(value));
+}
+
+/* As cap_hw_io in fw/pld.c: the directly driven pins are written first,
+ * so the chip sees them change before the pins behind a 1K */
+uint32_t
+cap_hw_io(uint32_t value, uint settle_usec)
+{
+    uint32_t first = (last_value & ~direct_pins) | (value & direct_pins);
+
+    (void) settle_usec;
+    if ((first != last_value) && (first != value))
+        (void) harness_io(first);
+    last_value = value;
+    return (harness_io(value));
 }
 
 /* The chip for the runs that follow: a galmodel.c GAL, or NULL for the
@@ -85,6 +101,7 @@ void
 cap_hw_direct(uint32_t pins)
 {
     direct_seen |= pins;
+    direct_pins = pins;
 }
 
 /* The pins driven directly (dclk) since the last call */

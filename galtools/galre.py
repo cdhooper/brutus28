@@ -26,7 +26,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from analysis import AsyncDesign, LatchSuspected, Limit, Unsteady     # noqa: E402
+from analysis import AsyncDesign, LatchSuspected, Limit, Settles, Unsteady     # noqa: E402
 from capture import CaptureError, SerialTransport          # noqa: E402
 from latch import LatchAnalysis                            # noqa: E402
 from osc import OscAnalysis                                # noqa: E402
@@ -56,22 +56,44 @@ def analyse(rig, device, fixed=None, survey=64, log=print, max_states=1024):
     except LatchSuspected as e:
         log("asynchronous behaviour: %s" % e)
         log("trying latches built from combinational feedback")
-        b = LatchAnalysis(rig, device, fixed=fixed, log=log, walk0=a.walk0)
         try:
-            b.run()
-            return b
+            return _latches(rig, device, fixed, survey, log, max_states, a, e)
         except AsyncDesign as e2:
-            if 1 in (fixed or {}):
-                raise                     # pin 1 is held: no walks with it
-            log("not latches alone: %s" % e2)
-            log("trying registers and latches together")
-            c = RegLatchAnalysis(rig, device, fixed=fixed, survey=survey, log=log, hist=e.pins,
-                                 max_states=max_states)
+            if not e.raced:
+                raise
+            # Two walks, one input at a time, read the same; an output that
+            # oscillates at few inputs, or is seldom at one of its levels,
+            # can do that too.  Reading every vector many times tells.
+            log("no circuit of latches: %s" % e2)
+            log("the same walk had read differently twice: is it an output that feeds back "
+                "inverted?  Where does each pin settle?")
+            b = OscAnalysis(rig, device, fixed=fixed, log=log, walk0=a.walk0)
             try:
-                c.run()
-            except LatchSuspected:
+                b.run()
+            except Settles:
+                log("no: read many times, every pin settles")
                 raise e2 from None
-            return c
+            return b
+
+
+def _latches(rig, device, fixed, survey, log, max_states, a, e):
+    """Latches alone, then registers and latches together."""
+    b = LatchAnalysis(rig, device, fixed=fixed, log=log, walk0=a.walk0)
+    try:
+        b.run()
+        return b
+    except AsyncDesign as e2:
+        if 1 in (fixed or {}):
+            raise                     # pin 1 is held: no walks with it
+        log("not latches alone: %s" % e2)
+        log("trying registers and latches together")
+        c = RegLatchAnalysis(rig, device, fixed=fixed, survey=survey, log=log, hist=e.pins,
+                             max_states=max_states)
+        try:
+            c.run()
+        except LatchSuspected:
+            raise e2 from None
+        return c
 
 
 def parse_fixed(text):
@@ -146,6 +168,10 @@ def main(argv=None):
     ap.add_argument("--max-states", type=int, default=1024,
                     help="give up beyond this many states (default 1024)")
     ap.add_argument("--settle", type=int, default=1, help="usec after each write")
+    ap.add_argument("--race", type=int, default=0, metavar="SEED",
+                    help="sim: the inputs that one step changes reach the chip one after the "
+                         "other, in an order that differs from time to time, as on a board "
+                         "(a seed, not 0; for designs with latches)")
     ap.add_argument("--off", type=int, default=20, help="msec power off per power cycle")
     ap.add_argument("--on", type=int, default=2, help="msec after power on")
     ap.add_argument("--no-jumper-check", action="store_true",
@@ -176,7 +202,7 @@ def main(argv=None):
         fixed = parse_fixed(args.fix)
         survey = 64 if args.survey is None else args.survey
         if args.mode == "sim":
-            rig = SimRig(args.source, args.off, args.on)
+            rig = SimRig(args.source, args.off, args.on, race=args.race)
             device = rig.device
         elif args.mode == "replay":
             if not args.source:

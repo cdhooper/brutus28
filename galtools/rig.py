@@ -263,10 +263,16 @@ class SimRig:
     per input vector, which is much faster than the firmware; a walk that
     does trigger the term reads as if it had not, except for the
     signature after the walk.
+
+    race (a seed, not 0): the pins that one port write changes reach the
+    chip one after the other, in an order that differs from write to
+    write, as on a board (fwsim.SocketDevice).  Only a design with
+    asynchronous parts can tell.
     """
 
-    def __init__(self, jed, off_ms=20, on_ms=2, socket=None, careful=False):
+    def __init__(self, jed, off_ms=20, on_ms=2, socket=None, careful=False, race=0):
         self.g = GAL(jed)
+        self.race = race
         self.device = self.g.kind
         self.bits = Bits(self.g)
         self.pins = self.g.signal_pins()
@@ -291,7 +297,7 @@ class SimRig:
             raise RuntimeError("%s has %s: simulating it needs a C compiler" % (
                 jed, " and ".join(self.async_parts) or "pin 1 walked in a registered design"))
         socket = socket or DEFAULT_SOCKET[self.device]
-        self.socket_device = fwsim.SocketDevice(jed, socket, fast=True)
+        self.socket_device = fwsim.SocketDevice(jed, socket, fast=True, race=self.race)
         self.fw = BrutusRig(fwsim.HarnessTransport(lib, self.socket_device), self.device,
                             socket, off_ms=self.off_ms, on_ms=self.on_ms, log=lambda *a: None,
                             jumper_check=False)
