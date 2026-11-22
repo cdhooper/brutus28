@@ -27,13 +27,25 @@ fails to settle at the same inputs every time; a pin that is unsteady at
 other vectors in another order is a bad contact or a floating pin, and
 galre says so.
 
+A pin that toggles is not at both levels equally often.  On a GAL16V8
+(osc16v8, 2026-11) the loop pin read high in 45 of 100 reads, the output
+of the gate behind it in 19.  REPEAT reads of a vector are then all the
+same now and then (there in one walk order of nine), and the vector
+looks settled in that order.  So after the first orders galre
+counts how often that happened and reads as many more as it takes for a
+vector to be unlikely to look settled in all of them (_orders_needed).
+A pin that looks settled in a walk order at more than half of the
+vectors at which it is unsteady in another cannot be told from a bad
+contact, and is refused.
+
 Limits: one loop pin per set of vectors (no ring through several pins);
 no other state (where the pins settle, their levels must be the same in
 every walk order); every output always driven.  The frequency is the
-chip's own.  Not tried on a real chip: a loop of one gate may toggle too
-fast for its pin to swing fully, and then read as a level.
+chip's own.  A loop of one gate may toggle too fast for a pin behind it
+to swing at all; that pin then reads as a level, and nothing shows it.
 """
 
+import math
 import textwrap
 
 from analysis import HOW, AsyncDesign, sop, _pins
@@ -45,17 +57,58 @@ from rig import popcount
 class OscAnalysis(LatchAnalysis):
     REPEAT = 12        # reads of every vector per walk order
     ORDERS = [(0, 0, 0, 0), (0, 1, 0, 0), (0, 0, 0, 1), (0, 0, 0, 2)]
+    MAX_ORDERS = 32    # walk orders at most
+    MISSED = 0.01      # the chance taken that some vector at which a pin does not settle
+                       # reads the same in every walk order
 
-    def _steadiness(self, rig):
+    def _order(self, i):
+        """The i-th walk order: ORDERS, then further mixed Gray codes."""
+        return self.ORDERS[i] if i < len(self.ORDERS) else (0, i & 1, 0, i)
+
+    def _orders_needed(self, un, per, log):
+        """How many walk orders to read, after those in per (per pin, the
+        vectors unsteady in each).  A pin that toggles can be at one of
+        its levels so seldom that REPEAT reads of a vector are all the
+        same now and then.  From the share of its unsteady vectors that
+        looked settled in the worst order, r: after k orders a vector
+        has looked settled in all of them with a chance of r^k.  A share
+        over a half is not an oscillator that reads can pin down, and is
+        what a bad contact looks like: each order then shows other
+        vectors."""
+        need = len(next(iter(per.values())))
+        for p in self.outputs:
+            total = popcount(un[p])
+            if not total:
+                continue
+            miss, d = max((popcount(un[p] & ~d), d) for d in per[p])
+            if miss > 2 + total // 2:
+                x = ((un[p] & ~d) & -(un[p] & ~d)).bit_length() - 1
+                raise AsyncDesign(
+                    "pin %d reads unsteadily at %d input vectors, and settles at %d of them "
+                    "in another walk order (the first: %s): a bad contact or a floating pin "
+                    "rather than an oscillating output" % (p, total, miss, self._inputs(x)))
+            if not miss:
+                continue
+            k = math.ceil(math.log(total / self.MISSED) / -math.log(miss / total))
+            if k > need:
+                log("pin %d looks settled in one walk order at %d of the %d input vectors at "
+                    "which it does not settle (it is seldom at one of its levels): reading "
+                    "%d walk orders, not %d" % (p, miss, total, min(k, self.MAX_ORDERS), need))
+                need = k
+        return min(need, self.MAX_ORDERS)
+
+    def _steadiness(self, rig, log=lambda msg: None):
         """Per output: (settles high, settles low, does not settle), as
         bitsets over the input vectors, from every walk order read
-        REPEAT times."""
+        REPEAT times; and the walk orders read."""
         N = (1 << (1 << self.n)) - 1
         hi = {p: 0 for p in self.outputs}
         lo = {p: 0 for p in self.outputs}
         un = {p: 0 for p in self.outputs}
         per = {p: [] for p in self.outputs}
-        for rot, rev, start, mix in self.ORDERS:
+        orders = len(self.ORDERS)
+        while len(per[self.outputs[0]]) < orders:
+            rot, rev, start, mix = self._order(len(per[self.outputs[0]]))
             first, differ = None, {p: 0 for p in self.outputs}
             for _ in range(self.REPEAT):
                 la, _, _ = rig.walk(self.V, self.wbase, [], gray=1, rot=rot, rev=rev,
@@ -69,18 +122,9 @@ class OscAnalysis(LatchAnalysis):
                 un[p] |= differ[p]
                 hi[p] |= first[p] & ~differ[p] & N
                 lo[p] |= ~first[p] & ~differ[p] & N
-        for p in self.outputs:
-            # An oscillator fails to settle at the same inputs every time.  A
-            # vector at which it happens to read the same REPEAT times is rare
-            # (one in 2^(REPEAT-1)); more than a few of those is something else.
-            for d in per[p]:
-                miss = popcount(d ^ un[p])
-                if miss > 2 + popcount(un[p]) // 16:
-                    x = ((d ^ un[p]) & -(d ^ un[p])).bit_length() - 1
-                    raise AsyncDesign(
-                        "pin %d reads unsteadily at %d input vectors in one walk order and "
-                        "not in another (the first: %s): a bad contact or a floating pin "
-                        "rather than an oscillating output" % (p, miss, self._inputs(x)))
+            if len(per[self.outputs[0]]) == orders:
+                # An oscillator fails to settle at the same inputs every time
+                orders = self._orders_needed(un, per, log)
         for p in self.outputs:
             hi[p] &= ~un[p]
             lo[p] &= ~un[p]
@@ -99,12 +143,13 @@ class OscAnalysis(LatchAnalysis):
         if tri:
             raise AsyncDesign("outputs %s are not always driven, which the model of outputs "
                               "that do not settle does not cover" % tri)
-        return hi, lo, un
+        return hi, lo, un, [self._order(i) for i in range(orders)]
 
     def run(self):
         self.roles()
-        self.hi, self.lo, self.un = hi, lo, un = self._steadiness(self.rig)
-        self.walks = [_Walk(c, [], {}) for c in self.ORDERS]
+        self.hi, self.lo, self.un, orders = self._steadiness(self.rig, self.log)
+        hi, lo, un = self.hi, self.lo, self.un
+        self.walks = [_Walk(c, [], {}) for c in orders]
         n = self.n
         unsteady = [p for p in self.outputs if un[p]]
         if not unsteady:
@@ -242,7 +287,7 @@ class OscAnalysis(LatchAnalysis):
         settle at the same vectors, at the same levels."""
         from rig import SimRig
         try:
-            hi, lo, un = self._steadiness(SimRig(jed))
+            hi, lo, un, _ = self._steadiness(SimRig(jed))
         except AsyncDesign as e:
             return [("the rebuilt chip", str(e))]
         bad = []

@@ -216,6 +216,40 @@ def quiet(*_):
     pass
 
 
+class OddReads:
+    """A rig with the reads of one pin changed.  With where (pin levels),
+    the pin is high in share of the reads at those inputs: a pin that
+    toggles and is seldom high.  Without, share of all its reads are
+    wrong: a bad contact."""
+
+    def __init__(self, rig, pin, share, where=None):
+        import random
+        self.rig, self.pin, self.share, self.where = rig, pin, share, where
+        self.rnd = random.Random(5)
+        self.pins, self.device, self.ops = rig.pins, rig.device, rig.ops
+
+    def __getattr__(self, name):
+        return getattr(self.rig, name)
+
+    def walk(self, V, base, path, **kw):
+        la, lb, sigs = self.rig.walk(V, base, path, **kw)
+        if la is None:
+            return la, lb, sigs
+        la, lb = dict(la), dict(lb)
+        for x in range(1 << len(V)):
+            if self.where is not None and any(
+                    (x >> V.index(p) & 1 if p in V else base.get(p, 0)) != v
+                    for p, v in self.where.items()):
+                continue
+            for reads in (la, lb):
+                if self.where is None:
+                    reads[self.pin] ^= (self.rnd.random() < self.share) << x
+                else:
+                    reads[self.pin] = (reads[self.pin] & ~(1 << x)
+                                       | (self.rnd.random() < self.share) << x)
+        return la, lb, sigs
+
+
 class SimulatedChip(unittest.TestCase):
     def test_designs(self):
         for name, (device, nstates, regs, _) in CASES.items():
@@ -546,6 +580,40 @@ class SimulatedChip(unittest.TestCase):
         self.assertIn("/* P17 is taken to follow P18 where that does not settle;", src)
         # another chip does not settle at the same vectors
         self.assertTrue(verify.check_captures(a, jed("oscstate16v8")))
+
+    def test_pin_seldom_high_while_it_toggles(self):
+        """On a real GAL16V8 the output behind the oscillating pin was
+        high in a fifth of the reads: twelve reads of a vector are then
+        all low now and then, and the vector looks settled in that walk
+        order.  galre counts how often, and reads more walk orders."""
+        fix, eqs = "11-16=0,19=0", OSC[1]
+        logs = []
+        rig = OddReads(SimRig(jed("osc16v8")), 17, 0.15, {2: 1, 3: 0, 4: 1})
+        a = galre.analyse(rig, "GAL16V8", fixed=galre.parse_fixed(fix), log=logs.append)
+        more = [l for l in logs if l.startswith("pin 17 looks settled in one walk order at ")]
+        self.assertEqual(len(more), 1, logs)
+        self.assertRegex(more[0], r"of the 64 input vectors at which it does not settle \(it is "
+                         r"seldom at one of its levels\): reading \d+ walk orders, not 4$")
+        self.assertGreater(len(a.walks), 4)
+        self.assertEqual(bin(a.un[18]).count("1"), 128)  # EN & !STOP, of 512 vectors
+        self.assertEqual(bin(a.un[17]).count("1"), 64)   # and A: none looked settled throughout
+        self.assertEqual({p: "!" * inv + expr for p, _, inv, expr, _ in a.eqs}, eqs)
+        self.assertEqual(verify.check_captures(a, jed("osc16v8")), [])
+
+    def test_bad_contact_is_not_an_oscillator(self):
+        """A pin that reads wrong now and then is unsteady at other
+        vectors in every walk order."""
+        from analysis import AsyncDesign
+        rig = OddReads(SimRig(jed("comb16v8")), 19, 0.01)
+        logs = []
+        with self.assertRaises(AsyncDesign) as e:
+            galre.analyse(rig, "GAL16V8", fixed=galre.parse_fixed("11-16=0"), log=logs.append)
+        self.assertRegex(str(e.exception),
+                         r"^pin 19 reads unsteadily at \d+ input vectors, and settles at \d+ of "
+                         r"them in another walk order \(the first: .*\): a bad contact or a "
+                         r"floating pin rather than an oscillating output$")
+        self.assertIn("trying an output that feeds back inverted: where does each pin settle?",
+                      logs)
 
     def test_edge_detector_from_an_output_delay(self):
         """Pin 16 is a copy of pin 4, a gate delay late, and pin 17 is set

@@ -386,8 +386,9 @@ a pin that does not settle reads an arbitrary level at every read.
 
 Where a pin does not settle is itself what there is to learn. When the
 power-up walk reads differently twice, galre (`osc.py`) reads every
-vector twelve times in each of four walk orders, which says for every
-output and every vector whether it settles there, and at which level:
+vector twelve times in each of four walk orders or more, which says for
+every output and every vector whether it settles there, and at which
+level:
 
 - A pin that does not settle at a vector can only be the complement of
   itself there: its equation is 1 with the pin low and 0 with it high.
@@ -409,9 +410,23 @@ is unsteady at other vectors in another walk order is a bad contact or
 a floating pin, and galre says that instead. It also stops when the chip
 holds state as well (`designs/oscstate16v8`), at a ring through several
 pins, and at outputs that are not always driven. The frequency is the
-chip's own. This has not been tried on a real chip: a loop of one gate
-may toggle too fast for its pin to swing fully, and then read as a
-level.
+chip's own.
+
+A pin that toggles is not at both levels equally often. On a real
+GAL16V8 with `designs/osc16v8` in it, the oscillating pin read high in
+45 of 100 reads, and the output of the gate behind it in 19. Twelve
+reads of a vector are then all low now and then, in one walk order of
+nine there, and the vector looks settled in that order. After the first
+four orders galre counts how often that happened, and reads as many
+more as it takes for a vector to be unlikely to look settled in all of
+them (seven for that chip). If a pin looks settled in one walk order at
+more than half of the vectors at which it is unsteady in another, reads
+cannot tell it from a bad contact, and galre stops. Both runs of that
+chip, with the unused pins held and with none held, give the source of
+`designs/osc16v8`.
+
+What reads cannot show: a loop that toggles too fast for a pin behind
+it to swing at all. That pin reads as a level, and comes out as one.
 
 ### Registers and latches together
 
