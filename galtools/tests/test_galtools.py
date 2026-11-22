@@ -891,6 +891,55 @@ class SimulatedChip(unittest.TestCase):
         finally:
             shutil.rmtree(out)
 
+    def test_sweep_that_reads_wrongly_now_and_then(self):
+        """On a board every sweep of clock edges is run twice, and five
+        times where the two differ: an input vector leads where most of
+        the sweeps said.  One wrong reading would otherwise pass for the
+        chip's logic, or for a latch."""
+        fix = galre.parse_fixed("6-11=0,14-19=0,23=0")
+
+        class Flaky:
+            """Every third sweep takes one input vector to another state
+            than the chip does."""
+
+            def __init__(self, twice):
+                self.rig = SimRig(jed("lowreg22v10"))
+                self.pins, self.device, self.ops = self.rig.pins, self.rig.device, self.rig.ops
+                self.walk = self.rig.walk
+                self.twice, self.sweeps = twice, 0
+
+            def transitions(self, *args, **kw):
+                res = self.rig.transitions(*args, **kw)
+                self.sweeps += 1
+                out = dict(res[0])
+                if self.sweeps % 3 == 0 and len(out) > 1:
+                    (o1, x1), (o2, x2) = list(out.items())[:2]
+                    x = x1 & -x1
+                    out[o1], out[o2] = x1 ^ x, x2 | x
+                    if not out[o1]:
+                        del out[o1]
+                return (out,) + tuple(res[1:])
+
+        logs = []
+        a = galre.analyse(Flaky(True), "GAL22V10", fixed=fix, survey=16, log=logs.append)
+        self.assertEqual(sorted(a.reg), [20, 21, 22])
+        self.assertEqual(verify.check_captures(a, jed("lowreg22v10")), [])
+        self.assertGreater(a.unsteady[0], 0)
+        self.assertTrue(any("does not answer the same every time" in line and
+                            "in 5 sweeps of the same vectors" in line for line in logs))
+        self.assertIn("did not answer every clock edge the same way", a.cupl("t"))
+        good = galre.analyse(SimRig(jed("lowreg22v10")), "GAL22V10", fixed=fix, survey=16,
+                             log=quiet)
+        self.assertEqual(a.trans, good.trans)
+        self.assertEqual(good.unsteady, [0, 0])
+        self.assertNotIn("did not answer", good.cupl("t"))
+        # asked once, the wrong readings are the chip
+        try:
+            b = galre.analyse(Flaky(False), "GAL22V10", fixed=fix, survey=16, log=quiet)
+        except (AsyncDesign, Limit):
+            b = None
+        self.assertTrue(b is None or b.trans != good.trans)
+
 
 class Firmware(unittest.TestCase):
     """fw/capture.c on the host, a simulated GAL in the socket."""
@@ -1763,6 +1812,31 @@ class Firmware(unittest.TestCase):
         self.assertTrue(BrutusRig(self.transport("fsm22v10", "dip24"), "GAL22V10",
                                   log=quiet).metadata()["serial"])
 
+    def test_job_that_lost_its_state_runs_again(self):
+        """The firmware gives a job up when two power cycles and the same
+        clocks do not lead back to its state.  A chip that reads wrongly
+        now and then does that: the job is run again, twice at most."""
+        t = self.transport("fsm22v10", "dip24")
+        capture, lost = t.capture, [1]
+
+        def run(line):
+            cap = capture(line)
+            if lost[0]:
+                lost[0] -= 1
+                cap.status = 3
+            return cap
+        t.capture = run
+        logs = []
+        rig = BrutusRig(t, "GAL22V10", log=logs.append)
+        first = rig.walk([2, 3], {}, [])
+        self.assertEqual(sum("running the job again" in line for line in logs), 1)
+        self.assertEqual(rig.walk([2, 3], {}, []), first)
+        lost[0] = 3
+        with self.assertRaises(CaptureError) as e:
+            rig.walk([2, 3], {}, [])
+        self.assertIn("could not get back to the path state", str(e.exception))
+        self.assertEqual(lost[0], 0)
+
     def test_inputs_that_fall_with_the_enable(self):
         """A chip that now and then loses the state of its registers when
         the pin that enables its outputs falls in one write with other
@@ -1774,10 +1848,11 @@ class Firmware(unittest.TestCase):
             a = galre.analyse(SimRig(jed("lowreg22v10"), glitch=seed), "GAL22V10", fixed=fix,
                               survey=16, log=quiet)
             self.assertEqual(sorted(a.reg), [20, 21, 22])
+            self.assertEqual(a.unsteady, [0, 0])
             self.assertEqual(verify.check_captures(a, jed("lowreg22v10")), [])
         good = a.trans
         try:
-            b = galre.analyse(SimRig(jed("lowreg22v10"), glitch=1, serial=False),
+            b = galre.analyse(SimRig(jed("lowreg22v10"), glitch=1, serial=False, twice=False),
                               "GAL22V10", fixed=fix, survey=16, log=quiet)
         except (AsyncDesign, Limit):
             b = None

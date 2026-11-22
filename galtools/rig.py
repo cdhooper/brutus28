@@ -272,14 +272,17 @@ class SimRig:
     glitch (a seed, not 0): the chip now and then loses the state of its
     registers when the pin that enables its outputs falls in one write
     with other inputs (fwsim.SocketDevice).  serial: the firmware changes
-    one pin per write (BrutusRig), so that this cannot happen.
+    one pin per write (BrutusRig), so that this cannot happen.  twice: the
+    analysis runs every sweep twice, as on a board (Analysis._trans); by
+    default it does for a chip with a glitch.
     """
 
     def __init__(self, jed, off_ms=20, on_ms=2, socket=None, careful=False, race=0,
-                 glitch=0, serial=True):
+                 glitch=0, serial=True, twice=None):
         self.g = GAL(jed)
         self.race = race
         self.glitch, self.serial = glitch, serial
+        self.twice = bool(glitch) if twice is None else bool(twice)
         self.device = self.g.kind
         self.bits = Bits(self.g)
         self.pins = self.g.signal_pins()
@@ -508,7 +511,8 @@ class BrutusRig:
     """
 
     def __init__(self, transport, device, socket=None, settle_us=1, off_ms=20,
-                 on_ms=2, log=print, jumper_check=True, follow=True, dclk=True, serial=True):
+                 on_ms=2, log=print, jumper_check=True, follow=True, dclk=True, serial=True,
+                 twice=True):
         self.socket = socket or DEFAULT_SOCKET[device]
         npins, vcc, gnd, smap = SOCKETS[self.socket]
         if npins != PACKAGE[device][0]:
@@ -520,6 +524,7 @@ class BrutusRig:
         # every write changes one pin (firmware with ser=); None once the
         # firmware turned out to be older
         self.serial = serial
+        self.twice = twice           # the analysis runs every sweep twice (Analysis._trans)
         self.pins = [p for p in range(1, npins + 1) if p not in (vcc, gnd)]
         self.sbit = {p: 1 << (smap(p) - 1) for p in range(1, npins + 1)}
         # the device's VCC and GND pins, and the rails as the jobs name them
@@ -624,6 +629,7 @@ class BrutusRig:
         meta = {"device": self.device, "socket": self.socket, "settle_us": self.settle_us,
                 "off_ms": self.off_ms, "on_ms": self.on_ms, "jumper_check": self.jumper_check,
                 "follow": self.follow, "dclk": self.dclk, "serial": bool(self.serial),
+                "twice": bool(self.twice),
                 "firmware": self.t.command("version").strip()}
         if self.detected:
             vcc, gnd, mv = self.detected
@@ -711,27 +717,40 @@ class BrutusRig:
                 self._cmd("pld capture ret %08x %s" % (crc, " ".join("%x" % self._vec(d) for d in drives)))
                 nret += 1
 
+    LOST = 3                     # status: could not get back to the path state
+    RERUNS = 2                   # times a job with that status is run again
+
     def _run(self, what):
-        for attempt in range(4):
-            try:
-                cap = self.t.capture("pld capture " + what)
+        for again in range(self.RERUNS + 1):
+            for attempt in range(4):
+                try:
+                    cap = self.t.capture("pld capture " + what)
+                    break
+                except CaptureError as e:
+                    # rails on pins that are no pins of the device: see preflight
+                    m = re.search(r"preflight: jumpers vcc=([0-9a-fA-F]+) gnd=([0-9a-fA-F]+), "
+                                  r"job expects", str(e))
+                    if not m or attempt == 3 or not self.jumper_check:
+                        raise
+                    vcc, gnd = int(m.group(1), 16), int(m.group(2), 16)
+                    if not self._spare_rails(vcc, gnd):
+                        raise
+                    self.vcc_bit, self.gnd_bit = vcc, gnd
+                    self._cmd("pld capture set vcc=%x gnd=%x" % (vcc, gnd))
+            self.ops["runs"] += 1
+            self.ops["power_cycles"] += 1 + cap.power_cycles
+            self.ops["ret_ok"] += cap.ret_ok
+            self.ops["ret_fail"] += cap.ret_fail
+            self.ops["bytes"] += len(cap.data)
+            if cap.status != self.LOST or again == self.RERUNS:
                 break
-            except CaptureError as e:
-                # rails on pins that are no pins of the device: see preflight
-                m = re.search(r"preflight: jumpers vcc=([0-9a-fA-F]+) gnd=([0-9a-fA-F]+), "
-                              r"job expects", str(e))
-                if not m or attempt == 3 or not self.jumper_check:
-                    raise
-                vcc, gnd = int(m.group(1), 16), int(m.group(2), 16)
-                if not self._spare_rails(vcc, gnd):
-                    raise
-                self.vcc_bit, self.gnd_bit = vcc, gnd
-                self._cmd("pld capture set vcc=%x gnd=%x" % (vcc, gnd))
-        self.ops["runs"] += 1
-        self.ops["power_cycles"] += 1 + cap.power_cycles
-        self.ops["ret_ok"] += cap.ret_ok
-        self.ops["ret_fail"] += cap.ret_fail
-        self.ops["bytes"] += len(cap.data)
+            # The same clocks from power-up led to another state than at the
+            # start of the job, twice.  A chip that reads wrongly now and
+            # then does that; one that has state no pin shows does it every
+            # time, and the job fails as before.
+            self.log("%s: two power cycles and the same clocks did not lead back to the "
+                     "state the job started from (vector %d of %d); running the job again" % (
+                         what, cap.done, cap.count))
         if cap.status != 0:
             raise CaptureError("pld capture %s: %s" % (what, STATUS.get(cap.status, cap.status)))
         if cap.done != cap.count:
@@ -918,6 +937,7 @@ class RecordingRig:
     def __init__(self, rig, path, meta=None):
         self.rig, self.f = rig, open(path, "w")
         self.pins, self.device, self.ops = rig.pins, rig.device, rig.ops
+        self.twice = getattr(rig, "twice", False)
         if meta:
             self.f.write(json.dumps({"meta": meta}) + "\n")
             self.f.flush()
@@ -977,6 +997,8 @@ class ReplayRig:
                 else:
                     self.db.setdefault(rec["key"], []).append(rec)
         self.device = device or self.meta.get("device")
+        # the analysis asks as it did when the recording was made
+        self.twice = bool(self.meta.get("twice"))
         if self.device not in PACKAGE:
             raise CaptureError("%s does not name the device; give it" % path)
         self.pins = [p for p in range(1, PACKAGE[self.device][0] + 1)

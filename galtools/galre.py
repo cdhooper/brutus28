@@ -127,6 +127,8 @@ def describe(meta):
             "clock driven directly" if meta["dclk"] else "clock through 1K",
             "" if "serial" not in meta else
             ", one pin per write" if meta["serial"] else ", several pins per write"))
+    if "twice" in meta:
+        lines.append("sweeps of clock edges: run %s" % ("twice" if meta["twice"] else "once"))
     j = meta.get("jumpers")
     if j:
         lines.append("jumpers: VCC on socket %s, GND on socket %s, supply %s mV" % (
@@ -213,6 +215,12 @@ def main(argv=None):
                     help="change all pins of a vector in one write, not one pin per write "
                          "(board; pins that change in one write reach the chip in no "
                          "certain order)")
+    ap.add_argument("--once", action="store_true",
+                    help="run every sweep of clock edges once (board).  By default each is "
+                         "run twice, and five times where the two differ, so that a wrong "
+                         "reading is not taken for the chip's logic")
+    ap.add_argument("--twice", action="store_true",
+                    help="sim: run every sweep of clock edges twice, as on a board")
     ap.add_argument("--no-follow", dest="follow", action="store_false",
                     help="keep driving the enumerated levels at the clock edge, against "
                          "the pins the GAL drives (board)")
@@ -251,7 +259,8 @@ def main(argv=None):
         fixed = parse_fixed(args.fix)
         survey = 64 if args.survey is None else args.survey
         if args.mode == "sim":
-            rig = SimRig(args.source, args.off, args.on, race=args.race)
+            rig = SimRig(args.source, args.off, args.on, race=args.race,
+                         twice=args.twice or None)
             device = rig.device
         elif args.mode == "replay":
             if not args.source:
@@ -285,7 +294,8 @@ def main(argv=None):
             t = SerialTransport(args.port)
             brutus = BrutusRig(t, args.device, args.socket, args.settle, args.off, args.on,
                                log, jumper_check=not args.no_jumper_check,
-                               follow=args.follow, dclk=args.dclk, serial=args.serial)
+                               follow=args.follow, dclk=args.dclk, serial=args.serial,
+                               twice=not args.once)
             if brutus.jumper_check:
                 try:
                     brutus.preflight()
@@ -322,6 +332,7 @@ def main(argv=None):
             if isinstance(rig, RecordingRig):
                 rig.close()
         latches = isinstance(a, LatchAnalysis)
+        unsteady = getattr(a, "unsteady", (0, 0))
         bad = a.check_equations()
         if bad:
             log("equations disagree with the captures: %s" % bad[:6])
@@ -341,6 +352,12 @@ def main(argv=None):
             log("board work: %s; about %.0f s on a Brutus-28" % (
                 dict(ops), ops.seconds(args.off, args.on)))
         log("analysis %.1f s" % (time.time() - t0))
+        if unsteady[0]:
+            log("NOTE: the chip did not answer every clock edge the same way each time (%d "
+                "input vectors in %d sweeps read differently when the sweep was run again).  "
+                "The result is for what most sweeps said, and it is checked against that: "
+                "see whether it makes sense, and run again to see whether it comes out "
+                "the same." % (unsteady[1], unsteady[0]))
 
         if not args.cupl:
             log("%s: %s not compiled, and not checked against the captures%s" % (

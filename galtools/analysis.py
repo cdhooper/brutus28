@@ -396,6 +396,16 @@ KEEP = ("/* A latch has product terms that only hold it while an input changes.\
         "   Minimising would remove them. */")
 
 
+def at_least(masks, need):
+    """The bits that are set in at least need of the masks."""
+    cnt = [0] * need
+    for m in masks:
+        for j in range(need - 1, 0, -1):
+            cnt[j] |= cnt[j - 1] & m
+        cnt[0] |= m
+    return cnt[need - 1]
+
+
 class Table:
     """One state's exhaustive walk: per pin, driven and value bitsets over
     the x in care[p].  A walk that skipped the x outside `care` knows
@@ -446,6 +456,8 @@ class Analysis:
         self.ar_regs = {}         # its register literals, register pin -> value
         self.ar_dc = set()
         self.scover = {}          # covers that read other outputs' pins (_read_outputs)
+        self.twice = bool(getattr(rig, "twice", False))   # sweeps are run twice (_trans)
+        self.unsteady = [0, 0]    # sweeps that did not read the same twice, their vectors
 
     # 1. discovery -----------------------------------------------------------
     def discover(self):
@@ -863,11 +875,11 @@ class Analysis:
         n = len(self.V)
         if count is not None and count >= 1 << n:
             count = None
-        res = self.rig.transitions(self.V, self.base, self.drives(path), self.probes(),
-                                   self.cand, count=count,
-                                   mul=1 if count is None else survey_mul(n),
-                                   returns=self._returns(s), avoid=self.ar, chk=True,
-                                   pre=self.mixed, **self._tctx())
+        res = self._trans(s, self.V, self.base, self.drives(path), self.probes(),
+                          self.cand, count=count,
+                          mul=1 if count is None else survey_mul(n),
+                          returns=self._returns(s), avoid=self.ar, chk=True,
+                          pre=self.mixed, **self._tctx())
         obs, flags = res[0], res[1]
         if self.mixed and count is None:
             self.pre[s] = res[2]              # the pin levels each x was clocked in with
@@ -916,6 +928,86 @@ class Analysis:
             if len(self.states) > self.max_states:
                 raise Limit("more than %d states (--max-states)" % self.max_states)
         return True
+
+    SWEEPS = 5                # runs of a sweep that did not read the same twice
+
+    def _trans(self, s, *args, **kw):
+        """A sweep from state s (rig.transitions).
+
+        On a board (rig.twice) it is run twice.  A chip in good order
+        answers the same; one that does not is swept SWEEPS times in all,
+        and every input vector gets the answer that most sweeps gave
+        (the first one, if there is no such answer).  Without that, one
+        wrong reading is taken for the chip's logic: a clock edge that
+        leads to two states looks like a latch, and the equations get a
+        product term for it.
+
+        Seen with a GAL in a PLCC28 that loaded its registers, as on a
+        clock edge, in one of 20 writes in which the pin that enables its
+        outputs fell together with four inputs (which the firmware's ser=
+        now avoids)."""
+        res = self.rig.transitions(*args, **kw)
+        if not self.twice:
+            return res
+        runs = [res, self.rig.transitions(*args, **kw)]
+        if runs[1] == res:
+            return res
+        while len(runs) < self.SWEEPS:
+            runs.append(self.rig.transitions(*args, **kw))
+        need = len(runs) // 2 + 1
+        sel = 0
+        for xs in res[0].values():
+            sel |= xs
+        out, decided, same = {}, 0, 0
+        for o in dict.fromkeys(o for r in runs for o in r[0]):
+            masks = [r[0].get(o, 0) for r in runs]
+            m = at_least(masks, need)
+            if m:
+                out[o] = m
+            decided |= m
+            same |= at_least(masks, len(runs))
+        differ = sel & ~same
+        left = sel & ~decided
+        for o, xs in res[0].items():
+            if xs & left:
+                out[o] = out.get(o, 0) | xs & left
+        seen = {}
+        for r in runs:
+            for f in dict.fromkeys(r[1]):
+                seen[f] = seen.get(f, 0) + 1
+        flags = [f for f, k in seen.items() if k >= need]
+        for (x, _), k in seen.items():
+            if k < len(runs):
+                differ |= 1 << x
+        voted = (out, flags)
+        if len(res) > 2:
+            pre = {}
+            for p in res[2]:
+                masks = [r[2][p] for r in runs]
+                pre[p] = at_least(masks, need)
+                differ |= (at_least(masks, 1) ^ at_least(masks, len(runs))) & sel
+            voted += (pre,)
+        k = popcount(differ)
+        self.unsteady[0] += 1
+        self.unsteady[1] += k
+        self.log("the chip does not answer the same every time: clocked in from state %s, "
+                 "%d of %d input vectors read differently in %d sweeps of the same vectors "
+                 "(%s, for one).  Each is taken to lead where most of the sweeps said%s" % (
+                     _state(s), k, popcount(sel), len(runs), self._inputs(lowest(differ)),
+                     "" if not left else "; %d led somewhere else every time or nearly, and "
+                     "stay as first read" % popcount(left)))
+        return voted
+
+    def _unsteady_notes(self):
+        """For the source: what the equations rest on, if sweeps differed."""
+        n, k = self.unsteady
+        if not n:
+            return []
+        return ["The chip did not answer every clock edge the same way each time it was "
+                "asked: in %d sweep%s of the input vectors from a state, %d vector%s read "
+                "differently when the sweep was run again.  These equations are for what "
+                "most of %d sweeps said." % (n, "" if n == 1 else "s", k,
+                                             "" if k == 1 else "s", self.SWEEPS)]
 
     def _explore_once(self):
         self._walks, self._wsig, self.cmap, self.cvar = {}, {}, {}, {}
@@ -1127,8 +1219,8 @@ class Analysis:
             la, lb, _ = self.rig.walk(self.V, b, self.drives(path), **kw)
             tr = None
             if self.reg and self.probe_x:
-                obs = self.rig.transitions(self.V, b, self.drives(path), self.probes(),
-                                           self.cand, avoid=self.ar, **self._tctx())[0]
+                obs = self._trans(s, self.V, b, self.drives(path), self.probes(),
+                                  self.cand, avoid=self.ar, **self._tctx())[0]
                 tr = {}
                 for o, xs in obs.items():
                     s2 = self._reg(self._sig_obs(o))
@@ -1667,7 +1759,7 @@ class Analysis:
         latches = self._latch_names()
         if latches:
             lines += [KEEP, "MIN [%s] = 0;" % ", ".join(latches), ""]
-        for note in self.notes:
+        for note in self.notes + self._unsteady_notes():
             text = textwrap.wrap(note, 72)
             lines += ["/* " + text[0]] + ["   " + t for t in text[1:]]
             lines[-1] += " */"

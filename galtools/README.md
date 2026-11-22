@@ -149,6 +149,9 @@ Options:
 - `--settle`, `--off` and `--on` set the firmware timing: µs after each
   write, ms with power off during a power cycle, and ms after power on.
 - `--no-jumper-check` powers the socket without checking the jumpers.
+- `--once` runs every sweep of clock edges once. By default `galre board`
+  runs each twice, and five times where the two differ (see How it works).
+  `--twice` does the same in `sim`.
 - `--no-serial` changes all pins of a vector in one write, as firmware
   without `ser=` does.
 
@@ -176,6 +179,18 @@ walk that counts. So the firmware changes one pin per write (`ser`), the
 lowest socket pin first: a vector that differs from the last one in n pins
 takes n writes. `--no-serial` turns that off, and firmware that does not
 have it is used as it is; the run says so.
+
+A wrong reading in a sweep of clock edges would pass for the chip's logic
+(one more product term), or for a latch. So `galre board` runs every sweep
+twice. Where the two differ, it runs the sweep five times in all and takes
+each input vector to lead where most of them said. The report then says
+"the chip does not answer the same every time" for that state, the source
+says so in a comment, and the run ends with a NOTE: such a result is
+checked only against what most sweeps said, so run it again and compare.
+The second sweep is quick: by then the firmware knows the way back from
+every state the first one met. `--once` turns it off. A job that the
+firmware gives up because two power cycles did not lead back to its state
+is run again, twice at most.
 
 1. **Power-up walk.** galre walks every signal pin except pin 1 (the clock,
    held low) and the held pins. Every pin is driven weakly through Brutus's

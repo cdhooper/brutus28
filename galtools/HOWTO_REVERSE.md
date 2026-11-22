@@ -163,7 +163,9 @@ this:
    state it finds, walks each new state, and returns to the state under
    test by a clocked path or by power-cycling. If a state falls back to
    the power-up state without a clock, it learns the GAL22V10's
-   asynchronous reset term and explores again around it.
+   asynchronous reset term and explores again around it. Every sweep of
+   clock edges is run twice, and must read the same (see "the chip does
+   not answer the same every time" in section 6).
 4. **Latches.** If the power-up walk reads differently in another order,
    the chip holds state without a clock. galre then walks the inputs in
    Gray code order (one pin changes per write) in many bit orders, and
@@ -235,6 +237,25 @@ From `galre sim designs/fsm22v10.jed` (shortened):
   whose output is active low: it is high at power-up and after a reset,
   and CUPL builds it that way.
 - The last line is the check of the rebuilt JED. It must say `identical`.
+
+**"the chip does not answer the same every time: clocked in from state S,
+N of M input vectors read differently in 5 sweeps of the same vectors".**
+galre runs every sweep of clock edges twice. Here the two differed, so it
+ran the sweep five times and took each input vector to lead where most of
+them said. The source says so in a comment and the run ends with a NOTE.
+The JED is then checked against what most sweeps said, not against a chip
+that answers the same every time: run galre again and compare the two
+results, and look at the equations of the registers that the named
+vectors change. Causes seen so far:
+
+- several pins changing in one write, with firmware that has no `ser=`
+  (section 10): a GAL in a PLCC28 loaded its registers, as on a clock
+  edge, in one of 20 writes in which the pin that enables its outputs fell
+  together with four inputs;
+- a bad contact in the socket: reseat the chip.
+
+`--once` runs every sweep once, as galre did before; a wrong reading then
+passes for the chip's logic, or for a latch.
 
 ### An asynchronous reset term
 
@@ -455,7 +476,13 @@ commit (section 2).
 **"This firmware changes several pins in one write (it has no ser=)".**
 The run goes on. With that firmware, the pins that change in one write
 reach the chip in no certain order, and a chip may now and then take that
-for a clock edge. Install the firmware from the same commit (section 2).
+for a clock edge (see "the chip does not answer the same every time" in
+section 6). Install the firmware from the same commit (section 2).
+
+**"two power cycles and the same clocks did not lead back to the state
+the job started from ...; running the job again".** A wrong reading, or a
+bad contact. The job is run again, twice at most; if that does not help,
+galre stops with "could not get back to the path state".
 
 **Exit code 3.** The message before "no equations written" says why:
 
