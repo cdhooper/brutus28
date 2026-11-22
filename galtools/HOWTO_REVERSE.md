@@ -79,8 +79,19 @@ Set the jumpers:
 | GAL20V8 (DIP24) | socket pin 28 | socket pin 12 | `-d GAL20V8` |
 | GAL22V10 (DIP24) | socket pin 28 | socket pin 12 | `-d GAL22V10` |
 | GAL20V8 or GAL22V10 (PLCC28, in the PLCC socket) | socket pin 28 | socket pin 14 | `-d GAL20V8 -s plcc28`, `-d GAL22V10 -s plcc28` |
+| GAL16V8 (PLCC20, in the small PLCC socket) | socket pin 20 | socket pin 10 | `-d GAL16V8 -s plcc20` |
 
 Set the supply jumper to 5 V.
+
+**A PLCC20 part at 5 V: read this first.** The PLCC20 socket is wired
+pin for pin to socket pins 1 to 20, so the part's VCC is socket pin 20,
+not 28. On the rev 2 board every socket pin also goes straight to an
+STM32 input, and those of socket pins 17 to 22 are PC0 to PC5, which
+ST's pin table does not mark as 5 V tolerant (the others are). With the
+VCC jumper on pin 20 and the supply jumper on 5 V, PC3 is tied to the
+5 V rail through R13 and R14 (22 ohms each, in parallel) only. This
+combination has not been run. A DIP part, or a PLCC20 part in a DIP
+adapter, has its VCC on socket pin 28 (PC11, 5 V tolerant).
 
 Before the first capture, galre checks the jumpers without switching the
 supply on. With only the GND rail switched on, it drives each socket pin

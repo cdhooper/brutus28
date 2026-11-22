@@ -823,6 +823,24 @@ class Firmware(unittest.TestCase):
         rig.jumper_check = False
         rig.walk([2, 3], {}, [])
 
+    def test_plcc20_socket(self):
+        """A PLCC20 GAL16V8 sits on socket pins 1 to 20, so its VCC is on
+        socket pin 20.  With the VCC jumper on 28, as for every other
+        package, galre stops before anything is powered."""
+        t = self.transport("cnt16v8", "plcc20")
+        rig = BrutusRig(t, "GAL16V8", "plcc20", log=quiet)
+        self.assertEqual(rig.preflight(), (1 << 19, 1 << 9, 4950))
+        self.assertEqual(rig.metadata()["jumpers"]["vcc"], [20])
+        t.dev.jumper_vcc = 1 << 27
+        with self.assertRaisesRegex(
+                CaptureError,
+                "the jumpers do not suit a GAL16V8 in the plcc20 socket\n"
+                "  expected: VCC on socket pin 20, GND on socket pin 10, supply 5 V\n"
+                "  detected: VCC on socket pin 28, GND on socket pin 10"):
+            rig.preflight()
+        with self.assertRaisesRegex(ValueError, "socket plcc20 does not fit a GAL22V10"):
+            BrutusRig(t, "GAL22V10", "plcc20", log=quiet)
+
     def test_record_and_replay(self):
         name, (device, nstates, regs, fixed) = "fsm22v10", CASES["fsm22v10"]
         out = tempfile.mkdtemp(prefix="galre")
@@ -1077,7 +1095,8 @@ class Firmware(unittest.TestCase):
         lib.gal_io.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
         lib.gal_power.argtypes = [ctypes.c_void_p, ctypes.c_int]
         for path in sorted(glob.glob(os.path.join(DESIGNS, "*.jed"))):
-            for socket in (["dip20"] if GAL(path).kind == "GAL16V8" else ["dip24", "plcc28"]):
+            for socket in (["dip20", "plcc20"] if GAL(path).kind == "GAL16V8"
+                           else ["dip24", "plcc28"]):
                 with self.subTest(design=os.path.basename(path), socket=socket):
                     dev = fwsim.SocketDevice(path, socket)
                     cdev = fwsim.SocketDevice(path, socket)
@@ -1430,7 +1449,7 @@ class Firmware(unittest.TestCase):
 
     def test_analysis_through_firmware(self):
         for name, (device, nstates, regs, fixed) in CASES.items():
-            for socket in (["dip20"] if device == "GAL16V8" else ["dip24", "plcc28"]):
+            for socket in (["dip20", "plcc20"] if device == "GAL16V8" else ["dip24", "plcc28"]):
                 with self.subTest(design=name, socket=socket):
                     rig = BrutusRig(self.transport(name, socket), device, socket, log=quiet)
                     a = Analysis(rig, device, fixed=fixed, log=quiet)

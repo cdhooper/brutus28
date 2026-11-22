@@ -37,6 +37,9 @@ in the main README:
 - GAL16V8: VCC on socket pin 28, GND on socket pin 10.
 - GAL22V10: VCC on socket pin 28, GND on socket pin 12.
 - PLCC28 GAL22V10: use `-s plcc28`.
+- PLCC20 GAL16V8: use `-s plcc20`; VCC is then on socket pin 20. See
+  the caution in HOWTO_REVERSE.md, section 3, before you power one from
+  5 V.
 
 Set the VCC and GND jumpers to match, and the supply jumper to 5 V, then
 run:

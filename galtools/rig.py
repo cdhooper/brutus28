@@ -85,10 +85,13 @@ IO_SEC = 2.5e-6
 USB_BYTES_PER_SEC = 600e3
 
 # Socket pin of each package pin on the Brutus-28 rev 2 28-pin socket (DIP
-# parts sit at the top of the socket) or its PLCC28 socket.
+# parts sit at the top of the socket), its PLCC28 socket, or its PLCC20
+# socket, which is wired pin for pin to socket pins 1 to 20: VCC is then on
+# socket pin 20, not 28.
 SOCKETS = {
     "dip20": (20, 20, 10, lambda d: d if d <= 10 else d + 8),
     "dip24": (24, 24, 12, lambda d: d if d <= 12 else d + 4),
+    "plcc20": (20, 20, 10, lambda d: d),
     "plcc28": (24, 24, 12, lambda d: d + 1 + (d >= 7) + (d >= 13) + (d >= 19)),
 }
 DEFAULT_SOCKET = {"GAL16V8": "dip20", "GAL20V8": "dip24", "GAL22V10": "dip24"}

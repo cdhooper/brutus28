@@ -138,7 +138,7 @@ def main(argv=None):
     ap.add_argument("-o", "--out", required=True, help="output directory")
     ap.add_argument("-d", "--device", choices=["GAL16V8", "GAL20V8", "GAL22V10"])
     ap.add_argument("-p", "--port", help="Brutus-28 serial device (board)")
-    ap.add_argument("-s", "--socket", choices=["dip20", "dip24", "plcc28"])
+    ap.add_argument("-s", "--socket", choices=["dip20", "dip24", "plcc20", "plcc28"])
     ap.add_argument("-t", "--title", help="design name (default galre)")
     ap.add_argument("--fix", help="pins held and not enumerated, e.g. 6-9=0,13=1")
     ap.add_argument("--survey", type=int,
