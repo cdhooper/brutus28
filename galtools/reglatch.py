@@ -1555,7 +1555,7 @@ class RegLatchAnalysis(Analysis):
                 if al[ci] >> xp & 1
                 and (i < 0 or (xp >> sup[i] & 1 if sup[i] < n1 else w[sup[i] - n1]) == side)]
 
-    GUESS_STEPS = 8192      # of a candidate walk that are taken through the circuit
+    GUESS_STEPS = 65536     # of a candidate walk that are taken through the circuit
 
     def _guesses(self, cfg, lv):
         """The open claims that the walk cfg would settle, as the learned
@@ -1613,7 +1613,7 @@ class RegLatchAnalysis(Analysis):
         if not todo:
             return None, None
         n1 = self.n1
-        per = max(8, min(256, (1 << 17) >> n1))
+        per = max(32, min(256, (1 << 21) >> n1))
         for _ in range(4):
             best, most, more = None, set(), 8
             for _ in range(per):
