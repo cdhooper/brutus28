@@ -987,6 +987,29 @@ class SimulatedChip(unittest.TestCase):
             a.run()
         self.assertIn("clocking does not change the state", str(e.exception))
 
+    def test_combinational_gal22v10(self):
+        """A GAL22V10 without registers that reads pin 1.  CUPL leaves its
+        unused OLMCs registered, but those registers drive nothing and
+        nothing reads them: the rebuilt JED is checked, with pin 1
+        walked, without the firmware built for the host."""
+        g = GAL(jed("comb22v10"))
+        self.assertEqual(sorted(o.pin for o in g.olmcs if o.registered),
+                         [15, 16, 17, 18, 19, 20, 21])
+        self.assertEqual(g.live_registers(), [])
+        fixed = galre.parse_fixed("4-11=0,15-21=0")
+        with mock.patch.object(fwsim, "library", side_effect=AssertionError("firmware asked for")):
+            rig = SimRig(jed("comb22v10"))
+            a = galre.analyse(rig, "GAL22V10", fixed=fixed, log=quiet)
+            self.assertTrue(a.clock_in_v)
+            self.assertEqual(sorted(a.comb), [22, 23])
+            self.assertEqual(verify.check_captures(a, jed("comb22v10")), [])
+        self.assertIsNone(rig.fw)
+        # registers that show, or that other logic reads without their showing
+        self.assertEqual(GAL(jed("fsm22v10")).live_registers(), [22, 23])
+        self.assertEqual(GAL(jed("buried22v10")).live_registers(), [23])
+        self.assertEqual(GAL(jed("cnt16v8")).live_registers(), [18, 19])
+        self.assertEqual(GAL(jed("comb16v8")).live_registers(), [])
+
     def test_sweep_that_reads_wrongly_now_and_then(self):
         """On a board every sweep of clock edges is run twice, and five
         times where the two differ: an input vector leads where most of

@@ -1,0 +1,27 @@
+Name     comb22v10;
+Partno   x;
+Date     2026-11-23;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g22v10;
+
+/* Test design: GAL22V10 without registers.  It reads pin 1 like any
+   other input, and pin 14, an I/O pin, as an input.  CUPL leaves the
+   OLMCs that are not used (pins 15 to 21) registered: registers that
+   drive nothing and that nothing reads. */
+
+Pin 1  = A;
+Pin 2  = B;
+Pin 3  = C;
+Pin 13 = D;
+Pin 14 = E;
+Pin 22 = Y;
+Pin 23 = Z;
+
+!Y = A & !B
+   # C & E;
+Z = B & D
+  # !A & E;

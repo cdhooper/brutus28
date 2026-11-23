@@ -458,6 +458,7 @@ designs in `designs/`, with the pins the tests hold:
 | `regs20v8` | GAL20V8 with six registers, one of which never changes, and an output that reads registers only: pin 13 switches six outputs on at once | `5-11=0,14-15=0,23=0` |
 | `lowreg22v10` | a 22V10 that looks like a registered GAL20V8, but for a register that is low after power-up | `4-11=0,14-19=0,23=0` |
 | `comb20v8` | GAL20V8, complex mode: an output that reads another output's pin | |
+| `comb22v10` | GAL22V10 without registers that reads pin 1 and an I/O pin | `4-11=0,15-21=0` |
 | `simple20v8` | GAL20V8, simple mode | |
 | `ar22v10` | asynchronous reset term `P3 & !P4` | `6-11=0,13-20=0` |
 | `arlow22v10` | active-low reset input and register outputs | `4=0,6-11=0,13-20=0` |

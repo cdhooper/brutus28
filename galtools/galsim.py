@@ -220,6 +220,31 @@ class GAL:
                 "s" if len(loop) > 1 else "", ", ".join(map(str, loop))))
         return parts
 
+    def live_registers(self):
+        """The pins of the registers that can show: those whose output can
+        be enabled, or whose feedback a product term that can be true
+        reads.  CUPL leaves an unused OLMC of a GAL22V10 registered; such
+        a register drives nothing and is read by nothing."""
+        terms = []
+        for o in self.olmcs:
+            terms += list(o.rows) + ([o.oe_row] if isinstance(o.oe_row, int) else [])
+        terms += [r for r in (self.ar_row, self.sp_row) if r is not None]
+        read = set()
+        for r in terms:
+            if self.satisfiable(r):
+                m = self.rows[r]
+                read |= {n for k, (kind, n) in enumerate(self.cols)
+                         if kind == "fb" and (m >> (2 * k)) & 3}
+        live = []
+        for o in self.olmcs:
+            if not o.registered:
+                continue
+            on = (o.oe_row == "always" or self.oe_pin is not None
+                  or isinstance(o.oe_row, int) and self.satisfiable(o.oe_row))
+            if on or o.pin in read:
+                live.append(o.pin)
+        return sorted(live)
+
     # -- simulation --------------------------------------------------------
 
     def power_up(self):

@@ -295,6 +295,7 @@ class SimRig:
         self.ops = Ops()
         self.q = None
         self.q0 = {o.pin: 0 for o in self.g.olmcs if o.registered}
+        self.live = bool(self.g.live_registers())    # a register drives or is read
         self.async_parts = self.g.async_parts()
         self.fw = None
         self._fw_args = (jed, socket)
@@ -366,7 +367,7 @@ class SimRig:
 
     def walk(self, V, base, path, mul=1, rev=0, probes=(), cand=(), gray=0, start=0,
              skip=None, avoid=None, data=True, rot=0, mix=0, psig=False, also=()):
-        if not self.fw and (psig or CLOCK in V and self.q0):
+        if not self.fw and (psig or CLOCK in V and self.live):
             self._firmware()          # the walk clocks the registers
         if self.fw:
             return self.fw.walk(V, base, path, mul=mul, rev=rev, probes=probes, cand=cand,
