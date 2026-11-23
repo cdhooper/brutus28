@@ -946,6 +946,7 @@ chunks. The header comment of `fw/capture.c` describes the format.
 | `csimcheck.py` | Test vectors from the rebuilt JED for CUPL's simulator, and its verdict |
 | `designs/` | Test designs (CUPL source and compiled JEDs) |
 | `tests/` | Test suite |
+| `skills/` | A skill for an AI coding agent: how to read a chip with galre, and what has gone wrong before |
 
 Run the tests from the repository root:
 
