@@ -553,6 +553,13 @@ galre stops with "could not get back to the path state": then the chip
 may keep its charge through the power cycles, in a way that the check at
 the start did not show. Give a longer `--off`, 200 for example.
 
+**"The rebuilt JED could not be checked against the captures: ..."**, exit
+code 1. The captures are complete and the equations are written, but the
+JED was not simulated: for a design with latches or a reset term, or one
+with registers whose pin 1 the walks drive, that takes the firmware built
+for this computer, so a C compiler and `fw/` beside `galtools/`. Replay
+the recording where both are (section 8).
+
 **Exit code 3.** The message before "no equations written" says why:
 
 | Message | Meaning |

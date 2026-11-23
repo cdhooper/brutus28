@@ -37,6 +37,9 @@ def build(cc=None):
     cc = cc or os.environ.get("CC") or shutil.which("cc") or shutil.which("gcc")
     if not cc:
         return None
+    if not os.path.exists(os.path.join(FW, "capture.c")):
+        raise RuntimeError("the firmware's capture.c is not beside galtools (looked in %s)"
+                           % os.path.normpath(FW))
     d = tempfile.mkdtemp(prefix="capharness")
     for f in ("capture.c", "capture.h"):
         shutil.copy(os.path.join(FW, f), d)

@@ -203,6 +203,20 @@ def describe(meta):
     return lines
 
 
+class Unchecked(Exception):
+    """The rebuilt JED could not be simulated here; the message says why."""
+
+
+def check_jed(a, jed, notes):
+    """verify.check_captures.  Simulating a design with latches or a reset
+    term, or one with registers whose pin 1 the walks drive, takes the
+    firmware built for this host."""
+    try:
+        return verify.check_captures(a, jed, notes)
+    except (RuntimeError, OSError, subprocess.CalledProcessError) as e:
+        raise Unchecked(str(e)) from None
+
+
 def compile_cupl(cupl, pld, log, minimise=4):
     """The JED of pld (None if CUPL makes none); minimise is CUPL's -m
     level, 0 for none."""
@@ -449,95 +463,102 @@ def main(argv=None):
         # A GAL16V8 without registers may need its mode named: CUPL takes
         # the simple mode unless an output has an enable, and that mode
         # cannot read pins 15 and 16.
-        keep = "\nMIN [" in src
-        tries = [(None, k) for k in ([True, False] if keep else [False])]
-        if "modes" in a.dev and not a.reg:
-            tries += [(d, k) for d in a.dev["modes"] for _, k in tries]
-        jed, said, best, first = None, [], None, []
-        for dev, kept in tries:
-            text = src if kept or not keep else re.sub(
-                r"/\* A latch has.*?\*/\nMIN \[.*?\] = 0;\n\n", "", src, flags=re.S)
-            if dev:
-                text = text.replace("Device %s;" % a.dev["cupl"], "Device %s;" % dev)
-            with open(pld, "w") as f:
-                f.write(text)
-            said = []
-            jed = compile_cupl(args.cupl, pld, said.append)
-            first = first or said
-            if not jed:
-                continue
-            notes = []
-            diff = verify.check_captures(a, jed, notes)
-            if best is None or not diff:
-                best = dev, kept, text, diff, notes
-            if not diff:
-                break
-        if (best is None or best[3]) and keep and getattr(a, "hold_terms", False):
-            # CUPL's minimiser, let loose on the terms that hold the latches
-            # through a step, may not get back to as few as fit.  galre's own
-            # covers without those terms do, if anything does: written like
-            # that, and kept as written (MIN).
-            a.hold_terms = False
-            a.equations()
-            plain = a.cupl(args.title)
-            for dev in dict.fromkeys(d for d, _ in tries):
-                text = plain if not dev else plain.replace(
-                    "Device %s;" % a.dev["cupl"], "Device %s;" % dev)
+        try:
+            keep = "\nMIN [" in src
+            tries = [(None, k) for k in ([True, False] if keep else [False])]
+            if "modes" in a.dev and not a.reg:
+                tries += [(d, k) for d in a.dev["modes"] for _, k in tries]
+            jed, said, best, first = None, [], None, []
+            for dev, kept in tries:
+                text = src if kept or not keep else re.sub(
+                    r"/\* A latch has.*?\*/\nMIN \[.*?\] = 0;\n\n", "", src, flags=re.S)
+                if dev:
+                    text = text.replace("Device %s;" % a.dev["cupl"], "Device %s;" % dev)
                 with open(pld, "w") as f:
                     f.write(text)
+                said = []
                 jed = compile_cupl(args.cupl, pld, said.append)
-                if jed:
-                    notes = []
-                    diff = verify.check_captures(a, jed, notes)
-                    if best is None or not diff:
-                        best = dev, None, text, diff, notes
-                    if not diff:
-                        break
-            if best is None or best[1] is not None:
-                a.hold_terms = True           # no better: as it was
+                first = first or said
+                if not jed:
+                    continue
+                notes = []
+                diff = check_jed(a, jed, notes)
+                if best is None or not diff:
+                    best = dev, kept, text, diff, notes
+                if not diff:
+                    break
+            if (best is None or best[3]) and keep and getattr(a, "hold_terms", False):
+                # CUPL's minimiser, let loose on the terms that hold the latches
+                # through a step, may not get back to as few as fit.  galre's own
+                # covers without those terms do, if anything does: written like
+                # that, and kept as written (MIN).
+                a.hold_terms = False
                 a.equations()
-        if best is None:
-            with open(pld, "w") as f:
-                f.write(src)
-            for msg in first:
-                log(msg)
+                plain = a.cupl(args.title)
+                for dev in dict.fromkeys(d for d, _ in tries):
+                    text = plain if not dev else plain.replace(
+                        "Device %s;" % a.dev["cupl"], "Device %s;" % dev)
+                    with open(pld, "w") as f:
+                        f.write(text)
+                    jed = compile_cupl(args.cupl, pld, said.append)
+                    if jed:
+                        notes = []
+                        diff = check_jed(a, jed, notes)
+                        if best is None or not diff:
+                            best = dev, None, text, diff, notes
+                        if not diff:
+                            break
+                if best is None or best[1] is not None:
+                    a.hold_terms = True           # no better: as it was
+                    a.equations()
+            if best is None:
+                with open(pld, "w") as f:
+                    f.write(src)
+                for msg in first:
+                    log(msg)
+                return 1
+            dev, kept, text, diff, notes = best
+            if not jed or diff:
+                # a later try did not compile, or was no better: back to the best one
+                with open(pld, "w") as f:
+                    f.write(text)
+                jed = compile_cupl(args.cupl, pld, log)
+            if dev:
+                log("compiled for %s (CUPL does not choose that mode by itself)" % dev)
+            if keep and kept is None and not diff:
+                log("it does not fit with the product terms that hold the latches through a step: "
+                    "written without them in %s" % os.path.basename(pld))
+            elif keep and not kept and not diff:
+                log("it does not fit with the product terms that hold the latches through a step: "
+                    "compiled without them (no MIN statement in %s)" % os.path.basename(pld))
+            log("%s against the captures (%s x %d input vectors%s): %s" % (
+                os.path.basename(jed),
+                "%d walks" % len(a.walks) if latches else "%d states" % len(a.states),
+                1 << len(a.V),
+                ", %d walks with pin 1" % (len(a.lwalks) - len(a.states)) if mixed else "",
+                "identical" if not diff else diff[:6]))
+            if notes:
+                log("  %d walks start differently (galre does not model the latches' state at "
+                    "power-up), the first %s" % (len(notes), notes[0]))
+            if args.csim:
+                import csimcheck
+                log(csimcheck.report(args.csim, pld, jed))
+            if args.mode == "sim":
+                held = {p: v for p, v in a.fixed.items()
+                        if p not in (getattr(a, "oe_held", None), getattr(a, "oe_alone", None))}
+                d, first, osc = verify.compare_jeds(args.source, jed, args.steps, fixed=held,
+                                                    sic=latches or mixed)
+                log("random %d-step run%s, original vs rebuilt: %s" % (
+                    args.steps, " (one input changing at a time)" if latches or mixed else "",
+                    "no difference" if not d else "%s, first %s" % (d, first)))
+                diff = diff or d
+            return 0 if not (bad or diff) else 1
+        except Unchecked as e:
+            log("The rebuilt JED could not be checked against the captures: %s" % e)
+            log("%s is written, but nothing says yet that it is the chip.%s" % (
+                pld, "  The recording is complete: replay it where the firmware's sources "
+                "(fw beside galtools) and a C compiler are" if args.mode == "board" else ""))
             return 1
-        dev, kept, text, diff, notes = best
-        if not jed or diff:
-            # a later try did not compile, or was no better: back to the best one
-            with open(pld, "w") as f:
-                f.write(text)
-            jed = compile_cupl(args.cupl, pld, log)
-        if dev:
-            log("compiled for %s (CUPL does not choose that mode by itself)" % dev)
-        if keep and kept is None and not diff:
-            log("it does not fit with the product terms that hold the latches through a step: "
-                "written without them in %s" % os.path.basename(pld))
-        elif keep and not kept and not diff:
-            log("it does not fit with the product terms that hold the latches through a step: "
-                "compiled without them (no MIN statement in %s)" % os.path.basename(pld))
-        log("%s against the captures (%s x %d input vectors%s): %s" % (
-            os.path.basename(jed),
-            "%d walks" % len(a.walks) if latches else "%d states" % len(a.states),
-            1 << len(a.V),
-            ", %d walks with pin 1" % (len(a.lwalks) - len(a.states)) if mixed else "",
-            "identical" if not diff else diff[:6]))
-        if notes:
-            log("  %d walks start differently (galre does not model the latches' state at "
-                "power-up), the first %s" % (len(notes), notes[0]))
-        if args.csim:
-            import csimcheck
-            log(csimcheck.report(args.csim, pld, jed))
-        if args.mode == "sim":
-            held = {p: v for p, v in a.fixed.items()
-                    if p not in (getattr(a, "oe_held", None), getattr(a, "oe_alone", None))}
-            d, first, osc = verify.compare_jeds(args.source, jed, args.steps, fixed=held,
-                                                sic=latches or mixed)
-            log("random %d-step run%s, original vs rebuilt: %s" % (
-                args.steps, " (one input changing at a time)" if latches or mixed else "",
-                "no difference" if not d else "%s, first %s" % (d, first)))
-            diff = diff or d
-        return 0 if not (bad or diff) else 1
 
 
 if __name__ == "__main__":

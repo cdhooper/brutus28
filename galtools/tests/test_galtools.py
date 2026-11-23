@@ -2094,6 +2094,49 @@ class Firmware(unittest.TestCase):
         finally:
             shutil.rmtree(out)
 
+    def test_check_that_cannot_run(self):
+        """The check of the rebuilt JED takes the firmware built for the
+        host where the design has latches.  Where that cannot be built,
+        galre says so and ends with exit code 1, the equations written;
+        it used to end in a traceback, after the captures."""
+        if not CUPL:
+            self.skipTest("no CUPL compiler")
+        name, (device, fix, _, _, _) = "latch16v8", LATCH_CASES["latch16v8"]
+        out = tempfile.mkdtemp(prefix="galre")
+
+        def run(*argv):
+            with contextlib.redirect_stdout(io.StringIO()):
+                r = galre.main(list(argv) + ["--cupl", CUPL])
+            with open(os.path.join(argv[argv.index("-o") + 1], "report.txt")) as f:
+                return r, f.read()
+        try:
+            board, rec = os.path.join(out, "board"), os.path.join(out, "board", "capture.jsonl")
+            dev = fwsim.SocketDevice(jed(name), "dip20")
+            with mock.patch.object(galre, "SerialTransport",
+                                   lambda port: fwsim.HarnessTransport(self.lib, dev)):
+                r, report = run("board", "-p", "-", "-d", device, "-o", board, "--fix", fix,
+                                "-t", name)
+            self.assertEqual(r, 0)
+            self.assertIn(name + ".jed against the captures", report)
+            # no C compiler
+            with mock.patch.object(fwsim, "library", return_value=None):
+                r, report = run("replay", rec, "-o", os.path.join(out, "nocc"))
+            self.assertEqual(r, 1)
+            self.assertIn("The rebuilt JED could not be checked against the captures: ", report)
+            self.assertIn("needs a C compiler", report)
+            self.assertIn(name + ".pld is written, but nothing says yet that it is the chip.",
+                          report)
+            self.assertTrue(os.path.exists(os.path.join(out, "nocc", name + ".pld")))
+            # galtools copied without the firmware's sources
+            with mock.patch.object(fwsim, "FW", os.path.join(out, "nowhere")), \
+                    mock.patch.object(fwsim, "_library", []):
+                r, report = run("replay", rec, "-o", os.path.join(out, "nofw"))
+            self.assertEqual(r, 1)
+            self.assertIn("could not be checked against the captures: the firmware's capture.c "
+                          "is not beside galtools", report)
+        finally:
+            shutil.rmtree(out)
+
     def test_dclk_refuses_supply_pin(self):
         t = self.transport("fsm22v10", "dip24")
         self.assertIn("dclk: a clock pin is a VCC or GND pin",
