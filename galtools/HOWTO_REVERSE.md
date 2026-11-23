@@ -54,7 +54,8 @@ This guide covers what to do and how to read the result.
 This builds `fw/objs/fw.bin`. To install it over USB:
 
 1. Hold down the ABORT button, press and release RESET, and keep holding
-   ABORT for three seconds.
+   ABORT for three seconds. Or, if the board runs its firmware, type
+   `reset dfu` on its console: that needs no hand on the board.
 2. After about 10 seconds the board shows up as USB device `0483:df11`
    (STM Device in DFU Mode).
 3. On Linux, run `make dfu` in `fw/`. It first installs udev rules into
@@ -63,7 +64,10 @@ This builds `fw/objs/fw.bin`. To install it over USB:
 
        dfu-util --device 0483:df11 --alt 0 --download objs/fw.bin --dfuse-address 0x08000000:leave
 
-4. Press RESET if the green power LED does not come on.
+4. Press RESET if the green power LED does not come on. On a Linux host
+   the board can stay listed as `0483:df11` after the download although
+   the new firmware has started, because the host has not looked again:
+   `usbreset 0483:df11` makes it, and the board comes back as `Brutus28`.
 
 The board's serial port is `/dev/ttyACM0` or similar on Linux, and
 `/dev/cu.usbmodemXXXX` on macOS. To check the firmware, type
