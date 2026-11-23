@@ -70,7 +70,8 @@ import sys
 from array import array
 from functools import reduce
 
-from analysis import Analysis, AsyncDesign, Limit, _Restart, _pins, _state, lowest, swap
+from analysis import (Analysis, AsyncDesign, Limit, NotRegistered, _Restart, _pins, _state,
+                      lowest, swap)
 from bitsim import litmasks
 from latch import LatchAnalysis, _ONES, _ZEROS, _from_bytes
 from rig import CLOCK, bitrev, cube_set, gray_arrays, gray_order, popcount, survey_mul
@@ -157,9 +158,9 @@ class RegLatchAnalysis(Analysis):
     PLAIN, AROUND, AVOID = 0, 1, 2      # how a walk treats the reset term
 
     def __init__(self, rig, device, fixed=None, survey=64, max_states=1024, log=print,
-                 hist=(), max_checks=48, confirm=2, max_guided=64):
+                 hist=(), max_checks=48, confirm=2, max_guided=64, oe_alone=False):
         super().__init__(rig, device, fixed=fixed, survey=survey, max_states=max_states,
-                         log=log)
+                         log=log, oe_alone=oe_alone)
         self.hist = {p for p in hist if p in self.dev["io"] and p not in self.fixed}
         self.mixed = bool(self.hist)
         self.max_checks, self.confirm, self.max_guided = max_checks, confirm, max_guided
@@ -189,6 +190,8 @@ class RegLatchAnalysis(Analysis):
                      and p not in self.fixed)
         if not new:
             raise err
+        if self.oe_alone:
+            raise NotRegistered(str(err))     # read again with the enable pin walked
         self.hist.update(new)
         self.bidir.update(p for p in new if p in self.V)      # also an input at times
         self.mixed = True

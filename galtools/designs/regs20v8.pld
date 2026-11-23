@@ -1,0 +1,43 @@
+Name     regs20v8;
+Partno   x;
+Date     2026-11-22;
+Revision 1;
+Designer galtools;
+Company  x;
+Assembly x;
+Location x;
+Device   g20v8ms;
+
+/* Test design: GAL20V8 in registered mode with six registers, all of
+   them high after power-up: a 2-bit counter with enable, two registers
+   that copy inputs, one that sets once and one that never changes.
+   Pin 13 enables all six: walked together with their pins, it switches
+   six outputs on at once against the levels a board holds them at.
+   T reads registers only: it changes with the clock like a register,
+   but pin 13 does not switch it off. */
+
+Pin 1  = CLK;
+Pin 2  = EN;
+Pin 3  = A;
+Pin 4  = B;
+Pin 13 = !OE;
+Pin 16 = T;
+Pin 17 = S;
+Pin 18 = K;
+Pin 19 = QB;
+Pin 20 = QA;
+Pin 21 = Q1;
+Pin 22 = Q0;
+
+Q0.d = EN & !Q0
+     # !EN & Q0;
+Q1.d = EN & Q0 & !Q1
+     # EN & !Q0 & Q1
+     # !EN & Q1;
+QA.d = A;
+QB.d = B & Q0
+     # !B & QB;
+!S.d = !S
+     # A & B & !Q1;
+!K.d = 'b'0;
+T = !Q0 & !Q1;

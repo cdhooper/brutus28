@@ -253,6 +253,12 @@ From `galre sim designs/fsm22v10.jed` (shortened):
     ...
     fsm.jed against the captures (3 states x 131072 input vectors): identical
 
+- On a GAL16V8 or GAL20V8 the report may start with **"clock edges change
+  what the chip drives: pin 13 is held low and read alone"** (pin 11 on a
+  GAL16V8). With registers in such a chip, that pin enables their outputs
+  and does nothing else, so galre holds it low and walks it alone: "pin
+  13, walked alone, switches off pins 21, 22" names the registered pins.
+  The source then has `Pin 13 = !OE;` and a comment that says so.
 - The **power-up walk** line gives the pin roles. Pins that are never
   driven are inputs; pins whose value changes with the inputs are
   combinational outputs; tri-state ones have an output enable.
@@ -449,6 +455,7 @@ designs in `designs/`, with the pins the tests hold:
 | `fsm22v10` | 3-state machine, output enables | |
 | `comb16v8` | combinational only | |
 | `cnt20v8` | GAL20V8, registered mode: counter, pin 13 as the registers' enable | |
+| `regs20v8` | GAL20V8 with six registers, one of which never changes, and an output that reads registers only: pin 13 switches six outputs on at once | `5-11=0,14-15=0,23=0` |
 | `lowreg22v10` | a 22V10 that looks like a registered GAL20V8, but for a register that is low after power-up | `4-11=0,14-19=0,23=0` |
 | `comb20v8` | GAL20V8, complex mode: an output that reads another output's pin | |
 | `simple20v8` | GAL20V8, simple mode | |
@@ -505,6 +512,31 @@ The run goes on. With that firmware, the pins that change in one write
 reach the chip in no certain order, and a chip may now and then take that
 for a clock edge (see "the chip does not answer the same every time" in
 section 6). Install the firmware from the same commit (section 2).
+
+**"not a GAL20V8 with registers and nothing else, as seen with pin 13 held
+low: ..." and "starting again with pin 13 walked like the other inputs".**
+The run goes on. Clock edges changed what the chip drives, so galre took
+it for a chip with registers and held the pin that enables them; the rest
+of the line says what did not fit (latches as well as registers, or a pin
+that the enable switches off and that is no register). It reads the chip
+again as it reads one without registers. `--no-oe-first` skips the first
+try.
+
+**Registers that change without a clock: "the chip holds state without a
+clock", then "not latches alone", for a chip that has registers.** On a
+board, a chip can take it for a clock edge when many of its outputs are
+switched on at once, each against the level the board holds its pin at. A
+PALCE20V8 in a PLCC28 did, every time the pin that enables its eight
+registered outputs fell while six or more of their pins were held low.
+galre keeps the enable pin of a GAL16V8 and a GAL20V8 out of such walks
+(above). Outputs that a product term enables are not covered: on a
+GAL22V10, hold the input that enables them at the level that keeps them on
+(`--fix 13=0`, say). The equations then lack that enable; add it by hand,
+and check it with a walk of that pin alone. What may cure it at the source
+is a capacitor of 100 nF from the PLD's ground rail to the board's ground,
+across Q2: the chip's ground reaches the board's only through that FET,
+while what its outputs charge is referred to the board's ground. That has
+not been tried.
 
 **"A power cycle of 20 ms does not reset this chip ...: power is now off
 for N ms in every power cycle".** The chip keeps its charge while the

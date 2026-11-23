@@ -71,8 +71,18 @@ class SocketDevice:
     a hundred times faster, but power() and io() are then not called, so
     the counters and writes below stay as they are."""
 
-    def __init__(self, jed, socket, fast=False, race=0, glitch=0, glitch_pin=13, hold_ms=0):
-        self.fast = fast and not glitch and not hold_ms
+    def __init__(self, jed, socket, fast=False, race=0, glitch=0, glitch_pin=13, hold_ms=0,
+                 bounce=0):
+        self.fast = fast and not glitch and not hold_ms and not bounce
+        self.bounce = bounce         # not 0: when a write switches this many outputs on, or
+                                     # more, each against the level the board holds its pin
+                                     # at, the chip takes that for a clock edge (the supply
+                                     # at the socket gives way while they all switch).  A
+                                     # PALCE20V8 in a PLCC28 did so on a board when the pin
+                                     # that enables its eight registered outputs fell while
+                                     # six or more of their pins were held low, every time;
+                                     # with five or fewer, never.
+        self.bounced = 0             # how often
         self.hold_ms = hold_ms       # not 0: the chip keeps its charge for so long without
                                      # power.  Powered again sooner, it is not reset: it comes
                                      # up with its registers as they were, and as after one
@@ -171,6 +181,7 @@ class SocketDevice:
                 self.glitch = (self.glitch * 1664525 + 1013904223) & 0xffffffff
                 if self.glitch >> 29 == 0:
                     self.g.q = {p: 0 for p in self.g.q}
+        was_off = set(self.pins) - set(self.g.driven) if self.bounce else ()
         if self.transients:
             done = 0
             for g in PORT_GROUPS:
@@ -180,6 +191,15 @@ class SocketDevice:
                 if mid != self.last and mid != value:
                     self._apply(mid)
         levels = self._apply(value)
+        if self.bounce and self.g.clock_pin:
+            against = [p for p in self.g.driven if p in was_off
+                       and levels[p] != (1 if value & self.sbit[p] else 0)]
+            if len(against) >= self.bounce:
+                self.bounced += 1
+                ext = {p: 1 if value & self.sbit[p] else 0 for p in self.pins}
+                self.g.apply({**ext, self.g.clock_pin: 0})
+                self.g.apply({**ext, self.g.clock_pin: 1})
+                levels, _ = self.g.apply(ext)
         out = self.vcc_bit
         for p in self.pins:
             if p in self.g.unstable:

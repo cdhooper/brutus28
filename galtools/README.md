@@ -156,6 +156,9 @@ Options:
   `--twice` does the same in `sim`.
 - `--no-serial` changes all pins of a vector in one write, as firmware
   without `ser=` does.
+- `--no-oe-first` walks pin 11 of a GAL16V8 (pin 13 of a GAL20V8) with the
+  other inputs from the start. By default galre holds it low and walks it
+  alone, if clock edges change the chip (see How it works).
 
 ## How it works
 
@@ -193,6 +196,32 @@ after one of a second, and if they differ, doubles the power-off time
 until they agree and adds half again. The report says so ("A power cycle
 of 20 ms does not reset this chip"). It sees this only where the state
 shows on the pins with every input low or high.
+
+A GAL16V8 or GAL20V8 with registers uses pin 11 (13) to enable their
+outputs and for nothing else. Walked together with the I/O pins, that pin
+switches the registered outputs on against the levels the board holds
+their pins at, all of them at once. The same part took that for a clock
+edge: every time the pin fell while six or more of its eight outputs came
+on against a pin held low, never with five or fewer, and whichever pins
+they were. The supply at the socket gives way while they switch. Its
+registers then changed in walks without a clock, and galre took them for
+latches. (The one write in 20 above was most likely the same thing: the
+outputs came on against the board there as well, and they do with one pin
+per write too. It would have shown only where an input of the registers
+changed in that write, because the edge otherwise led to the state the
+chip was already in.) So for these two devices galre first clocks a few
+input vectors in with the pin low. If that changes what the chip drives, it holds the
+pin low for the whole run and walks it alone, with no I/O pin held, to
+see what it switches off ("pin 13, walked alone, switches off pins ...").
+That must be the registers, all of them, and nothing else. If it is not
+(a chip with latches as well, say), galre starts again with the pin walked
+like any other input, as it does from the start for a chip that clock
+edges do not change. Holding the pin also halves every walk and sweep.
+`--no-oe-first` turns it off. A GAL22V10 has no such pin: its enables are
+product terms, and galre walks their inputs with the I/O pins. A chip that
+does the same there shows state that changes without a clock; holding the
+input that enables the outputs (`--fix`) gets around it, and the
+equations then lack that enable.
 
 A wrong reading in a sweep of clock edges would pass for the chip's logic
 (one more product term), or for a latch. So `galre board` runs every sweep

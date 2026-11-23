@@ -24,6 +24,12 @@ def check_captures(a, jed, notes=None):
         return _check_walks(a, jed, notes)
     rig = SimRig(jed, careful=True)
     bad = []
+    for base, la, lb in getattr(a, "oe_walks", ()):
+        # the enable pin of the registers, held low for everything below
+        la2, lb2, _ = rig.walk([a.oe_alone], base, [])
+        for p in a.dev["io"]:
+            if p not in base and ((la[p] ^ la2[p]) | (lb[p] ^ lb2[p])) & 3:
+                bad.append(("pin %d" % p, "pin %d walked alone" % a.oe_alone))
     hist = sorted(a.hist)             # latches: read in the walks with pin 1 instead
     for s, (path, t) in a.states.items():
         drives = a.drives(path)

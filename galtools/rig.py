@@ -275,12 +275,17 @@ class SimRig:
     one pin per write (BrutusRig), so that this cannot happen.  twice: the
     analysis runs every sweep twice, as on a board (Analysis._trans); by
     default it does for a chip with a glitch.
+
+    bounce (a number of pins, not 0): the chip takes it for a clock edge
+    when so many of its outputs are switched on at once, each against the
+    level its pin is held at (fwsim.SocketDevice).
     """
 
     def __init__(self, jed, off_ms=20, on_ms=2, socket=None, careful=False, race=0,
-                 glitch=0, serial=True, twice=None):
+                 glitch=0, serial=True, twice=None, bounce=0):
         self.g = GAL(jed)
         self.race = race
+        self.bounce = bounce
         self.glitch, self.serial = glitch, serial
         self.twice = bool(glitch) if twice is None else bool(twice)
         self.device = self.g.kind
@@ -294,7 +299,7 @@ class SimRig:
         self.fw = None
         self._fw_args = (jed, socket)
         loops = [a for a in self.async_parts if a.startswith("combinational")]
-        if loops or (self.async_parts and not careful) or glitch:
+        if loops or (self.async_parts and not careful) or glitch or bounce:
             self._firmware()
 
     def _firmware(self):
@@ -308,7 +313,7 @@ class SimRig:
                 jed, " and ".join(self.async_parts) or "pin 1 walked in a registered design"))
         socket = socket or DEFAULT_SOCKET[self.device]
         self.socket_device = fwsim.SocketDevice(jed, socket, fast=True, race=self.race,
-                                                glitch=self.glitch)
+                                                glitch=self.glitch, bounce=self.bounce)
         self.fw = BrutusRig(fwsim.HarnessTransport(lib, self.socket_device), self.device,
                             socket, off_ms=self.off_ms, on_ms=self.on_ms, log=lambda *a: None,
                             jumper_check=False, serial=self.serial)

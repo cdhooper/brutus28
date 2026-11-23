@@ -30,7 +30,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from analysis import DEV, AsyncDesign, LatchSuspected, Limit, Settles, Unsteady     # noqa: E402
+from analysis import (CLOCK, DEV, AsyncDesign, LatchSuspected, Limit,     # noqa: E402
+                      NotRegistered, Settles, Unsteady)
 from capture import CaptureError, SerialTransport          # noqa: E402
 from latch import LatchAnalysis                            # noqa: E402
 from osc import OscAnalysis                                # noqa: E402
@@ -39,13 +40,67 @@ from rig import BrutusRig, RecordingRig, ReplayRig, SimRig  # noqa: E402
 import verify                                              # noqa: E402
 
 
-def analyse(rig, device, fixed=None, survey=64, log=print, max_states=1024):
+def _clocked(rig, device, fixed, oe):
+    """Does a clock edge change what the chip drives, with pin oe low?
+    Clocks in every combination of five inputs at a time, the others low
+    and then high, from the power-up state."""
+    dev = DEV[device]
+    ins = [p for p in dev["ded"] if p not in (CLOCK, oe) and p not in fixed]
+    cand = [p for p in dev["io"] if p not in fixed]
+    if not ins or not cand:
+        return False
+    rest = {**fixed, oe: 0}
+    probe = {**{p: 0 for p in ins}, **rest}
+    start = rig.walk(ins[:1], {p: v for p, v in probe.items() if p != ins[0]}, [],
+                     probes=[probe], cand=cand, data=False)[2][0]
+    for level in (0, 1):
+        for k in range(0, len(ins), 5):
+            V = ins[k:k + 5]
+            base = {**{p: level for p in ins if p not in V}, **rest}
+            if set(rig.transitions(V, base, [], [probe], cand)[0]) != {start}:
+                return True
+    return False
+
+
+def _registered(rig, device, fixed, survey, log, max_states):
+    """A GAL16V8 or GAL20V8 with registers: the analysis with pin 11 (13)
+    held low and read alone (Analysis.oe_alone), or None if the chip does
+    not show as one."""
+    oe = DEV[device]["oe"]
+    if not _clocked(rig, device, fixed, oe):
+        return None
+    log("clock edges change what the chip drives: pin %d is held low and read alone (in a "
+        "%s with registers it enables their outputs and does nothing else)" % (oe, device))
+    a = RegLatchAnalysis(rig, device, fixed=fixed, survey=survey, log=log,
+                         max_states=max_states, oe_alone=True)
+    try:
+        a.run()
+    except (NotRegistered, AsyncDesign) as e:
+        log("not a %s with registers and nothing else, as seen with pin %d held low: %s" % (
+            device, oe, e))
+        log("starting again with pin %d walked like the other inputs" % oe)
+        return None
+    return a
+
+
+def analyse(rig, device, fixed=None, survey=64, log=print, max_states=1024, oe_first=True):
     """Run the analysis of a clocked design (which goes on to latches in
     it, if the chip changes state without a clock), of latches alone
     when the power-up walk shows them, or of outputs that do not settle
     when the same walk reads differently twice; returns the
     RegLatchAnalysis, LatchAnalysis or OscAnalysis.  Raises AsyncDesign
-    when none models the chip."""
+    when none models the chip.
+
+    oe_first: a GAL16V8 or GAL20V8 that clock edges change is first taken
+    for one with registers, whose pin 11 (13) only enables their outputs:
+    the pin is held low and read alone, not walked together with the
+    outputs it switches on."""
+    oe = DEV[device].get("oe")
+    if (oe_first and oe is not None and oe not in (fixed or {})
+            and CLOCK not in (fixed or {})):
+        a = _registered(rig, device, dict(fixed or {}), survey, log, max_states)
+        if a is not None:
+            return a
     a = RegLatchAnalysis(rig, device, fixed=fixed, survey=survey, log=log,
                          max_states=max_states)
     try:
@@ -129,6 +184,10 @@ def describe(meta):
             ", one pin per write" if meta["serial"] else ", several pins per write"))
     if "twice" in meta:
         lines.append("sweeps of clock edges: run %s" % ("twice" if meta["twice"] else "once"))
+    oe = DEV.get(meta.get("device"), {}).get("oe")
+    if "oe_first" in meta and oe and not {str(oe), str(CLOCK)} & set(meta.get("fixed") or {}):
+        lines.append("pin %d: %s" % (oe, "held low and read alone, if clock edges change the chip"
+                                     if meta["oe_first"] else "walked with the other inputs"))
     j = meta.get("jumpers")
     if j:
         lines.append("jumpers: VCC on socket %s, GND on socket %s, supply %s mV" % (
@@ -223,6 +282,13 @@ def main(argv=None):
                          "reading is not taken for the chip's logic")
     ap.add_argument("--twice", action="store_true",
                     help="sim: run every sweep of clock edges twice, as on a board")
+    ap.add_argument("--no-oe-first", dest="oe_first", action="store_false",
+                    help="walk a GAL16V8's pin 11 (a GAL20V8's pin 13) with the other "
+                         "inputs from the start.  By default a chip that clock edges change "
+                         "is first read with that pin held low, and the pin walked alone: "
+                         "with registers in the chip it only enables their outputs, and "
+                         "walked together with them it switches them on against the levels "
+                         "the board holds, all at once")
     ap.add_argument("--no-follow", dest="follow", action="store_false",
                     help="keep driving the enumerated levels at the clock edge, against "
                          "the pins the GAL drives (board)")
@@ -260,6 +326,7 @@ def main(argv=None):
 
         fixed = parse_fixed(args.fix)
         survey = 64 if args.survey is None else args.survey
+        oe_first = args.oe_first
         if args.mode == "sim":
             rig = SimRig(args.source, args.off, args.on, race=args.race,
                          twice=args.twice or None)
@@ -277,6 +344,8 @@ def main(argv=None):
                 fixed = {int(p): v for p, v in meta["fixed"].items()}
             if args.survey is None and "survey" in meta:
                 survey = meta["survey"]
+            # a recording has the jobs of the run that made it
+            oe_first = oe_first and meta.get("oe_first", False)
             args.title = args.title or meta.get("title")
             for line in describe(meta):
                 log("recorded " + line)
@@ -313,7 +382,8 @@ def main(argv=None):
                 return 2
             meta = brutus.metadata()
             meta.update(title=args.title or "galre", date=time.strftime("%Y-%m-%d %H:%M:%S"),
-                        fixed={str(p): v for p, v in sorted(fixed.items())}, survey=survey)
+                        fixed={str(p): v for p, v in sorted(fixed.items())}, survey=survey,
+                        oe_first=oe_first)
             for line in describe(meta):
                 log(line)
             rig = RecordingRig(brutus, os.path.join(args.out, "capture.jsonl"), meta)
@@ -325,7 +395,7 @@ def main(argv=None):
         t0 = time.time()
         try:
             a = analyse(rig, device, fixed=fixed, survey=survey, log=log,
-                        max_states=args.max_states)
+                        max_states=args.max_states, oe_first=oe_first)
         except AsyncDesign as e:
             log("asynchronous behaviour: %s" % e)
             log("galre models clocked designs, the GAL22V10's asynchronous reset term, and "
@@ -459,7 +529,8 @@ def main(argv=None):
             import csimcheck
             log(csimcheck.report(args.csim, pld, jed))
         if args.mode == "sim":
-            held = {p: v for p, v in a.fixed.items() if p != getattr(a, "oe_held", None)}
+            held = {p: v for p, v in a.fixed.items()
+                    if p not in (getattr(a, "oe_held", None), getattr(a, "oe_alone", None))}
             d, first, osc = verify.compare_jeds(args.source, jed, args.steps, fixed=held,
                                                 sic=latches or mixed)
             log("random %d-step run%s, original vs rebuilt: %s" % (
