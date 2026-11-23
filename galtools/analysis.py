@@ -123,12 +123,13 @@ def _cube_set(care, val, k, full, v1):
     return s
 
 
-def sop(on, off, k, order=None):
+def sop(on, off, k, order=None, first=0):
     """Greedy cover of the minterm bitset `on` avoiding `off` over k
     variables; [(care, val)] cubes.  A cube grown from a minterm drops
     the variable that takes in most of what is not covered yet; of
     several that take in as much, the first in order (default: the
-    lowest)."""
+    lowest).  The first `first` variables of order go before all others:
+    a cube drops every one of them that it can before it drops another."""
     if not on:
         return []
     full, v1 = litmasks(k)
@@ -137,22 +138,27 @@ def sop(on, off, k, order=None):
     unc, cubes = on, []
     if order is None:
         order = range(k)
+    order = list(order)
+    classes = [order[:first], order[first:]] if first else [order]
     while unc:
         m = (unc & -unc).bit_length() - 1
         care, val, cur = (1 << k) - 1, m, 1 << m
         while True:
             best = None
-            for b in order:
-                if not care >> b & 1:
-                    continue
-                c2 = care & ~(1 << b)
-                v2 = val & c2
-                s2 = _cube_set(c2, v2, k, full, v1)
-                if s2 & off:
-                    continue
-                gain = popcount(s2 & unc)
-                if best is None or gain > best[0]:
-                    best = (gain, c2, v2, s2)
+            for cls in classes:
+                for b in cls:
+                    if not care >> b & 1:
+                        continue
+                    c2 = care & ~(1 << b)
+                    v2 = val & c2
+                    s2 = _cube_set(c2, v2, k, full, v1)
+                    if s2 & off:
+                        continue
+                    gain = popcount(s2 & unc)
+                    if best is None or gain > best[0]:
+                        best = (gain, c2, v2, s2)
+                if best is not None:
+                    break
             if best is None:
                 break
             _, care, val, cur = best
@@ -1605,14 +1611,20 @@ class Analysis:
                 # with it, a smaller one if this one does not fit
                 limit = self._budget(p, kind)
                 order = self._drop_first(p, kind, sup)
+                if order is not None:
+                    # ... and of those, one that reads another latch only
+                    # where it must, unless that takes more product terms
+                    lat = self._others(p, kind, sup)
+                    alt = sop(on, off, k, order, lat)
+                    if len(alt) <= len(pos):
+                        pos = alt
+                    alt = sop(off, on, k, order, lat)
+                    if len(alt) <= len(neg):
+                        neg = alt
                 if len(pos) > limit:
-                    pos = min(pos, sop(on, off, k, order), key=len)
-                    if len(pos) > limit:
-                        pos = fewer(pos, on, off, k)
+                    pos = fewer(pos, on, off, k)
                 if len(neg) > limit:
-                    neg = min(neg, sop(off, on, k, order), key=len)
-                    if len(neg) > limit:
-                        neg = fewer(neg, off, on, k)
+                    neg = fewer(neg, off, on, k)
                 # ... and claim no more than that
                 own = self._own(p, kind, sup)
                 pos, neg = tight(pos, on, k, own), tight(neg, off, k, own)
@@ -1667,6 +1679,11 @@ class Analysis:
         take in equally much, for a second cover when the first does not
         fit (None: as they come)."""
         return None
+
+    def _others(self, p, kind, sup):
+        """How many variables at the start of _drop_first's order go
+        before all others."""
+        return 0
 
     def _budget(self, p, kind):
         """The product terms a function of pin p may have.  A GAL16V8 or

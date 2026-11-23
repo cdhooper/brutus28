@@ -1874,6 +1874,12 @@ class RegLatchAnalysis(Analysis):
         return (lat[::-1] + [i for i, v in enumerate(sup) if v < first]
                 + ([own] if own is not None else []))
 
+    def _others(self, p, kind, sup):
+        """The other latches' pins, which _drop_first puts first."""
+        first = self.n1 + len(self.reg)
+        own = self._own(p, kind, sup)
+        return sum(1 for i, v in enumerate(sup) if v >= first and i != own)
+
     def _hazards(self, p, kind, sup, pos, neg, on, off):
         if kind or p not in self.L or not self.hold_terms:
             return pos, neg

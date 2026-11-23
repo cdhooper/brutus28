@@ -657,10 +657,11 @@ not the reset term. galre then goes on (`reglatch.py`):
    the registers and the latch pins. A latch gets a product term for
    every step that holds it. A latch pin often reads the same as an
    input at rest (a P15 that follows P6), and the walks cannot tell
-   which of the two a product term reads; when a latch's cover has more
-   product terms than its macrocell, galre grows a second one that keeps
-   inputs and the latch's own pin rather than other latches' pins, and
-   takes the smaller. From `designs/reglatch22v10`:
+   which of the two a product term reads. So galre grows a second cover
+   whose product terms drop other latches' pins before any other pin: a
+   term then reads another latch only where something that was seen
+   needs it. It takes that cover unless it has more product terms. From
+   `designs/reglatch22v10`:
 
        P21 = CLK & !P3 & P4
            # CLK & P3 & P22

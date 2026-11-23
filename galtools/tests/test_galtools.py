@@ -155,8 +155,8 @@ EDGE2LATCH = ("7-9=0,11-13=0,19=0", {
     (15, ""): "P5",
     (15, "oe"): "!P6",
     (16, ""): "P14",
-    (17, ""): "P2 & !P16 & P18\n    # P2 & P4 & P18\n    # P2 & !P3 & !P4 & P16"
-              "\n    # P2 & P17 & !P18",
+    (17, ""): "P2 & !P3 & !P4 & P16\n    # P2 & !P16 & P17\n    # P2 & P4 & P17"
+              "\n    # P2 & !P3 & P17",
     (18, ""): "P3 & !P16 & P17\n    # P3 & P4 & P17"})
 
 # a register input that reads a latch which must have been set on the way
