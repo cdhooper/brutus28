@@ -13,7 +13,10 @@
 
 Writes out/NAME.pld (CUPL) and out/report.txt; with a CUPL compiler (--cupl,
 $CUPL, or cupl on the PATH) also out/NAME.jed, checked against
-every captured state and input vector.
+every captured state and input vector.  A result that was not compiled is
+not checked, so "board" does not start without a compiler that builds a
+design for the device; --no-cupl records anyway, for a replay where the
+compiler is.
 """
 
 import argparse
@@ -22,11 +25,13 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from analysis import AsyncDesign, LatchSuspected, Limit, Settles, Unsteady     # noqa: E402
+from analysis import (CLOCK, DEV, AsyncDesign, LatchSuspected, Limit,     # noqa: E402
+                      NotRegistered, Settles, Unsteady)
 from capture import CaptureError, SerialTransport          # noqa: E402
 from latch import LatchAnalysis                            # noqa: E402
 from osc import OscAnalysis                                # noqa: E402
@@ -35,13 +40,67 @@ from rig import BrutusRig, RecordingRig, ReplayRig, SimRig  # noqa: E402
 import verify                                              # noqa: E402
 
 
-def analyse(rig, device, fixed=None, survey=64, log=print, max_states=1024):
+def _clocked(rig, device, fixed, oe):
+    """Does a clock edge change what the chip drives, with pin oe low?
+    Clocks in every combination of five inputs at a time, the others low
+    and then high, from the power-up state."""
+    dev = DEV[device]
+    ins = [p for p in dev["ded"] if p not in (CLOCK, oe) and p not in fixed]
+    cand = [p for p in dev["io"] if p not in fixed]
+    if not ins or not cand:
+        return False
+    rest = {**fixed, oe: 0}
+    probe = {**{p: 0 for p in ins}, **rest}
+    start = rig.walk(ins[:1], {p: v for p, v in probe.items() if p != ins[0]}, [],
+                     probes=[probe], cand=cand, data=False)[2][0]
+    for level in (0, 1):
+        for k in range(0, len(ins), 5):
+            V = ins[k:k + 5]
+            base = {**{p: level for p in ins if p not in V}, **rest}
+            if set(rig.transitions(V, base, [], [probe], cand)[0]) != {start}:
+                return True
+    return False
+
+
+def _registered(rig, device, fixed, survey, log, max_states):
+    """A GAL16V8 or GAL20V8 with registers: the analysis with pin 11 (13)
+    held low and read alone (Analysis.oe_alone), or None if the chip does
+    not show as one."""
+    oe = DEV[device]["oe"]
+    if not _clocked(rig, device, fixed, oe):
+        return None
+    log("clock edges change what the chip drives: pin %d is held low and read alone (in a "
+        "%s with registers it enables their outputs and does nothing else)" % (oe, device))
+    a = RegLatchAnalysis(rig, device, fixed=fixed, survey=survey, log=log,
+                         max_states=max_states, oe_alone=True)
+    try:
+        a.run()
+    except (NotRegistered, AsyncDesign) as e:
+        log("not a %s with registers and nothing else, as seen with pin %d held low: %s" % (
+            device, oe, e))
+        log("starting again with pin %d walked like the other inputs" % oe)
+        return None
+    return a
+
+
+def analyse(rig, device, fixed=None, survey=64, log=print, max_states=1024, oe_first=True):
     """Run the analysis of a clocked design (which goes on to latches in
     it, if the chip changes state without a clock), of latches alone
     when the power-up walk shows them, or of outputs that do not settle
     when the same walk reads differently twice; returns the
     RegLatchAnalysis, LatchAnalysis or OscAnalysis.  Raises AsyncDesign
-    when none models the chip."""
+    when none models the chip.
+
+    oe_first: a GAL16V8 or GAL20V8 that clock edges change is first taken
+    for one with registers, whose pin 11 (13) only enables their outputs:
+    the pin is held low and read alone, not walked together with the
+    outputs it switches on."""
+    oe = DEV[device].get("oe")
+    if (oe_first and oe is not None and oe not in (fixed or {})
+            and CLOCK not in (fixed or {})):
+        a = _registered(rig, device, dict(fixed or {}), survey, log, max_states)
+        if a is not None:
+            return a
     a = RegLatchAnalysis(rig, device, fixed=fixed, survey=survey, log=log,
                          max_states=max_states)
     try:
@@ -118,9 +177,17 @@ def describe(meta):
         lines.append("timing: settle %s us, power off %s ms, on %s ms" % (
             meta["settle_us"], meta["off_ms"], meta["on_ms"]))
     if "follow" in meta:
-        lines.append("clock edge: %s, %s" % (
+        lines.append("clock edge: %s, %s%s" % (
             "pins follow the GAL" if meta["follow"] else "pins as enumerated",
-            "clock driven directly" if meta["dclk"] else "clock through 1K"))
+            "clock driven directly" if meta["dclk"] else "clock through 1K",
+            "" if "serial" not in meta else
+            ", one pin per write" if meta["serial"] else ", several pins per write"))
+    if "twice" in meta:
+        lines.append("sweeps of clock edges: run %s" % ("twice" if meta["twice"] else "once"))
+    oe = DEV.get(meta.get("device"), {}).get("oe")
+    if "oe_first" in meta and oe and not {str(oe), str(CLOCK)} & set(meta.get("fixed") or {}):
+        lines.append("pin %d: %s" % (oe, "held low and read alone, if clock edges change the chip"
+                                     if meta["oe_first"] else "walked with the other inputs"))
     j = meta.get("jumpers")
     if j:
         lines.append("jumpers: VCC on socket %s, GND on socket %s, supply %s mV" % (
@@ -134,6 +201,20 @@ def describe(meta):
     if "survey" in meta:
         lines.append("survey: %s" % meta["survey"])
     return lines
+
+
+class Unchecked(Exception):
+    """The rebuilt JED could not be simulated here; the message says why."""
+
+
+def check_jed(a, jed, notes):
+    """verify.check_captures.  Simulating a design with latches or a reset
+    term, or one with registers whose pin 1 the walks drive, takes the
+    firmware built for this host."""
+    try:
+        return verify.check_captures(a, jed, notes)
+    except (RuntimeError, OSError, subprocess.CalledProcessError) as e:
+        raise Unchecked(str(e)) from None
 
 
 def compile_cupl(cupl, pld, log, minimise=4):
@@ -150,6 +231,29 @@ def compile_cupl(cupl, pld, log, minimise=4):
         log("CUPL did not produce %s:\n%s%s" % (jed, r.stdout, r.stderr))
         return None
     return jed
+
+
+def check_cupl(cupl, device):
+    """Does cupl build a design for device?  Compiles one gate.  Returns
+    None if that gives a JED, else what went wrong: a compiler that cannot
+    be run, or one that does not know the device (no device library),
+    would otherwise show only after the captures."""
+    dev = DEV[device]
+    d = tempfile.mkdtemp(prefix="galre")
+    said = []
+    try:
+        pld = os.path.join(d, "galrechk.pld")
+        with open(pld, "w") as f:
+            f.write("Name galrechk; Partno x; Date x; Revision 1; Designer galre; Company x; "
+                    "Assembly x; Location x;\nDevice %s;\nPin 2 = A;\nPin %d = Y;\nY = A;\n" % (
+                        dev["cupl"], dev["io"][-1]))
+        try:
+            jed = compile_cupl(cupl, pld, said.append)
+        except OSError as e:
+            return "%s: %s" % (cupl, e.strerror or e)
+        return None if jed else "\n".join(said).strip()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def main(argv=None):
@@ -172,7 +276,9 @@ def main(argv=None):
                     help="sim: the inputs that one step changes reach the chip one after the "
                          "other, in an order that differs from time to time, as on a board "
                          "(a seed, not 0; for designs with latches)")
-    ap.add_argument("--off", type=int, default=20, help="msec power off per power cycle")
+    ap.add_argument("--off", type=int, default=20,
+                    help="msec power off per power cycle (default 20; board: raised if the "
+                         "chip is not reset by it)")
     ap.add_argument("--on", type=int, default=2, help="msec after power on")
     ap.add_argument("--no-jumper-check", action="store_true",
                     help="power the socket without checking the VCC, GND and supply "
@@ -180,16 +286,39 @@ def main(argv=None):
     ap.add_argument("--no-dclk", dest="dclk", action="store_false",
                     help="clock through the 1K like the other pins, instead of directly "
                          "(board; the slow edge can make the GAL take wrong transitions)")
+    ap.add_argument("--no-serial", dest="serial", action="store_false",
+                    help="change all pins of a vector in one write, not one pin per write "
+                         "(board; pins that change in one write reach the chip in no "
+                         "certain order)")
+    ap.add_argument("--once", action="store_true",
+                    help="run every sweep of clock edges once (board).  By default each is "
+                         "run twice, and five times where the two differ, so that a wrong "
+                         "reading is not taken for the chip's logic")
+    ap.add_argument("--twice", action="store_true",
+                    help="sim: run every sweep of clock edges twice, as on a board")
+    ap.add_argument("--no-oe-first", dest="oe_first", action="store_false",
+                    help="walk a GAL16V8's pin 11 (a GAL20V8's pin 13) with the other "
+                         "inputs from the start.  By default a chip that clock edges change "
+                         "is first read with that pin held low, and the pin walked alone: "
+                         "with registers in the chip it only enables their outputs, and "
+                         "walked together with them it switches them on against the levels "
+                         "the board holds, all at once")
     ap.add_argument("--no-follow", dest="follow", action="store_false",
                     help="keep driving the enumerated levels at the clock edge, against "
                          "the pins the GAL drives (board)")
-    ap.add_argument("--cupl", default=os.environ.get("CUPL") or shutil.which("cupl"))
+    ap.add_argument("--cupl", default=os.environ.get("CUPL") or shutil.which("cupl"),
+                    help="the CUPL compiler (default: $CUPL, or cupl on the PATH)")
+    ap.add_argument("--no-cupl", action="store_true",
+                    help="do not compile the result: the equations are written, but not "
+                         "built and not checked against the captures")
     ap.add_argument("--csim", default=os.environ.get("CSIM") or shutil.which("csim"),
                     help="CUPL's simulator, for a second opinion on the result "
                          "(default: $CSIM, or csim on the PATH)")
     ap.add_argument("--steps", type=int, default=30000,
                     help="random steps to compare with the original (sim)")
     args = ap.parse_args(argv)
+    if args.no_cupl:
+        args.cupl = None
 
     os.makedirs(args.out, exist_ok=True)
     with open(os.path.join(args.out, "report.txt"), "w") as report:
@@ -199,10 +328,22 @@ def main(argv=None):
             report.write(msg + "\n")
             report.flush()
 
+        def cupl_builds(device):
+            """The compiler builds a design for the device (or there is
+            none to ask)."""
+            why = check_cupl(args.cupl, device) if args.cupl else None
+            if why:
+                log("CUPL (%s) does not build a design for the %s:\n%s" % (args.cupl, device, why))
+                log("Nothing was run.  Give a working compiler (--cupl, $CUPL), or pass "
+                    "--no-cupl to go without the JED and its check against the captures.")
+            return not why
+
         fixed = parse_fixed(args.fix)
         survey = 64 if args.survey is None else args.survey
+        oe_first = args.oe_first
         if args.mode == "sim":
-            rig = SimRig(args.source, args.off, args.on, race=args.race)
+            rig = SimRig(args.source, args.off, args.on, race=args.race,
+                         twice=args.twice or None)
             device = rig.device
         elif args.mode == "replay":
             if not args.source:
@@ -217,16 +358,29 @@ def main(argv=None):
                 fixed = {int(p): v for p, v in meta["fixed"].items()}
             if args.survey is None and "survey" in meta:
                 survey = meta["survey"]
+            # a recording has the jobs of the run that made it
+            oe_first = oe_first and meta.get("oe_first", False)
             args.title = args.title or meta.get("title")
             for line in describe(meta):
                 log("recorded " + line)
         else:
             if not (args.device and args.port):
                 ap.error("board needs --device and --port")
+            # the captures take minutes to hours, and without the JED they are
+            # not checked: ask for the compiler first
+            if not args.cupl and not args.no_cupl:
+                log("no CUPL compiler (--cupl, $CUPL, or cupl on the PATH): the result could "
+                    "not be built and checked against the captures.")
+                log("No capture was run.  Install CUPL, or pass --no-cupl to record now and "
+                    "replay the recording where CUPL is.")
+                return 2
+            if not cupl_builds(args.device):
+                return 2
             t = SerialTransport(args.port)
             brutus = BrutusRig(t, args.device, args.socket, args.settle, args.off, args.on,
                                log, jumper_check=not args.no_jumper_check,
-                               follow=args.follow, dclk=args.dclk)
+                               follow=args.follow, dclk=args.dclk, serial=args.serial,
+                               twice=not args.once)
             if brutus.jumper_check:
                 try:
                     brutus.preflight()
@@ -235,19 +389,27 @@ def main(argv=None):
                     log("No capture was run.  Fix the jumpers, or pass --no-jumper-check "
                         "if the detection is wrong.")
                     return 2
+            try:
+                brutus.check_power_cycle(DEV[args.device]["io"], fixed)
+            except CaptureError as e:
+                log("power cycle check: %s" % e)
+                return 2
             meta = brutus.metadata()
             meta.update(title=args.title or "galre", date=time.strftime("%Y-%m-%d %H:%M:%S"),
-                        fixed={str(p): v for p, v in sorted(fixed.items())}, survey=survey)
+                        fixed={str(p): v for p, v in sorted(fixed.items())}, survey=survey,
+                        oe_first=oe_first)
             for line in describe(meta):
                 log(line)
             rig = RecordingRig(brutus, os.path.join(args.out, "capture.jsonl"), meta)
             device = args.device
         args.title = args.title or "galre"
+        if args.mode != "board" and not cupl_builds(device):
+            return 2
 
         t0 = time.time()
         try:
             a = analyse(rig, device, fixed=fixed, survey=survey, log=log,
-                        max_states=args.max_states)
+                        max_states=args.max_states, oe_first=oe_first)
         except AsyncDesign as e:
             log("asynchronous behaviour: %s" % e)
             log("galre models clocked designs, the GAL22V10's asynchronous reset term, and "
@@ -261,6 +423,7 @@ def main(argv=None):
             if isinstance(rig, RecordingRig):
                 rig.close()
         latches = isinstance(a, LatchAnalysis)
+        unsteady = getattr(a, "unsteady", (0, 0))
         bad = a.check_equations()
         if bad:
             log("equations disagree with the captures: %s" % bad[:6])
@@ -278,11 +441,20 @@ def main(argv=None):
         ops = rig.ops
         if args.mode != "replay":
             log("board work: %s; about %.0f s on a Brutus-28" % (
-                dict(ops), ops.seconds(args.off, args.on)))
+                dict(ops), ops.seconds(brutus.off_ms if args.mode == "board" else args.off,
+                                       args.on)))
         log("analysis %.1f s" % (time.time() - t0))
+        if unsteady[0]:
+            log("NOTE: the chip did not answer every clock edge the same way each time (%d "
+                "input vectors in %d sweeps read differently when the sweep was run again).  "
+                "The result is for what most sweeps said, and it is checked against that: "
+                "see whether it makes sense, and run again to see whether it comes out "
+                "the same." % (unsteady[1], unsteady[0]))
 
         if not args.cupl:
-            log("no CUPL compiler (--cupl or $CUPL): %s not compiled" % pld)
+            log("%s: %s not compiled, and not checked against the captures%s" % (
+                "--no-cupl" if args.no_cupl else "no CUPL compiler (--cupl or $CUPL)", pld,
+                "; replay the recording where CUPL is" if args.mode == "board" else ""))
             return 0 if not bad else 1
         # What CUPL needs to know is in the source: the MIN statement for
         # the latches, whose covers have product terms that only hold them
@@ -291,94 +463,102 @@ def main(argv=None):
         # A GAL16V8 without registers may need its mode named: CUPL takes
         # the simple mode unless an output has an enable, and that mode
         # cannot read pins 15 and 16.
-        keep = "\nMIN [" in src
-        tries = [(None, k) for k in ([True, False] if keep else [False])]
-        if "modes" in a.dev and not a.reg:
-            tries += [(d, k) for d in a.dev["modes"] for _, k in tries]
-        jed, said, best, first = None, [], None, []
-        for dev, kept in tries:
-            text = src if kept or not keep else re.sub(
-                r"/\* A latch has.*?\*/\nMIN \[.*?\] = 0;\n\n", "", src, flags=re.S)
-            if dev:
-                text = text.replace("Device %s;" % a.dev["cupl"], "Device %s;" % dev)
-            with open(pld, "w") as f:
-                f.write(text)
-            said = []
-            jed = compile_cupl(args.cupl, pld, said.append)
-            first = first or said
-            if not jed:
-                continue
-            notes = []
-            diff = verify.check_captures(a, jed, notes)
-            if best is None or not diff:
-                best = dev, kept, text, diff, notes
-            if not diff:
-                break
-        if (best is None or best[3]) and keep and getattr(a, "hold_terms", False):
-            # CUPL's minimiser, let loose on the terms that hold the latches
-            # through a step, may not get back to as few as fit.  galre's own
-            # covers without those terms do, if anything does: written like
-            # that, and kept as written (MIN).
-            a.hold_terms = False
-            a.equations()
-            plain = a.cupl(args.title)
-            for dev in dict.fromkeys(d for d, _ in tries):
-                text = plain if not dev else plain.replace(
-                    "Device %s;" % a.dev["cupl"], "Device %s;" % dev)
+        try:
+            keep = "\nMIN [" in src
+            tries = [(None, k) for k in ([True, False] if keep else [False])]
+            if "modes" in a.dev and not a.reg:
+                tries += [(d, k) for d in a.dev["modes"] for _, k in tries]
+            jed, said, best, first = None, [], None, []
+            for dev, kept in tries:
+                text = src if kept or not keep else re.sub(
+                    r"/\* A latch has.*?\*/\nMIN \[.*?\] = 0;\n\n", "", src, flags=re.S)
+                if dev:
+                    text = text.replace("Device %s;" % a.dev["cupl"], "Device %s;" % dev)
                 with open(pld, "w") as f:
                     f.write(text)
+                said = []
                 jed = compile_cupl(args.cupl, pld, said.append)
-                if jed:
-                    notes = []
-                    diff = verify.check_captures(a, jed, notes)
-                    if best is None or not diff:
-                        best = dev, None, text, diff, notes
-                    if not diff:
-                        break
-            if best is None or best[1] is not None:
-                a.hold_terms = True           # no better: as it was
+                first = first or said
+                if not jed:
+                    continue
+                notes = []
+                diff = check_jed(a, jed, notes)
+                if best is None or not diff:
+                    best = dev, kept, text, diff, notes
+                if not diff:
+                    break
+            if (best is None or best[3]) and keep and getattr(a, "hold_terms", False):
+                # CUPL's minimiser, let loose on the terms that hold the latches
+                # through a step, may not get back to as few as fit.  galre's own
+                # covers without those terms do, if anything does: written like
+                # that, and kept as written (MIN).
+                a.hold_terms = False
                 a.equations()
-        if best is None:
-            with open(pld, "w") as f:
-                f.write(src)
-            for msg in first:
-                log(msg)
+                plain = a.cupl(args.title)
+                for dev in dict.fromkeys(d for d, _ in tries):
+                    text = plain if not dev else plain.replace(
+                        "Device %s;" % a.dev["cupl"], "Device %s;" % dev)
+                    with open(pld, "w") as f:
+                        f.write(text)
+                    jed = compile_cupl(args.cupl, pld, said.append)
+                    if jed:
+                        notes = []
+                        diff = check_jed(a, jed, notes)
+                        if best is None or not diff:
+                            best = dev, None, text, diff, notes
+                        if not diff:
+                            break
+                if best is None or best[1] is not None:
+                    a.hold_terms = True           # no better: as it was
+                    a.equations()
+            if best is None:
+                with open(pld, "w") as f:
+                    f.write(src)
+                for msg in first:
+                    log(msg)
+                return 1
+            dev, kept, text, diff, notes = best
+            if not jed or diff:
+                # a later try did not compile, or was no better: back to the best one
+                with open(pld, "w") as f:
+                    f.write(text)
+                jed = compile_cupl(args.cupl, pld, log)
+            if dev:
+                log("compiled for %s (CUPL does not choose that mode by itself)" % dev)
+            if keep and kept is None and not diff:
+                log("it does not fit with the product terms that hold the latches through a step: "
+                    "written without them in %s" % os.path.basename(pld))
+            elif keep and not kept and not diff:
+                log("it does not fit with the product terms that hold the latches through a step: "
+                    "compiled without them (no MIN statement in %s)" % os.path.basename(pld))
+            log("%s against the captures (%s x %d input vectors%s): %s" % (
+                os.path.basename(jed),
+                "%d walks" % len(a.walks) if latches else "%d states" % len(a.states),
+                1 << len(a.V),
+                ", %d walks with pin 1" % (len(a.lwalks) - len(a.states)) if mixed else "",
+                "identical" if not diff else diff[:6]))
+            if notes:
+                log("  %d walks start differently (galre does not model the latches' state at "
+                    "power-up), the first %s" % (len(notes), notes[0]))
+            if args.csim:
+                import csimcheck
+                log(csimcheck.report(args.csim, pld, jed))
+            if args.mode == "sim":
+                held = {p: v for p, v in a.fixed.items()
+                        if p not in (getattr(a, "oe_held", None), getattr(a, "oe_alone", None))}
+                d, first, osc = verify.compare_jeds(args.source, jed, args.steps, fixed=held,
+                                                    sic=latches or mixed)
+                log("random %d-step run%s, original vs rebuilt: %s" % (
+                    args.steps, " (one input changing at a time)" if latches or mixed else "",
+                    "no difference" if not d else "%s, first %s" % (d, first)))
+                diff = diff or d
+            return 0 if not (bad or diff) else 1
+        except Unchecked as e:
+            log("The rebuilt JED could not be checked against the captures: %s" % e)
+            log("%s is written, but nothing says yet that it is the chip.%s" % (
+                pld, "  The recording is complete: replay it where the firmware's sources "
+                "(fw beside galtools) and a C compiler are" if args.mode == "board" else ""))
             return 1
-        dev, kept, text, diff, notes = best
-        if not jed or diff:
-            # a later try did not compile, or was no better: back to the best one
-            with open(pld, "w") as f:
-                f.write(text)
-            jed = compile_cupl(args.cupl, pld, log)
-        if dev:
-            log("compiled for %s (CUPL does not choose that mode by itself)" % dev)
-        if keep and kept is None and not diff:
-            log("it does not fit with the product terms that hold the latches through a step: "
-                "written without them in %s" % os.path.basename(pld))
-        elif keep and not kept and not diff:
-            log("it does not fit with the product terms that hold the latches through a step: "
-                "compiled without them (no MIN statement in %s)" % os.path.basename(pld))
-        log("%s against the captures (%s x %d input vectors%s): %s" % (
-            os.path.basename(jed),
-            "%d walks" % len(a.walks) if latches else "%d states" % len(a.states),
-            1 << len(a.V),
-            ", %d walks with pin 1" % (len(a.lwalks) - len(a.states)) if mixed else "",
-            "identical" if not diff else diff[:6]))
-        if notes:
-            log("  %d walks start differently (galre does not model the latches' state at "
-                "power-up), the first %s" % (len(notes), notes[0]))
-        if args.csim:
-            import csimcheck
-            log(csimcheck.report(args.csim, pld, jed))
-        if args.mode == "sim":
-            held = {p: v for p, v in a.fixed.items() if p != getattr(a, "oe_held", None)}
-            d, first, osc = verify.compare_jeds(args.source, jed, args.steps, fixed=held,
-                                                sic=latches or mixed)
-            log("random %d-step run%s, original vs rebuilt: %s" % (
-                args.steps, " (one input changing at a time)" if latches or mixed else "",
-                "no difference" if not d else "%s, first %s" % (d, first)))
-            diff = diff or d
-        return 0 if not (bad or diff) else 1
 
 
 if __name__ == "__main__":

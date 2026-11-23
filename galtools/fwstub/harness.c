@@ -114,10 +114,20 @@ harness_direct(void)
     return (seen);
 }
 
+/* No delay is waited for; the time they add up to is kept, for a chip
+ * that is not reset by a short power cycle (fwsim.SocketDevice, hold_ms) */
+static unsigned long msec_total;
+
 void
 cap_hw_delay_msec(uint msec)
 {
-    (void) msec;
+    msec_total += msec;
+}
+
+unsigned long
+harness_msec(void)
+{
+    return (msec_total);
 }
 
 int

@@ -24,10 +24,13 @@ reachable state. The firmware side is the `pld capture` command
 - Python 3.8 or newer, standard library only. With numpy installed, walk
   data decodes faster.
 - Brutus-28 firmware with `pld capture`.
-- Optional: a CUPL compiler, used to turn the result into a JED and check it
-  (`--cupl`, `$CUPL`, or `cupl` on the PATH). It is run as
+- A CUPL compiler, to turn the result into a JED and check it against the
+  captures (`--cupl`, `$CUPL`, or `cupl` on the PATH). It is run as
   `cupl -jaxm4 NAME.pld`, so WinCUPL's `cupl` or a native build of it
-  will do.
+  will do. `galre board` asks for it before it starts and tries it on one
+  gate for the device, because a result that was not built is not checked.
+  `--no-cupl` records without it, for a replay where the compiler is.
+  `sim` and `replay` run without one and say that nothing was checked.
 
 ## Use
 
@@ -145,7 +148,17 @@ Options:
   states per sweep.
 - `--settle`, `--off` and `--on` set the firmware timing: µs after each
   write, ms with power off during a power cycle, and ms after power on.
+  `galre board` raises `--off` by itself for a chip that a power cycle of
+  that length does not reset (see How it works).
 - `--no-jumper-check` powers the socket without checking the jumpers.
+- `--once` runs every sweep of clock edges once. By default `galre board`
+  runs each twice, and five times where the two differ (see How it works).
+  `--twice` does the same in `sim`.
+- `--no-serial` changes all pins of a vector in one write, as firmware
+  without `ser=` does.
+- `--no-oe-first` walks pin 11 of a GAL16V8 (pin 13 of a GAL20V8) with the
+  other inputs from the start. By default galre holds it low and walks it
+  alone, if clock edges change the chip (see How it works).
 
 ## How it works
 
@@ -160,6 +173,67 @@ pin 1 of a GAL is always an input. Also, just before each clock edge, it
 drives every pin at the level it reads (`follow`), so no pin the GAL
 drives is fought through its 1K at the edge. `--no-dclk` and `--no-follow`
 turn these off.
+
+The firmware writes the 28 socket pins in three port writes, and the pins
+of one port write reach the chip in no certain order. A chip can take that
+for something else: a GAL in a PLCC28 loaded its registers, as on a clock
+edge, in one of 20 writes in which the pin that enables its outputs fell
+together with four inputs, and never when they fell in two writes. That
+happened where a state was read after a clock, and at the carries of a
+walk that counts. So the firmware changes one pin per write (`ser`), the
+lowest socket pin first: a vector that differs from the last one in n pins
+takes n writes. `--no-serial` turns that off, and firmware that does not
+have it is used as it is; the run says so.
+
+A power cycle has to reset the chip, and the default 20 ms without power
+do not reset every chip: the same part kept its charge. It then came up
+in the state that a clock with every input low leads to, every time, and
+every job started from that state as if it were the power-up state (the
+supply is measured just before a job, so the chip has been powered then).
+After 50 ms it came up as it should, every registered output high. So
+`galre board` first reads the pins after a power cycle of `--off` and
+after one of a second, and if they differ, doubles the power-off time
+until they agree and adds half again. The report says so ("A power cycle
+of 20 ms does not reset this chip"). It sees this only where the state
+shows on the pins with every input low or high.
+
+A GAL16V8 or GAL20V8 with registers uses pin 11 (13) to enable their
+outputs and for nothing else. Walked together with the I/O pins, that pin
+switches the registered outputs on against the levels the board holds
+their pins at, all of them at once. The same part took that for a clock
+edge: every time the pin fell while six or more of its eight outputs came
+on against a pin held low, never with five or fewer, and whichever pins
+they were. The supply at the socket gives way while they switch. Its
+registers then changed in walks without a clock, and galre took them for
+latches. (The one write in 20 above was most likely the same thing: the
+outputs came on against the board there as well, and they do with one pin
+per write too. It would have shown only where an input of the registers
+changed in that write, because the edge otherwise led to the state the
+chip was already in.) So for these two devices galre first clocks a few
+input vectors in with the pin low. If that changes what the chip drives, it holds the
+pin low for the whole run and walks it alone, with no I/O pin held, to
+see what it switches off ("pin 13, walked alone, switches off pins ...").
+That must be the registers, all of them, and nothing else. If it is not
+(a chip with latches as well, say), galre starts again with the pin walked
+like any other input, as it does from the start for a chip that clock
+edges do not change. Holding the pin also halves every walk and sweep.
+`--no-oe-first` turns it off. A GAL22V10 has no such pin: its enables are
+product terms, and galre walks their inputs with the I/O pins. A chip that
+does the same there shows state that changes without a clock; holding the
+input that enables the outputs (`--fix`) gets around it, and the
+equations then lack that enable.
+
+A wrong reading in a sweep of clock edges would pass for the chip's logic
+(one more product term), or for a latch. So `galre board` runs every sweep
+twice. Where the two differ, it runs the sweep five times in all and takes
+each input vector to lead where most of them said. The report then says
+"the chip does not answer the same every time" for that state, the source
+says so in a comment, and the run ends with a NOTE: such a result is
+checked only against what most sweeps said, so run it again and compare.
+The second sweep is quick: by then the firmware knows the way back from
+every state the first one met. `--once` turns it off. A job that the
+firmware gives up because two power cycles did not lead back to its state
+is run again, twice at most.
 
 1. **Power-up walk.** galre walks every signal pin except pin 1 (the clock,
    held low) and the held pins. Every pin is driven weakly through Brutus's
@@ -485,10 +559,14 @@ not the reset term. galre then goes on (`reglatch.py`):
      to decide. A pin that the term does not read, and at which it was
      seen to decide at one level only, may be such a missing literal:
      at the other level the latch was seen only where another term (the
-     one that holds it) decides as well. galre takes candidate walks
-     through the learned circuit, runs the one that gets to most of
-     these cases on the chip, and learns from it if the chip does
-     otherwise, until no candidate gets to any more (at most 64 walks).
+     one that holds it) decides as well. A term that was seen to decide
+     nowhere, by itself, is a guess as a whole: it stands for what the
+     circuit was taken to do on its way through a step that moved
+     several latches, and such a step does not show it. galre takes
+     candidate walks through the learned circuit, runs the one that
+     gets to most of these cases on the chip, and learns from it if the
+     chip does otherwise, until no candidate gets to any more (at most
+     64 walks).
      What is left is listed: "not seen, for no walk tried gets there".
 
    In a registered GAL16V8 or GAL20V8, pin 11 (13) enables the registers'
@@ -583,10 +661,11 @@ not the reset term. galre then goes on (`reglatch.py`):
    the registers and the latch pins. A latch gets a product term for
    every step that holds it. A latch pin often reads the same as an
    input at rest (a P15 that follows P6), and the walks cannot tell
-   which of the two a product term reads; when a latch's cover has more
-   product terms than its macrocell, galre grows a second one that keeps
-   inputs and the latch's own pin rather than other latches' pins, and
-   takes the smaller. From `designs/reglatch22v10`:
+   which of the two a product term reads. So galre grows a second cover
+   whose product terms drop other latches' pins before any other pin: a
+   term then reads another latch only where something that was seen
+   needs it. It takes that cover unless it has more product terms. From
+   `designs/reglatch22v10`:
 
        P21 = CLK & !P3 & P4
            # CLK & P3 & P22
@@ -717,14 +796,15 @@ needed about 3 million power cycles.
   the three counting orders (descending, bit-reversed, both) together
   show every latch that can leave its power-up value. No two of them do.
   In a counting order, though, a pin never rises alone: every faster pin
-  falls with it. A latch that holds only while another signal keeps
-  still (`!P14 = !P8 # !P14 & !P13`, from a graphics card's GAL) never
-  holds then, and the chip reads as combinational. So the power-up state
-  is also walked in Gray code order and in two mixed Gray code orders,
-  and every other state once in a mixed one, from the vector the path
-  left it at; these must read the same as the counting walk. A latch in
-  a registered design that acts only in other states also shows when
-  reading a new state changes it.
+  falls with it (in the same write, with firmware that has no `ser=`; just
+  before it, with one pin per write). A latch that holds only while
+  another signal keeps still (`!P14 = !P8 # !P14 & !P13`, from a graphics
+  card's GAL) may never hold then, and the chip reads as combinational. So
+  the power-up state is also walked in Gray code order and in two mixed
+  Gray code orders, and every other state once in a mixed one, from the
+  vector the path left it at; these must read the same as the counting
+  walk. A latch in a registered design that acts only in other states also
+  shows when reading a new state changes it.
 
   A mixed Gray code changes one pin per vector like the usual one, but
   is walked as one half, one pin's change, the other half, and each half
@@ -788,7 +868,7 @@ The host first configures a job:
 
 - `set pins= base= inv= clk= cand= mask= count= mul= rev= gray= rot=
   mix= start= skm= skv= avm= avv= quiet= chk= chkm= psig= pre= follow=
-  dclk= settle= off= on= vcc= gnd= supply=`
+  dclk= ser= settle= off= on= vcc= gnd= supply=`
 - `path`
 - `probe`
 - `ret <crc> <vectors>`
@@ -835,6 +915,10 @@ read pin is driven at the level it read before the clock rises. With
 instead of through the 1K, and only while the chip is powered; a clock
 pin may not be a VCC or GND pin.
 
+With `ser=1`, every write changes one pin, the lowest socket pin first: a
+vector that differs from the last one in n pins takes n writes, and is
+read after the last. Without it, a vector is written in three port writes.
+
 With `avm` set, no write passes through a vector v with v & `avm` = `avv`
 on its way to the next vector, in any of the three port writes; a target
 vector inside is still written.
@@ -862,6 +946,7 @@ chunks. The header comment of `fw/capture.c` describes the format.
 | `csimcheck.py` | Test vectors from the rebuilt JED for CUPL's simulator, and its verdict |
 | `designs/` | Test designs (CUPL source and compiled JEDs) |
 | `tests/` | Test suite |
+| `skills/` | A skill for an AI coding agent: how to read a chip with galre, and what has gone wrong before |
 
 Run the tests from the repository root:
 

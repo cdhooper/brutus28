@@ -22,7 +22,7 @@ sys.path.insert(0, HERE)
 import fwsim                                       # noqa: E402
 import galre                                       # noqa: E402
 import verify                                      # noqa: E402
-from analysis import Analysis, LatchSuspected      # noqa: E402
+from analysis import DEV, Analysis, AsyncDesign, LatchSuspected, Limit   # noqa: E402
 from capture import CaptureError                   # noqa: E402
 from latch import LatchAnalysis                    # noqa: E402
 from galsim import GAL                             # noqa: E402
@@ -155,8 +155,8 @@ EDGE2LATCH = ("7-9=0,11-13=0,19=0", {
     (15, ""): "P5",
     (15, "oe"): "!P6",
     (16, ""): "P14",
-    (17, ""): "P2 & !P16 & P18\n    # P2 & P4 & P18\n    # P2 & !P3 & !P4 & P16"
-              "\n    # P2 & P17 & !P18",
+    (17, ""): "P2 & !P3 & !P4 & P16\n    # P2 & !P16 & P17\n    # P2 & P4 & P17"
+              "\n    # P2 & !P3 & P17",
     (18, ""): "P3 & !P16 & P17\n    # P3 & P4 & P17"})
 
 # a register input that reads a latch which must have been set on the way
@@ -346,15 +346,22 @@ class SimulatedChip(unittest.TestCase):
 
     def test_latch_that_counting_walks_miss(self):
         """quietlatch16v8's latch holds only while another signal keeps
-        still.  In the counting orders the chip reads as combinational,
-        with a wrong equation; the Gray code orders show the latch."""
+        still.  Where the pins of a vector change in one write, the chip
+        reads as combinational in the counting orders, with a wrong
+        equation; the Gray code orders show the latch.  Where one pin
+        changes per write, a counting order shows it too."""
         fixed = galre.parse_fixed(LATCH_CASES["quietlatch16v8"][1])
         with mock.patch.object(Analysis, "ORDERS", Analysis.ORDERS[:3]):
-            a = Analysis(SimRig(jed("quietlatch16v8")), "GAL16V8", fixed=fixed, log=quiet)
+            a = Analysis(SimRig(jed("quietlatch16v8"), serial=False), "GAL16V8", fixed=fixed,
+                         log=quiet)
             a.run()
         self.assertIn((18, "", False, "P4", 1), a.eqs)        # L = A: wrong
-        a = Analysis(SimRig(jed("quietlatch16v8")), "GAL16V8", fixed=fixed, log=quiet)
+        a = Analysis(SimRig(jed("quietlatch16v8"), serial=False), "GAL16V8", fixed=fixed,
+                     log=quiet)
         with self.assertRaisesRegex(LatchSuspected, "pin 18 read differently .* Gray code"):
+            a.run()
+        a = Analysis(SimRig(jed("quietlatch16v8")), "GAL16V8", fixed=fixed, log=quiet)
+        with self.assertRaisesRegex(LatchSuspected, "pin 18 read differently .* descending"):
             a.run()
 
     def test_reads_another_output(self):
@@ -636,7 +643,9 @@ class SimulatedChip(unittest.TestCase):
         GAL16V8 with oelatch16v8 in it (L = S # L & R) kept L in two
         steps of three in which S fell and R rose, so the same walk read
         differently twice.  One input at a time it reads the same every
-        time: latches, and no bad contact."""
+        time: latches, and no bad contact.  That is firmware which
+        changes the pins of a vector in one write (serial=False); with
+        one pin per write there is no such race."""
         from analysis import Unsteady
         for name, device, fix, eqs in (
                 ("oelatch16v8", "GAL16V8", OELATCH[0], OELATCH[1]),
@@ -646,10 +655,13 @@ class SimulatedChip(unittest.TestCase):
                 fixed = galre.parse_fixed(fix)
                 plain = galre.analyse(SimRig(jed(name)), device, fixed=fixed, log=quiet)
                 logs = []
-                a = galre.analyse(SimRig(jed(name), race=1), device, fixed=fixed,
+                a = galre.analyse(SimRig(jed(name), race=1, serial=False), device, fixed=fixed,
                                   log=logs.append)
+                # (a race may look like a clock edge that changes the chip: then
+                # the pin that enables a GAL16V8's registers is held low first)
+                first = next(line for line in logs if line.startswith("asynchronous behaviour"))
                 self.assertRegex(
-                    logs[0], r"^asynchronous behaviour: pins? [\d, ]+ read differently when the "
+                    first, r"^asynchronous behaviour: pins? [\d, ]+ read differently when the "
                     r"same walk is repeated \(\d+ of \d+ input vectors, the first .*\), but "
                     r"the same every time when one input changes at a time: ")
                 self.assertIs(type(a), type(plain))
@@ -659,8 +671,14 @@ class SimulatedChip(unittest.TestCase):
                 if eqs:
                     self.assertEqual(got, eqs)
                 self.assertEqual(verify.check_captures(a, jed(name)), [])
+                logs = []
+                b = galre.analyse(SimRig(jed(name), race=1), device, fixed=fixed,
+                                  log=logs.append)
+                self.assertFalse(any("same walk is repeated" in line for line in logs))
+                self.assertEqual({(p, kind): "!" * inv + expr for p, kind, inv, expr, _ in b.eqs},
+                                 got)
         # a pin that reads wrong now and then does so one input at a time too
-        rig = OddReads(SimRig(jed("comb16v8"), race=1), 19, 0.01)
+        rig = OddReads(SimRig(jed("comb16v8"), race=1, serial=False), 19, 0.01)
         with self.assertRaises(Unsteady):
             Analysis(rig, "GAL16V8", fixed=galre.parse_fixed("11-16=0"), log=quiet).run()
 
@@ -876,6 +894,171 @@ class SimulatedChip(unittest.TestCase):
         finally:
             shutil.rmtree(out)
 
+    def test_register_low_after_power_up(self):
+        """A 22V10 whose outputs look like those of a GAL20V8 in its
+        registered mode is not taken for one: a register that is low after
+        power-up is none of a GAL20V8.  galre stops as soon as it has seen
+        the register change, and names the device to try."""
+        fix = galre.parse_fixed("4-11=0,14-19=0,23=0")
+        logs = []
+        with self.assertRaises(Limit) as e:
+            galre.analyse(SimRig(jed("lowreg22v10")), "GAL20V8", fixed=fix, survey=16,
+                          log=logs.append)
+        self.assertIn("pin 22 is a register and low after power-up", str(e.exception))
+        self.assertIn("-d GAL22V10", str(e.exception))
+        self.assertFalse(any("states reachable" in line for line in logs))    # before the sweeps
+        a = galre.analyse(SimRig(jed("lowreg22v10")), "GAL22V10", fixed=fix, survey=16, log=quiet)
+        self.assertEqual(sorted(a.reg), [20, 21, 22])
+        self.assertEqual(verify.check_captures(a, jed("lowreg22v10")), [])
+        # a GAL20V8's own registers, of either polarity, are high after power-up
+        galre.analyse(SimRig(jed("cnt20v8")), "GAL20V8", survey=16, log=quiet,
+                      fixed=galre.parse_fixed("5-11=0,14=0,23=0"))
+
+    def test_enable_pin_read_alone(self):
+        """A GAL16V8 or GAL20V8 that clock edges change is first taken for
+        one with registers: pin 11 (13) is held low and walked alone.  It
+        comes out as with the pin walked with the other inputs, in fewer
+        vectors.  A chip without registers, or with latches too, is read
+        as before."""
+        REGS20 = {p: 0 for p in (5, 6, 7, 8, 9, 10, 11, 14, 15, 23)}
+        for name, device, fixed, regs in (
+                ("cnt16v8", "GAL16V8", CASES["cnt16v8"][3], [18, 19]),
+                ("cnt20v8", "GAL20V8", CASES["cnt20v8"][3], [21, 22]),
+                ("regs20v8", "GAL20V8", REGS20, [17, 18, 19, 20, 21, 22])):
+            with self.subTest(design=name):
+                oe = DEV[device]["oe"]
+                logs = []
+                rig = SimRig(jed(name))
+                a = galre.analyse(rig, device, fixed=fixed, survey=16, log=logs.append)
+                self.assertEqual((a.oe_alone, a.oe_off, sorted(a.reg)), (oe, set(regs), regs))
+                self.assertIn("pin %d is held low and read alone" % oe, logs[0])
+                self.assertIn("pin %d, walked alone, switches off pins %s" % (
+                    oe, ", ".join(map(str, regs))), logs)
+                self.assertEqual(a.check_equations(), [])
+                self.assertEqual(verify.check_captures(a, jed(name)), [])
+                src = a.cupl(name)
+                self.assertIn("Pin %d = !OE;" % oe, src)
+                self.assertIn("Pin %d enables the registers' outputs" % oe, src)
+                old = SimRig(jed(name))
+                b = galre.analyse(old, device, fixed=fixed, survey=16, log=quiet, oe_first=False)
+                self.assertIsNone(b.oe_alone)
+                self.assertEqual({(p, kind): "!" * inv + expr for p, kind, inv, expr, _ in a.eqs},
+                                 {(p, kind): "!" * inv + expr for p, kind, inv, expr, _ in b.eqs})
+                self.assertLess(rig.ops["io"], old.ops["io"])
+        # a register that never changes is one all the same: its pin goes with pin 13
+        self.assertIn("!P18.d = 'b'0;", src)
+        self.assertNotIn("P18.oe", src)
+        # an output that reads registers only changes with the clock too, but stays on
+        self.assertIn(16, a.comb)
+        self.assertIn("\nP16 = !P21 & !P22;\n", src)
+        # the rebuilt chip must let go of its outputs as the chip does
+        a.oe_walks[0][1][22] ^= 2
+        self.assertEqual(verify.check_captures(a, jed("regs20v8")),
+                         [("pin 22", "pin 13 walked alone")])
+        # no registers: nothing is held, and the report says nothing of it
+        for name, device in (("comb16v8", "GAL16V8"), ("comb20v8", "GAL20V8")):
+            with self.subTest(design=name):
+                logs = []
+                a = galre.analyse(SimRig(jed(name)), device, fixed=CASES[name][3], survey=16,
+                                  log=logs.append)
+                self.assertIsNone(a.oe_alone)
+                self.assertFalse(any("held low" in line for line in logs))
+        # registers and a latch: the latch shows with the pin held low, and
+        # the chip is read again as before
+        name, device, fix = "reglatch16v8", "GAL16V8", "5-9=0,12-16=0,19=0"
+        logs = []
+        a = galre.analyse(SimRig(jed(name)), device, fixed=galre.parse_fixed(fix), log=logs.append)
+        self.assertIn("pin 11 is held low and read alone", logs[0])
+        self.assertIn("not a GAL16V8 with registers and nothing else, as seen with pin 11 held "
+                      "low: ", logs[1])
+        self.assertEqual(logs[2], "starting again with pin 11 walked like the other inputs")
+        self.assertTrue(a.mixed)
+        self.assertIsNone(a.oe_alone)
+        self.assertEqual(verify.check_captures(a, jed(name)), [])
+        # the pin or the clock held by the caller: as before
+        for held in ({13: 0}, {1: 0}):
+            a = RegLatchAnalysis(SimRig(jed("cnt20v8")), "GAL20V8",
+                                 fixed={**CASES["cnt20v8"][3], **held}, log=quiet, oe_alone=True)
+            self.assertIsNone(a.oe_alone)
+        # a chip without registers, read as one with: it says so
+        from analysis import NotRegistered
+        a = RegLatchAnalysis(SimRig(jed("comb20v8")), "GAL20V8", log=quiet, oe_alone=True)
+        with self.assertRaises(NotRegistered) as e:
+            a.run()
+        self.assertIn("clocking does not change the state", str(e.exception))
+
+    def test_combinational_gal22v10(self):
+        """A GAL22V10 without registers that reads pin 1.  CUPL leaves its
+        unused OLMCs registered, but those registers drive nothing and
+        nothing reads them: the rebuilt JED is checked, with pin 1
+        walked, without the firmware built for the host."""
+        g = GAL(jed("comb22v10"))
+        self.assertEqual(sorted(o.pin for o in g.olmcs if o.registered),
+                         [15, 16, 17, 18, 19, 20, 21])
+        self.assertEqual(g.live_registers(), [])
+        fixed = galre.parse_fixed("4-11=0,15-21=0")
+        with mock.patch.object(fwsim, "library", side_effect=AssertionError("firmware asked for")):
+            rig = SimRig(jed("comb22v10"))
+            a = galre.analyse(rig, "GAL22V10", fixed=fixed, log=quiet)
+            self.assertTrue(a.clock_in_v)
+            self.assertEqual(sorted(a.comb), [22, 23])
+            self.assertEqual(verify.check_captures(a, jed("comb22v10")), [])
+        self.assertIsNone(rig.fw)
+        # registers that show, or that other logic reads without their showing
+        self.assertEqual(GAL(jed("fsm22v10")).live_registers(), [22, 23])
+        self.assertEqual(GAL(jed("buried22v10")).live_registers(), [23])
+        self.assertEqual(GAL(jed("cnt16v8")).live_registers(), [18, 19])
+        self.assertEqual(GAL(jed("comb16v8")).live_registers(), [])
+
+    def test_sweep_that_reads_wrongly_now_and_then(self):
+        """On a board every sweep of clock edges is run twice, and five
+        times where the two differ: an input vector leads where most of
+        the sweeps said.  One wrong reading would otherwise pass for the
+        chip's logic, or for a latch."""
+        fix = galre.parse_fixed("6-11=0,14-19=0,23=0")
+
+        class Flaky:
+            """Every third sweep takes one input vector to another state
+            than the chip does."""
+
+            def __init__(self, twice):
+                self.rig = SimRig(jed("lowreg22v10"))
+                self.pins, self.device, self.ops = self.rig.pins, self.rig.device, self.rig.ops
+                self.walk = self.rig.walk
+                self.twice, self.sweeps = twice, 0
+
+            def transitions(self, *args, **kw):
+                res = self.rig.transitions(*args, **kw)
+                self.sweeps += 1
+                out = dict(res[0])
+                if self.sweeps % 3 == 0 and len(out) > 1:
+                    (o1, x1), (o2, x2) = list(out.items())[:2]
+                    x = x1 & -x1
+                    out[o1], out[o2] = x1 ^ x, x2 | x
+                    if not out[o1]:
+                        del out[o1]
+                return (out,) + tuple(res[1:])
+
+        logs = []
+        a = galre.analyse(Flaky(True), "GAL22V10", fixed=fix, survey=16, log=logs.append)
+        self.assertEqual(sorted(a.reg), [20, 21, 22])
+        self.assertEqual(verify.check_captures(a, jed("lowreg22v10")), [])
+        self.assertGreater(a.unsteady[0], 0)
+        self.assertTrue(any("does not answer the same every time" in line and
+                            "in 5 sweeps of the same vectors" in line for line in logs))
+        self.assertIn("did not answer every clock edge the same way", a.cupl("t"))
+        good = galre.analyse(SimRig(jed("lowreg22v10")), "GAL22V10", fixed=fix, survey=16,
+                             log=quiet)
+        self.assertEqual(a.trans, good.trans)
+        self.assertEqual(good.unsteady, [0, 0])
+        self.assertNotIn("did not answer", good.cupl("t"))
+        # asked once, the wrong readings are the chip
+        try:
+            b = galre.analyse(Flaky(False), "GAL22V10", fixed=fix, survey=16, log=quiet)
+        except (AsyncDesign, Limit):
+            b = None
+        self.assertTrue(b is None or b.trans != good.trans)
+
 
 class Firmware(unittest.TestCase):
     """fw/capture.c on the host, a simulated GAL in the socket."""
@@ -1063,6 +1246,55 @@ class Firmware(unittest.TestCase):
         finally:
             shutil.rmtree(out)
 
+    def test_board_asks_for_the_compiler(self):
+        """galre board does not start without a CUPL compiler that builds a
+        design for the device: its result would not be checked.  It says so
+        before it opens the port; --no-cupl records anyway."""
+        out = tempfile.mkdtemp(prefix="galre")
+
+        def opened(port):
+            raise AssertionError("the port was opened")
+
+        def board(*more):
+            with mock.patch.object(galre, "SerialTransport", opened), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                r = galre.main(["board", "-p", "-", "-d", "GAL16V8", "-o", out] + list(more))
+            with open(os.path.join(out, "report.txt")) as f:
+                return r, f.read()
+        try:
+            # no compiler
+            r, report = board("--cupl", "")
+            self.assertEqual(r, 2)
+            self.assertIn("no CUPL compiler", report)
+            self.assertIn("No capture was run", report)
+            # one that cannot be run
+            r, report = board("--cupl", os.path.join(out, "nocupl"))
+            self.assertEqual(r, 2)
+            self.assertIn("does not build a design for the GAL16V8", report)
+            self.assertIn("Nothing was run", report)
+            # one that runs and makes no JED (no device library, say)
+            fake = os.path.join(out, "fakecupl")
+            with open(fake, "w") as f:
+                f.write("#!/bin/sh\necho device not in library\n")
+            os.chmod(fake, 0o755)
+            r, report = board("--cupl", fake)
+            self.assertEqual(r, 2)
+            self.assertIn("device not in library", report)
+            self.assertIsNotNone(galre.check_cupl(fake, "GAL22V10"))
+            # --no-cupl goes on to the port, with or without a compiler
+            for more in (["--no-cupl"], ["--no-cupl", "--cupl", fake]):
+                with self.assertRaises(AssertionError):
+                    board(*more)
+        finally:
+            shutil.rmtree(out)
+
+    @unittest.skipUnless(CUPL, "no CUPL compiler")
+    def test_compiler_check(self):
+        """The check galre makes of the compiler passes with a real one, for
+        every device."""
+        for device in ("GAL16V8", "GAL20V8", "GAL22V10"):
+            self.assertIsNone(galre.check_cupl(CUPL, device))
+
     def test_async_designs_stop(self):
         """galre sim and board stop with exit code 3 on a chip with state
         that changes without a clock, and replay says the same."""
@@ -1070,7 +1302,7 @@ class Firmware(unittest.TestCase):
 
         def galre_main(*argv):
             with contextlib.redirect_stdout(io.StringIO()):
-                r = galre.main(list(argv) + ["--cupl", ""])
+                r = galre.main(list(argv) + ["--no-cupl"])
             with open(os.path.join(argv[argv.index("-o") + 1], "report.txt")) as f:
                 return r, f.read()
         try:
@@ -1103,7 +1335,7 @@ class Firmware(unittest.TestCase):
 
         def galre_main(*argv):
             with contextlib.redirect_stdout(io.StringIO()):
-                r = galre.main(list(argv) + ["--cupl", ""])
+                r = galre.main(list(argv) + ["--no-cupl"])
             with open(os.path.join(argv[argv.index("-o") + 1], "report.txt")) as f:
                 return r, f.read()
         try:
@@ -1141,7 +1373,7 @@ class Firmware(unittest.TestCase):
 
         def galre_main(*argv):
             with contextlib.redirect_stdout(io.StringIO()):
-                r = galre.main(list(argv) + ["--cupl", ""])
+                r = galre.main(list(argv) + ["--no-cupl"])
             with open(os.path.join(argv[argv.index("-o") + 1], "report.txt")) as f:
                 return r, f.read()
         try:
@@ -1179,7 +1411,7 @@ class Firmware(unittest.TestCase):
 
         def galre_main(*argv):
             with contextlib.redirect_stdout(io.StringIO()):
-                r = galre.main(list(argv) + ["--cupl", ""])
+                r = galre.main(list(argv) + ["--no-cupl"])
             with open(os.path.join(argv[argv.index("-o") + 1], "report.txt")) as f:
                 return r, f.read()
         try:
@@ -1219,7 +1451,7 @@ class Firmware(unittest.TestCase):
 
         def galre_main(*argv):
             with contextlib.redirect_stdout(io.StringIO()):
-                r = galre.main(list(argv) + ["--cupl", ""])
+                r = galre.main(list(argv) + ["--no-cupl"])
             with open(os.path.join(argv[argv.index("-o") + 1], "report.txt")) as f:
                 return r, f.read()
         try:
@@ -1256,7 +1488,7 @@ class Firmware(unittest.TestCase):
 
         def galre_main(*argv):
             with contextlib.redirect_stdout(io.StringIO()):
-                r = galre.main(list(argv) + ["--cupl", ""])
+                r = galre.main(list(argv) + ["--no-cupl"])
             with open(os.path.join(argv[argv.index("-o") + 1], "report.txt")) as f:
                 return r, f.read()
         try:
@@ -1537,7 +1769,7 @@ class Firmware(unittest.TestCase):
 
         def galre_main(*argv):
             with contextlib.redirect_stdout(io.StringIO()):
-                r = galre.main(list(argv) + ["--cupl", ""])
+                r = galre.main(list(argv) + ["--no-cupl"])
             with open(os.path.join(argv[argv.index("-o") + 1], "report.txt")) as f:
                 return r, f.read()
         try:
@@ -1644,6 +1876,266 @@ class Firmware(unittest.TestCase):
         self.assertEqual(direct, 1 << 0)    # socket pin 1, the clock
         self.assertEqual(a.equations(), plain.equations())
         self.assertEqual(a.trans, plain.trans)
+
+    def _most_pins_per_write(self, serial):
+        """fsm22v10 explored through the firmware: the analysis, and per
+        kind of job the most device pins that one write changed."""
+        t = self.transport("fsm22v10", "dip24")
+        dev, io, capture = t.dev, t.dev.io, t.capture
+        pins = sum(dev.sbit[p] for p in dev.pins)
+        most, job = {}, [None]
+
+        def logged(value):
+            if dev.powered:
+                n = bin((value ^ dev.last) & pins).count("1")
+                most[job[0]] = max(most.get(job[0], 0), n)
+            return io(value)
+
+        def run(line):
+            job[0] = line.split()[-1]
+            return capture(line)
+        dev.io, t.capture = logged, run
+        rig = BrutusRig(t, "GAL22V10", log=quiet, serial=serial)
+        a = Analysis(rig, "GAL22V10", fixed=CASES["fsm22v10"][3], log=quiet)
+        a.run()
+        return a, most
+
+    def test_one_pin_per_write(self):
+        """With ser set, no write changes more than one pin: the vectors
+        of a walk, clocked steps, the clock edge, the reads of a state,
+        the way back."""
+        a, most = self._most_pins_per_write(serial=True)
+        self.assertEqual((most["walk"], most["trans"]), (1, 1))
+        b, most = self._most_pins_per_write(serial=False)
+        self.assertGreater(most["walk"], 1)
+        self.assertGreater(most["trans"], 1)
+        self.assertEqual(a.equations(), b.equations())
+        self.assertEqual(a.trans, b.trans)
+
+    def test_firmware_without_ser(self):
+        """A firmware that does not know ser= is used as it is, and the
+        run says so once."""
+        t = self.transport("fsm22v10", "dip24")
+        command = t.command
+        t.command = lambda line: ("Unknown setting ser=1\n" if "ser=" in line
+                                  else command(line))
+        logs = []
+        rig = BrutusRig(t, "GAL22V10", log=logs.append)
+        self.assertFalse(rig.metadata()["serial"])
+        a = Analysis(rig, "GAL22V10", fixed=CASES["fsm22v10"][3], log=quiet)
+        a.run()
+        self.assertIsNone(rig.serial)
+        self.assertEqual(sum("it has no ser=" in line for line in logs), 1)
+        b, _ = self._most_pins_per_write(serial=True)
+        self.assertEqual(a.equations(), b.equations())
+        self.assertTrue(BrutusRig(self.transport("fsm22v10", "dip24"), "GAL22V10",
+                                  log=quiet).metadata()["serial"])
+
+    def test_job_that_lost_its_state_runs_again(self):
+        """The firmware gives a job up when two power cycles and the same
+        clocks do not lead back to its state.  A chip that reads wrongly
+        now and then does that: the job is run again, twice at most."""
+        t = self.transport("fsm22v10", "dip24")
+        capture, lost = t.capture, [1]
+
+        def run(line):
+            cap = capture(line)
+            if lost[0]:
+                lost[0] -= 1
+                cap.status = 3
+            return cap
+        t.capture = run
+        logs = []
+        rig = BrutusRig(t, "GAL22V10", log=logs.append)
+        first = rig.walk([2, 3], {}, [])
+        self.assertEqual(sum("running the job again" in line for line in logs), 1)
+        self.assertEqual(rig.walk([2, 3], {}, []), first)
+        lost[0] = 3
+        with self.assertRaises(CaptureError) as e:
+            rig.walk([2, 3], {}, [])
+        self.assertIn("could not get back to the path state", str(e.exception))
+        self.assertEqual(lost[0], 0)
+
+    def test_inputs_that_fall_with_the_enable(self):
+        """A chip that now and then loses the state of its registers when
+        the pin that enables its outputs falls in one write with other
+        inputs (fwsim.SocketDevice, glitch), as a part did on a board.
+        With one pin per write it never does; with all pins of a vector
+        in one write, galre gets a chip that it is not."""
+        fix = galre.parse_fixed("6-11=0,14-19=0,23=0")
+        for seed in (1, 2):
+            a = galre.analyse(SimRig(jed("lowreg22v10"), glitch=seed), "GAL22V10", fixed=fix,
+                              survey=16, log=quiet)
+            self.assertEqual(sorted(a.reg), [20, 21, 22])
+            self.assertEqual(a.unsteady, [0, 0])
+            self.assertEqual(verify.check_captures(a, jed("lowreg22v10")), [])
+        good = a.trans
+        try:
+            b = galre.analyse(SimRig(jed("lowreg22v10"), glitch=1, serial=False, twice=False),
+                              "GAL22V10", fixed=fix, survey=16, log=quiet)
+        except (AsyncDesign, Limit):
+            b = None
+        self.assertTrue(b is None or b.trans != good)
+
+    def test_power_cycle_that_does_not_reset(self):
+        """A chip that keeps its charge while the supply is off is not
+        reset when it comes back soon (fwsim.SocketDevice, hold_ms): it
+        comes up in another state, and every job would start from that.
+        The rig finds a power-off time that resets it."""
+        io, fix = DEV["GAL22V10"]["io"], galre.parse_fixed("6-11=0,14-19=0,23=0")
+
+        def rig(hold, logs, **kw):
+            t = fwsim.HarnessTransport(self.lib, fwsim.SocketDevice(jed("lowreg22v10"), "dip24",
+                                                                 hold_ms=hold))
+            r = BrutusRig(t, "GAL22V10", log=logs.append, **kw)
+            if r.jumper_check:
+                r.preflight()
+            return r
+        for hold, off in ((0, 20), (30, 60), (70, 120), (300, 480)):
+            logs = []
+            r = rig(hold, logs)
+            self.assertEqual(r.check_power_cycle(io, fix), off)
+            self.assertEqual(r.metadata()["off_ms"], off)
+            said = [line for line in logs if "does not reset this chip" in line]
+            self.assertEqual(len(said), int(hold > 0))
+            if hold:
+                self.assertIn("power is now off for %d ms" % off, said[0])
+        # with it, the chip comes out as it is
+        r = rig(30, [])
+        r.check_power_cycle(io, fix)
+        a = galre.analyse(r, "GAL22V10", fixed=fix, survey=16, log=quiet)
+        self.assertEqual(verify.check_captures(a, jed("lowreg22v10")), [])
+        # without it, a power cycle leads back to the state of a job only if
+        # one clock with every input low leads to the same state from anywhere
+        with self.assertRaises(CaptureError) as e:
+            galre.analyse(rig(30, []), "GAL22V10", fixed=fix, survey=16, log=quiet)
+        self.assertIn("could not get back to the path state", str(e.exception))
+        self.assertIn("give a longer --off", str(e.exception))
+        # no jumper check: nothing is powered before a job, nothing to find
+        r = rig(30, [], jumper_check=False)
+        self.assertEqual(r.check_power_cycle(io, fix), 20)
+
+    def test_outputs_switched_on_together(self):
+        """A chip that takes it for a clock edge when six of its outputs
+        are switched on at once, each against the level its pin is held
+        at (fwsim.SocketDevice, bounce), as a PALCE20V8 did on a board
+        whenever the pin that enables its registers fell while the board
+        held six of their pins low.  With that pin held low and walked
+        alone, no output is switched on against the board.  Walked with
+        the other inputs, the registers change in the walks, and galre
+        takes them for latches."""
+        fix = "5-11=0,14-15=0,23=0"
+        fixed = galre.parse_fixed(fix)
+        rig = SimRig(jed("regs20v8"), bounce=6)
+        a = galre.analyse(rig, "GAL20V8", fixed=fixed, survey=16, log=quiet)
+        self.assertEqual(rig.socket_device.bounced, 0)
+        self.assertEqual((len(a.states), sorted(a.reg)), (32, [17, 18, 19, 20, 21, 22]))
+        self.assertEqual(verify.check_captures(a, jed("regs20v8")), [])
+        rig = SimRig(jed("regs20v8"), bounce=6)
+        logs = []
+        try:
+            b = galre.analyse(rig, "GAL20V8", fixed=fixed, survey=16, log=logs.append,
+                              oe_first=False)
+        except (AsyncDesign, Limit):
+            b = None
+        self.assertGreater(rig.socket_device.bounced, 0)
+        self.assertIn("the chip holds state without a clock", logs[0])
+        self.assertTrue(b is None or getattr(b, "trans", None) != a.trans)
+
+        # on the board, and from its recording
+        def galre_main(*argv):
+            with contextlib.redirect_stdout(io.StringIO()):
+                r = galre.main(list(argv) + ["--no-cupl"])
+            with open(os.path.join(argv[argv.index("-o") + 1], "report.txt")) as f:
+                return r, f.read()
+
+        def source(d):
+            with open(os.path.join(d, "regs.pld")) as f:
+                return f.read()
+        out = tempfile.mkdtemp(prefix="galre")
+        try:
+            board, old = os.path.join(out, "board"), os.path.join(out, "old")
+            dev = fwsim.SocketDevice(jed("regs20v8"), "dip24", bounce=6)
+            with mock.patch.object(galre, "SerialTransport",
+                                   lambda port: fwsim.HarnessTransport(self.lib, dev)):
+                r, report = galre_main("board", "-p", "-", "-d", "GAL20V8", "-o", board,
+                                       "-t", "regs", "--fix", fix, "--survey", "16")
+            self.assertEqual((r, dev.bounced), (0, 0))
+            self.assertIn("\npin 13: held low and read alone, if clock edges change the chip\n",
+                          report)
+            self.assertIn("\npin 13, walked alone, switches off pins 17, 18, 19, 20, 21, 22\n",
+                          report)
+            self.assertIn("\nPin 13 = !OE;\n", report)
+            r, report = galre_main("replay", os.path.join(board, "capture.jsonl"),
+                                   "-o", os.path.join(out, "replay"))
+            self.assertEqual(r, 0)
+            self.assertIn("recorded pin 13: held low and read alone", report)
+            self.assertEqual(source(os.path.join(out, "replay")), source(board))
+            # a recording of a run that walked the pin with the others (as every
+            # recording before this one was) is replayed the same way
+            dev = fwsim.SocketDevice(jed("regs20v8"), "dip24")
+            with mock.patch.object(galre, "SerialTransport",
+                                   lambda port: fwsim.HarnessTransport(self.lib, dev)):
+                r, report = galre_main("board", "-p", "-", "-d", "GAL20V8", "-o", old,
+                                       "-t", "regs", "--fix", fix, "--survey", "16",
+                                       "--no-oe-first")
+            self.assertEqual(r, 0)
+            self.assertIn("\npin 13: walked with the other inputs\n", report)
+            rec = os.path.join(old, "capture.jsonl")
+            with open(rec) as f:
+                lines = f.read().split("\n", 1)
+            self.assertIn('"oe_first": false', lines[0])
+            with open(rec, "w") as f:
+                f.write(lines[0].replace(', "oe_first": false', "") + "\n" + lines[1])
+            r, report = galre_main("replay", rec, "-o", os.path.join(out, "replay2"))
+            self.assertEqual(r, 0)
+            self.assertNotIn("held low and read alone", report)
+            self.assertEqual(source(os.path.join(out, "replay2")), source(old))
+        finally:
+            shutil.rmtree(out)
+
+    def test_check_that_cannot_run(self):
+        """The check of the rebuilt JED takes the firmware built for the
+        host where the design has latches.  Where that cannot be built,
+        galre says so and ends with exit code 1, the equations written;
+        it used to end in a traceback, after the captures."""
+        if not CUPL:
+            self.skipTest("no CUPL compiler")
+        name, (device, fix, _, _, _) = "latch16v8", LATCH_CASES["latch16v8"]
+        out = tempfile.mkdtemp(prefix="galre")
+
+        def run(*argv):
+            with contextlib.redirect_stdout(io.StringIO()):
+                r = galre.main(list(argv) + ["--cupl", CUPL])
+            with open(os.path.join(argv[argv.index("-o") + 1], "report.txt")) as f:
+                return r, f.read()
+        try:
+            board, rec = os.path.join(out, "board"), os.path.join(out, "board", "capture.jsonl")
+            dev = fwsim.SocketDevice(jed(name), "dip20")
+            with mock.patch.object(galre, "SerialTransport",
+                                   lambda port: fwsim.HarnessTransport(self.lib, dev)):
+                r, report = run("board", "-p", "-", "-d", device, "-o", board, "--fix", fix,
+                                "-t", name)
+            self.assertEqual(r, 0)
+            self.assertIn(name + ".jed against the captures", report)
+            # no C compiler
+            with mock.patch.object(fwsim, "library", return_value=None):
+                r, report = run("replay", rec, "-o", os.path.join(out, "nocc"))
+            self.assertEqual(r, 1)
+            self.assertIn("The rebuilt JED could not be checked against the captures: ", report)
+            self.assertIn("needs a C compiler", report)
+            self.assertIn(name + ".pld is written, but nothing says yet that it is the chip.",
+                          report)
+            self.assertTrue(os.path.exists(os.path.join(out, "nocc", name + ".pld")))
+            # galtools copied without the firmware's sources
+            with mock.patch.object(fwsim, "FW", os.path.join(out, "nowhere")), \
+                    mock.patch.object(fwsim, "_library", []):
+                r, report = run("replay", rec, "-o", os.path.join(out, "nofw"))
+            self.assertEqual(r, 1)
+            self.assertIn("could not be checked against the captures: the firmware's capture.c "
+                          "is not beside galtools", report)
+        finally:
+            shutil.rmtree(out)
 
     def test_dclk_refuses_supply_pin(self):
         t = self.transport("fsm22v10", "dip24")

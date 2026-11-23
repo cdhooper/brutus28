@@ -70,7 +70,8 @@ import sys
 from array import array
 from functools import reduce
 
-from analysis import Analysis, AsyncDesign, Limit, _Restart, _pins, _state, lowest, swap
+from analysis import (Analysis, AsyncDesign, Limit, NotRegistered, _Restart, _pins, _state,
+                      lowest, swap)
 from bitsim import litmasks
 from latch import LatchAnalysis, _ONES, _ZEROS, _from_bytes
 from rig import CLOCK, bitrev, cube_set, gray_arrays, gray_order, popcount, survey_mul
@@ -157,9 +158,9 @@ class RegLatchAnalysis(Analysis):
     PLAIN, AROUND, AVOID = 0, 1, 2      # how a walk treats the reset term
 
     def __init__(self, rig, device, fixed=None, survey=64, max_states=1024, log=print,
-                 hist=(), max_checks=48, confirm=2, max_guided=64):
+                 hist=(), max_checks=48, confirm=2, max_guided=64, oe_alone=False):
         super().__init__(rig, device, fixed=fixed, survey=survey, max_states=max_states,
-                         log=log)
+                         log=log, oe_alone=oe_alone)
         self.hist = {p for p in hist if p in self.dev["io"] and p not in self.fixed}
         self.mixed = bool(self.hist)
         self.max_checks, self.confirm, self.max_guided = max_checks, confirm, max_guided
@@ -189,6 +190,8 @@ class RegLatchAnalysis(Analysis):
                      and p not in self.fixed)
         if not new:
             raise err
+        if self.oe_alone:
+            raise NotRegistered(str(err))     # read again with the enable pin walked
         self.hist.update(new)
         self.bidir.update(p for p in new if p in self.V)      # also an input at times
         self.mixed = True
@@ -1244,6 +1247,11 @@ class RegLatchAnalysis(Analysis):
                                 self.name(q), self.name(q), names[-1], len(names) + 1))
             self.log(note)
             self.notes.append(note)
+        # a term that is true only in passing decides nowhere the chip rests:
+        # said above, and no walk can show it by itself
+        said = {"%s by %s by itself" % (self.name(p), t)
+                for (p, _), terms in passing.items() for t in terms}
+        self.unseen = [u for u in self.unseen if u.lstrip("!") not in said]
         if self.unseen:
             self.notes.append(
                 "Not seen on the chip, for no walk tried gets there (a term may lack a "
@@ -1426,7 +1434,7 @@ class RegLatchAnalysis(Analysis):
         n1, nn, N, m = self.n1, self.nn, 1 << self.n1, len(self.L)
         bg = self._base[0]
         self._alone, self._tg, self._dead = {}, {}, set()
-        seen = {}
+        seen, shown = {}, set()
         for j, p in enumerate(self.L):
             sup, cubes, _ = self.cover[(p, "")]
             for a in range(len(self.S)):
@@ -1441,6 +1449,7 @@ class RegLatchAnalysis(Analysis):
                         pts &= known
                         if not pts:
                             continue
+                        shown.add((j, ci))
                         care = cubes[ci][0]
                         for i, v in enumerate(sup):
                             if care >> i & 1:
@@ -1473,6 +1482,12 @@ class RegLatchAnalysis(Analysis):
                 if jj == j and side < 3 and cs[ci] & ~twice & (
                         v1[i] if side == 1 else full ^ v1[i]):
                     self._open.add((j, ci, i, 2 - side))
+            # A term that no walk showed deciding by itself, anywhere, stands
+            # for what the circuit was taken to do on its way through steps
+            # that move several latches: nothing of it was seen.
+            for ci, c in enumerate(cs):
+                if (j, ci) not in shown and c & ~twice:
+                    self._open.add((j, ci, -1, 0))
         self._openj = [[t[1:] for t in self._open if t[0] == j] for j in range(m)]
         # A latch that follows others moves only in steps that change
         # several latches, which by themselves show nothing of any one of
@@ -1490,6 +1505,9 @@ class RegLatchAnalysis(Analysis):
                 for lv in path:
                     for j in range(m):
                         done.update(self._tries(j, a, lv, xp))
+        # (not a term that no walk showed by itself: such a step is where
+        # it comes from)
+        done = {t for t in done if t[2] >= 0}
         if done:
             self._open -= done
             self._openj = [[t[1:] for t in self._open if t[0] == j] for j in range(m)]
@@ -1501,11 +1519,11 @@ class RegLatchAnalysis(Analysis):
         sup, cubes, inv = self.cover[(self.L[j], "")]
         names = [self.name(p) for p in self.EV] + [self.name(r) for r in self.cvars]
         care, val = cubes[ci]
-        return "%s%s by %s with %s %s" % (
+        return "%s%s by %s %s" % (
             "!" if inv else "", self.name(self.L[j]),
             " & ".join(("" if val >> k & 1 else "!") + names[v]
                        for k, v in enumerate(sup) if care >> k & 1) or "'b'1",
-            names[sup[i]], "high" if side else "low")
+            "by itself" if i < 0 else "with %s %s" % (names[sup[i]], "high" if side else "low"))
 
     def _tries(self, j, a, lv, xp):
         """The open claims (_open_terms) that a sample of latch j at vector
@@ -1518,6 +1536,9 @@ class RegLatchAnalysis(Analysis):
             al = self._alone_cubes(j, a, lv)
             t = 0
             for ci, i, side in self._openj[j]:
+                if i < 0:
+                    t |= al[ci]
+                    continue
                 v = sup[i]
                 if v < n1:
                     t |= al[ci] & (self.cv1[v] if side else self.cfull ^ self.cv1[v])
@@ -1532,9 +1553,9 @@ class RegLatchAnalysis(Analysis):
         al = self._alone_cubes(j, a, lv)
         return [(j, ci, i, side) for ci, i, side in self._openj[j]
                 if al[ci] >> xp & 1
-                and (xp >> sup[i] & 1 if sup[i] < n1 else w[sup[i] - n1]) == side]
+                and (i < 0 or (xp >> sup[i] & 1 if sup[i] < n1 else w[sup[i] - n1]) == side)]
 
-    GUESS_STEPS = 8192      # of a candidate walk that are taken through the circuit
+    GUESS_STEPS = 65536     # of a candidate walk that are taken through the circuit
 
     def _guesses(self, cfg, lv):
         """The open claims that the walk cfg would settle, as the learned
@@ -1592,7 +1613,7 @@ class RegLatchAnalysis(Analysis):
         if not todo:
             return None, None
         n1 = self.n1
-        per = max(8, min(256, (1 << 17) >> n1))
+        per = max(32, min(256, (1 << 21) >> n1))
         for _ in range(4):
             best, most, more = None, set(), 8
             for _ in range(per):
@@ -1870,6 +1891,12 @@ class RegLatchAnalysis(Analysis):
         lat = [i for i, v in enumerate(sup) if v >= first and i != own]
         return (lat[::-1] + [i for i, v in enumerate(sup) if v < first]
                 + ([own] if own is not None else []))
+
+    def _others(self, p, kind, sup):
+        """The other latches' pins, which _drop_first puts first."""
+        first = self.n1 + len(self.reg)
+        own = self._own(p, kind, sup)
+        return sum(1 for i, v in enumerate(sup) if v >= first and i != own)
 
     def _hazards(self, p, kind, sup, pos, neg, on, off):
         if kind or p not in self.L or not self.hold_terms:

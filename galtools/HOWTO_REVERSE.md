@@ -33,12 +33,15 @@ This guide covers what to do and how to read the result.
   that older firmware rejects.
 - Python 3.8 or newer. numpy is optional; with it, walk data decodes
   faster.
-- A CUPL compiler, optional but recommended: galre then builds the JED and
-  checks it against every capture. WinCUPL's `cupl` or a native build of it
-  will do. galre finds it through `--cupl`, `$CUPL`, or `cupl` on the PATH,
-  and runs it as `cupl -jaxm4 NAME.pld`. The `.pld` says so in a comment,
-  and carries what else CUPL needs (the device mode, and a `MIN` statement
-  for latches).
+- A CUPL compiler: galre builds the JED with it and checks it against
+  every capture. WinCUPL's `cupl` or a native build of it will do. galre
+  finds it through `--cupl`, `$CUPL`, or `cupl` on the PATH, and runs it as
+  `cupl -jaxm4 NAME.pld`. The `.pld` says so in a comment, and carries
+  what else CUPL needs (the device mode, and a `MIN` statement for
+  latches). A result that was not built is not checked, so `galre board`
+  does not start without a compiler that builds a design for the device.
+  With `--no-cupl` it records anyway; replay the recording where the
+  compiler is (section 8).
 - To build and install the firmware: `arm-none-eabi-gcc`, `make` and
   `dfu-util`.
 
@@ -51,7 +54,8 @@ This guide covers what to do and how to read the result.
 This builds `fw/objs/fw.bin`. To install it over USB:
 
 1. Hold down the ABORT button, press and release RESET, and keep holding
-   ABORT for three seconds.
+   ABORT for three seconds. Or, if the board runs its firmware, type
+   `reset dfu` on its console: that needs no hand on the board.
 2. After about 10 seconds the board shows up as USB device `0483:df11`
    (STM Device in DFU Mode).
 3. On Linux, run `make dfu` in `fw/`. It first installs udev rules into
@@ -60,12 +64,15 @@ This builds `fw/objs/fw.bin`. To install it over USB:
 
        dfu-util --device 0483:df11 --alt 0 --download objs/fw.bin --dfuse-address 0x08000000:leave
 
-4. Press RESET if the green power LED does not come on.
+4. Press RESET if the green power LED does not come on. On a Linux host
+   the board can stay listed as `0483:df11` after the download although
+   the new firmware has started, because the host has not looked again:
+   `usbreset 0483:df11` makes it, and the board comes back as `Brutus28`.
 
 The board's serial port is `/dev/ttyACM0` or similar on Linux, and
 `/dev/cu.usbmodemXXXX` on macOS. To check the firmware, type
 `pld capture ?` on the board's console: the keys listed under `set` must
-include `gray rot start skm skv avm avv quiet chk follow dclk`.
+include `gray rot start skm skv avm avv quiet chk follow dclk ser`.
 
 ## 3. Put the chip in
 
@@ -82,6 +89,26 @@ Set the jumpers:
 | GAL16V8 (PLCC20, in the small PLCC socket) | socket pin 20 | socket pin 10 | `-d GAL16V8 -s plcc20` |
 
 Set the supply jumper to 5 V.
+
+**A 24-pin part whose type you do not know** (a protected chip, a label
+that is gone): read it as a GAL22V10. A GAL20V8 has the same pins, and
+read as a 22V10 it comes out complete, with pins 14 and 23 as inputs. A
+22V10 read as a GAL20V8 does not: galre then cannot write what only a
+22V10 can do. A 22V10 shows by any of these:
+
+- pin 14 or 23 is driven;
+- logic reads pin 1 or pin 13 in a design with registers;
+- a register is low after power-up;
+- the registers have an asynchronous reset.
+
+Nothing shows a GAL20V8 from the outside (the label does, if it is still
+there). If none of the above turns up, the chip may be one; a GAL22V10
+programmed with the result does the same either way.
+
+CUPL's "excessive number of product terms" at the end of a run does not
+show a 22V10. It says that galre's equations do not fit the device, and
+galre's equations are not the shortest: a PALCE20V8 with four latches
+came out with sixteen product terms on one pin, and needs six.
 
 **A PLCC20 part at 5 V: read this first.** The PLCC20 socket is wired
 pin for pin to socket pins 1 to 20, so the part's VCC is socket pin 20,
@@ -148,7 +175,10 @@ with the number of input combinations.
 progress and keeps the same text in `out/report.txt`. A run goes like
 this:
 
-1. **Jumper check**, as above.
+1. **Jumper check**, as above. Then galre checks that a power cycle
+   resets the chip: it reads the pins after one of 20 ms (`--off`) and
+   after one of a second, and makes the power cycles longer if the two
+   differ.
 2. **Power-up walk.** galre reads every pin for every input combination.
    Brutus drives every pin weakly, through 1K, so a pin the GAL drives
    reads the GAL's value instead of Brutus's. This finds the
@@ -160,7 +190,9 @@ this:
    state it finds, walks each new state, and returns to the state under
    test by a clocked path or by power-cycling. If a state falls back to
    the power-up state without a clock, it learns the GAL22V10's
-   asynchronous reset term and explores again around it.
+   asynchronous reset term and explores again around it. Every sweep of
+   clock edges is run twice, and must read the same (see "the chip does
+   not answer the same every time" in section 6).
 4. **Latches.** If the power-up walk reads differently in another order,
    the chip holds state without a clock. galre then walks the inputs in
    Gray code order (one pin changes per write) in many bit orders, and
@@ -221,6 +253,12 @@ From `galre sim designs/fsm22v10.jed` (shortened):
     ...
     fsm.jed against the captures (3 states x 131072 input vectors): identical
 
+- On a GAL16V8 or GAL20V8 the report may start with **"clock edges change
+  what the chip drives: pin 13 is held low and read alone"** (pin 11 on a
+  GAL16V8). With registers in such a chip, that pin enables their outputs
+  and does nothing else, so galre holds it low and walks it alone: "pin
+  13, walked alone, switches off pins 21, 22" names the registered pins.
+  The source then has `Pin 13 = !OE;` and a comment that says so.
 - The **power-up walk** line gives the pin roles. Pins that are never
   driven are inputs; pins whose value changes with the inputs are
   combinational outputs; tri-state ones have an output enable.
@@ -232,6 +270,25 @@ From `galre sim designs/fsm22v10.jed` (shortened):
   whose output is active low: it is high at power-up and after a reset,
   and CUPL builds it that way.
 - The last line is the check of the rebuilt JED. It must say `identical`.
+
+**"the chip does not answer the same every time: clocked in from state S,
+N of M input vectors read differently in 5 sweeps of the same vectors".**
+galre runs every sweep of clock edges twice. Here the two differed, so it
+ran the sweep five times and took each input vector to lead where most of
+them said. The source says so in a comment and the run ends with a NOTE.
+The JED is then checked against what most sweeps said, not against a chip
+that answers the same every time: run galre again and compare the two
+results, and look at the equations of the registers that the named
+vectors change. Causes seen so far:
+
+- several pins changing in one write, with firmware that has no `ser=`
+  (section 10): a GAL in a PLCC28 loaded its registers, as on a clock
+  edge, in one of 20 writes in which the pin that enables its outputs fell
+  together with four inputs;
+- a bad contact in the socket: reseat the chip.
+
+`--once` runs every sweep once, as galre did before; a wrong reading then
+passes for the chip's logic, or for a latch.
 
 ### An asynchronous reset term
 
@@ -338,8 +395,11 @@ clock is high, with an output of the latch on pin 20:
 - "not seen, for no walk tried gets there (N): !P15 by ... with P8
   high; ...": the named product term decides the latch with that pin at
   that level, by the equations, but the chip was never seen there. The
-  term may lack a literal (`!P8` in the example). If the chip's
-  behaviour in such a case matters, look at it by hand.
+  term may lack a literal (`!P8` in the example). "... by itself"
+  instead of a pin says that no walk showed the term deciding the latch
+  on its own anywhere: it explains a step in which several latches
+  moved at once, and the chip may do that step by other terms. If the
+  chip's behaviour in such a case matters, look at it by hand.
 - "P17 has a product term that is true only in passing: ...": the term
   reads an output together with inputs at levels the output does not
   have once it has followed them, so it is true only for that output's
@@ -398,7 +458,10 @@ designs in `designs/`, with the pins the tests hold:
 | `fsm22v10` | 3-state machine, output enables | |
 | `comb16v8` | combinational only | |
 | `cnt20v8` | GAL20V8, registered mode: counter, pin 13 as the registers' enable | |
+| `regs20v8` | GAL20V8 with six registers, one of which never changes, and an output that reads registers only: pin 13 switches six outputs on at once | `5-11=0,14-15=0,23=0` |
+| `lowreg22v10` | a 22V10 that looks like a registered GAL20V8, but for a register that is low after power-up | `4-11=0,14-19=0,23=0` |
 | `comb20v8` | GAL20V8, complex mode: an output that reads another output's pin | |
+| `comb22v10` | GAL22V10 without registers that reads pin 1 and an I/O pin | `4-11=0,15-21=0` |
 | `simple20v8` | GAL20V8, simple mode | |
 | `ar22v10` | asynchronous reset term `P3 & !P4` | `6-11=0,13-20=0` |
 | `arlow22v10` | active-low reset input and register outputs | `4=0,6-11=0,13-20=0` |
@@ -428,6 +491,13 @@ designs in `designs/`, with the pins the tests hold:
 
 ## 10. When galre stops
 
+**Exit code 2, "no CUPL compiler" or "CUPL does not build a design".**
+Nothing was run. galre found no compiler, or the one it found gave no JED
+for one gate on this device (the report has what it printed; a missing
+device library is the usual reason). Install it or name it with `--cupl`.
+`--no-cupl` records without it: the equations are then written, but not
+built and not checked, until the recording is replayed with a compiler.
+
 **Exit code 2, jumper check.** Set the jumpers as printed under
 "expected". The detection has been checked on one board only; the report
 lists its readings for every pin. If you are sure the jumpers are right
@@ -441,10 +511,63 @@ commit (section 2).
 **"pin N is held at V, but the GAL drives it".** Remove that pin from
 `--fix`.
 
+**"This firmware changes several pins in one write (it has no ser=)".**
+The run goes on. With that firmware, the pins that change in one write
+reach the chip in no certain order, and a chip may now and then take that
+for a clock edge (see "the chip does not answer the same every time" in
+section 6). Install the firmware from the same commit (section 2).
+
+**"not a GAL20V8 with registers and nothing else, as seen with pin 13 held
+low: ..." and "starting again with pin 13 walked like the other inputs".**
+The run goes on. Clock edges changed what the chip drives, so galre took
+it for a chip with registers and held the pin that enables them; the rest
+of the line says what did not fit (latches as well as registers, or a pin
+that the enable switches off and that is no register). It reads the chip
+again as it reads one without registers. `--no-oe-first` skips the first
+try.
+
+**Registers that change without a clock: "the chip holds state without a
+clock", then "not latches alone", for a chip that has registers.** On a
+board, a chip can take it for a clock edge when many of its outputs are
+switched on at once, each against the level the board holds its pin at. A
+PALCE20V8 in a PLCC28 did, every time the pin that enables its eight
+registered outputs fell while six or more of their pins were held low.
+galre keeps the enable pin of a GAL16V8 and a GAL20V8 out of such walks
+(above). Outputs that a product term enables are not covered: on a
+GAL22V10, hold the input that enables them at the level that keeps them on
+(`--fix 13=0`, say). The equations then lack that enable; add it by hand,
+and check it with a walk of that pin alone. What may cure it at the source
+is a capacitor of 100 nF from the PLD's ground rail to the board's ground,
+across Q2: the chip's ground reaches the board's only through that FET,
+while what its outputs charge is referred to the board's ground. That has
+not been tried.
+
+**"A power cycle of 20 ms does not reset this chip ...: power is now off
+for N ms in every power cycle".** The chip keeps its charge while the
+supply is off, and came up in another state than after a second without
+power. galre goes on with longer power cycles, which makes a run with many
+of them slower; hold more pins (section 4) if it takes too long. `--off N`
+sets the time to start from.
+
+**"two power cycles and the same clocks did not lead back to the state
+the job started from ...; running the job again".** A wrong reading, or a
+bad contact. The job is run again, twice at most. If that does not help,
+galre stops with "could not get back to the path state": then the chip
+may keep its charge through the power cycles, in a way that the check at
+the start did not show. Give a longer `--off`, 200 for example.
+
+**"The rebuilt JED could not be checked against the captures: ..."**, exit
+code 1. The captures are complete and the equations are written, but the
+JED was not simulated: for a design with latches or a reset term, or one
+with registers whose pin 1 the walks drive, that takes the firmware built
+for this computer, so a C compiler and `fw/` beside `galtools/`. Replay
+the recording where both are (section 8).
+
 **Exit code 3.** The message before "no equations written" says why:
 
 | Message | Meaning |
 |---|---|
+| "pin N is a register and low after power-up. The registers of a GAL20V8 are high then ...: this chip is another device" | A GAL16V8 or GAL20V8 resets its registers at power-up, and they stand behind an inverting buffer, so every registered output is high then. A 22V10 has the same pins as a GAL20V8 and sets the polarity behind the register: run again with `-d GAL22V10`. galre stops as soon as it has seen the register change, before the sweeps. A chip that the power cycle does not reset looks the same; galre checks for that at the start, but sees it only where the state shows with every input low or high. If in doubt, try `--off 500`. |
 | "pin N read differently when the same walk is repeated (...), but the same every time when one input changes at a time" | Where a step changes several inputs, they reach the chip in another order each time, and a latch takes that differently. Not a fault: galre goes on with the latch analyses, which change one input at a time. If no circuit of latches explains the chip, it reads every vector many times, in case an output oscillates at few inputs. |
 | "the same walk read differently twice on ..." | A pin reads differently on the same inputs, also when one input changes at a time. galre goes on to see whether it is an output that oscillates ("trying an output that feeds back inverted"); this is the reason only if one of the next two follows. |
 | "pin N reads unsteadily at ... input vectors, and settles at ... of them in another walk order" | Not an oscillator, which fails to settle at the same inputs every time: a bad contact in the socket or a floating pin. Reseat the chip. |

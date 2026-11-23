@@ -91,6 +91,12 @@ class Settles(AsyncDesign):
     no output oscillates (osc.OscAnalysis)."""
 
 
+class NotRegistered(Exception):
+    """With its enable pin held low and read alone (oe_alone), the chip
+    does not show as a GAL16V8 or GAL20V8 with registers: galre.analyse
+    then walks the pin like any other input."""
+
+
 class _Restart(Exception):
     """Explore again from scratch (the asynchronous reset term is known now)."""
 
@@ -117,12 +123,13 @@ def _cube_set(care, val, k, full, v1):
     return s
 
 
-def sop(on, off, k, order=None):
+def sop(on, off, k, order=None, first=0):
     """Greedy cover of the minterm bitset `on` avoiding `off` over k
     variables; [(care, val)] cubes.  A cube grown from a minterm drops
     the variable that takes in most of what is not covered yet; of
     several that take in as much, the first in order (default: the
-    lowest)."""
+    lowest).  The first `first` variables of order go before all others:
+    a cube drops every one of them that it can before it drops another."""
     if not on:
         return []
     full, v1 = litmasks(k)
@@ -131,22 +138,27 @@ def sop(on, off, k, order=None):
     unc, cubes = on, []
     if order is None:
         order = range(k)
+    order = list(order)
+    classes = [order[:first], order[first:]] if first else [order]
     while unc:
         m = (unc & -unc).bit_length() - 1
         care, val, cur = (1 << k) - 1, m, 1 << m
         while True:
             best = None
-            for b in order:
-                if not care >> b & 1:
-                    continue
-                c2 = care & ~(1 << b)
-                v2 = val & c2
-                s2 = _cube_set(c2, v2, k, full, v1)
-                if s2 & off:
-                    continue
-                gain = popcount(s2 & unc)
-                if best is None or gain > best[0]:
-                    best = (gain, c2, v2, s2)
+            for cls in classes:
+                for b in cls:
+                    if not care >> b & 1:
+                        continue
+                    c2 = care & ~(1 << b)
+                    v2 = val & c2
+                    s2 = _cube_set(c2, v2, k, full, v1)
+                    if s2 & off:
+                        continue
+                    gain = popcount(s2 & unc)
+                    if best is None or gain > best[0]:
+                        best = (gain, c2, v2, s2)
+                if best is not None:
+                    break
             if best is None:
                 break
             _, care, val, cur = best
@@ -396,6 +408,16 @@ KEEP = ("/* A latch has product terms that only hold it while an input changes.\
         "   Minimising would remove them. */")
 
 
+def at_least(masks, need):
+    """The bits that are set in at least need of the masks."""
+    cnt = [0] * need
+    for m in masks:
+        for j in range(need - 1, 0, -1):
+            cnt[j] |= cnt[j - 1] & m
+        cnt[0] |= m
+    return cnt[need - 1]
+
+
 class Table:
     """One state's exhaustive walk: per pin, driven and value bitsets over
     the x in care[p].  A walk that skipped the x outside `care` knows
@@ -420,10 +442,26 @@ class Table:
 
 
 class Analysis:
-    def __init__(self, rig, device, fixed=None, survey=64, max_states=1024, log=print):
+    def __init__(self, rig, device, fixed=None, survey=64, max_states=1024, log=print,
+                 oe_alone=False):
         self.rig, self.device, self.dev, self.log = rig, device, DEV[device], log
         self.pins = rig.pins
         self.fixed = dict(fixed or {})
+        # A GAL16V8 or GAL20V8 with registers uses pin 11 (13) to enable
+        # their outputs and for nothing else: it is no input of the array.
+        # With oe_alone the pin is held low for every walk and sweep, and
+        # what it switches off is read with it walked alone
+        # (_enable_alone).  Walked together with the I/O pins, it switches
+        # the registered outputs on against the levels the rig holds them
+        # at, all at once: on a board that can make the supply at the
+        # socket give way, and the chip take it for a clock edge.
+        self.oe_alone = None      # that pin
+        self.oe_off = None        # the pins it switches off
+        self.oe_walks = []        # the walks that showed them: (base, la, lb)
+        oe = self.dev.get("oe")
+        if oe_alone and oe is not None and oe not in self.fixed and CLOCK not in self.fixed:
+            self.fixed[oe] = 0
+            self.oe_alone = oe
         self.base = dict(self.fixed)
         self.survey = survey
         self.max_states = max_states
@@ -446,6 +484,8 @@ class Analysis:
         self.ar_regs = {}         # its register literals, register pin -> value
         self.ar_dc = set()
         self.scover = {}          # covers that read other outputs' pins (_read_outputs)
+        self.twice = bool(getattr(rig, "twice", False))   # sweeps are run twice (_trans)
+        self.unsteady = [0, 0]    # sweeps that did not read the same twice, their vectors
 
     # 1. discovery -----------------------------------------------------------
     def discover(self):
@@ -498,6 +538,67 @@ class Analysis:
             len(self.V), self.V,
             ", fixed %s" % self.fixed if self.fixed else ""))
         self.probe_x = []
+        if not self.clock_in_v:
+            self._enable_alone()
+
+    def _enable_alone(self):
+        """oe_alone: the pins that the enable pin switches off, read with
+        it walked alone from the power-up state, the other inputs low and
+        then high, and no I/O pin held.  In a GAL16V8 or GAL20V8 with
+        registers these are the registered outputs, all of them and
+        nothing else; an output that the pin switches off at one level of
+        the inputs only has an enable term that reads the pin, which only
+        a chip without registers can have."""
+        oe = self.oe_alone
+        if oe is None or self.oe_off is not None:
+            return
+        held = {p: v for p, v in self.fixed.items() if p != oe}
+        off, odd = None, set()
+        for level in (0, 1):
+            base = dict(held)
+            base.update({p: level for p in self.V})
+            la, lb, _ = self.rig.walk([oe], base, [])
+            self.oe_walks.append((base, la, lb))
+            gone = set()
+            for p in self.dev["io"]:
+                if p in base:
+                    continue
+                und = la[p] ^ lb[p]             # bit 0: with the pin low, bit 1: high
+                if und & 3 == 2:
+                    gone.add(p)
+                elif und & 3 == 1:
+                    odd.add(p)                  # driven only while the pin is high
+            odd |= set() if off is None else off ^ gone
+            off = gone if off is None else off & gone
+        if odd:
+            raise NotRegistered(
+                "pin %d switches %s off with the other inputs at one level and not at the "
+                "other, or on: an enable term reads it" % (oe, _pins(sorted(odd))))
+        self.oe_off = off
+        self.oe_const = sorted(off)
+        self.log("pin %d, walked alone, switches off %s" % (
+            oe, _pins(sorted(off)) if off else "no pin"))
+
+    def _registered(self):
+        """oe_alone: after the exploration, is this a GAL16V8 or GAL20V8
+        with registers, as holding the enable pin low took it to be?  The
+        pin then switches off the registers and nothing else."""
+        oe = self.oe_alone
+        if oe is None:
+            return
+        if self.clock_in_v or self.mixed or len(self.states) < 2:
+            raise NotRegistered("clocking does not change the state" if len(self.states) < 2
+                                else "the chip changes state without a clock")
+        regs = set(self.reg)
+        if regs != self.oe_off:
+            more, less = sorted(self.oe_off - regs), sorted(regs - self.oe_off)
+            raise NotRegistered("; ".join(
+                ([] if not less else ["%s %s with the clock, but pin %d does not switch %s "
+                                      "off" % (_pins(less), "changes" if len(less) == 1
+                                               else "change", oe,
+                                               "it" if len(less) == 1 else "them")])
+                + ([] if not more else ["pin %d switches off %s, which %s no register" % (
+                    oe, _pins(more), "is" if len(more) == 1 else "are")])))
 
     # Walk orders that make a latch see its inputs change in another order
     # than counting does: descending, bit-reversed (the pin that changed
@@ -863,11 +964,11 @@ class Analysis:
         n = len(self.V)
         if count is not None and count >= 1 << n:
             count = None
-        res = self.rig.transitions(self.V, self.base, self.drives(path), self.probes(),
-                                   self.cand, count=count,
-                                   mul=1 if count is None else survey_mul(n),
-                                   returns=self._returns(s), avoid=self.ar, chk=True,
-                                   pre=self.mixed, **self._tctx())
+        res = self._trans(s, self.V, self.base, self.drives(path), self.probes(),
+                          self.cand, count=count,
+                          mul=1 if count is None else survey_mul(n),
+                          returns=self._returns(s), avoid=self.ar, chk=True,
+                          pre=self.mixed, **self._tctx())
         obs, flags = res[0], res[1]
         if self.mixed and count is None:
             self.pre[s] = res[2]              # the pin levels each x was clocked in with
@@ -915,7 +1016,136 @@ class Analysis:
             queue.append(s2)
             if len(self.states) > self.max_states:
                 raise Limit("more than %d states (--max-states)" % self.max_states)
+            self._check_power_up()
         return True
+
+    SWEEPS = 5                # runs of a sweep that did not read the same twice
+
+    def _trans(self, s, *args, **kw):
+        """A sweep from state s (rig.transitions).
+
+        On a board (rig.twice) it is run twice.  A chip in good order
+        answers the same; one that does not is swept SWEEPS times in all,
+        and every input vector gets the answer that most sweeps gave
+        (the first one, if there is no such answer).  Without that, one
+        wrong reading is taken for the chip's logic: a clock edge that
+        leads to two states looks like a latch, and the equations get a
+        product term for it.
+
+        Seen with a GAL in a PLCC28 that loaded its registers, as on a
+        clock edge, in one of 20 writes in which the pin that enables its
+        outputs fell together with four inputs (which the firmware's ser=
+        now avoids)."""
+        res = self.rig.transitions(*args, **kw)
+        if not self.twice:
+            return res
+        runs = [res, self.rig.transitions(*args, **kw)]
+        if runs[1] == res:
+            return res
+        while len(runs) < self.SWEEPS:
+            runs.append(self.rig.transitions(*args, **kw))
+        need = len(runs) // 2 + 1
+        sel = 0
+        for xs in res[0].values():
+            sel |= xs
+        out, decided, same = {}, 0, 0
+        for o in dict.fromkeys(o for r in runs for o in r[0]):
+            masks = [r[0].get(o, 0) for r in runs]
+            m = at_least(masks, need)
+            if m:
+                out[o] = m
+            decided |= m
+            same |= at_least(masks, len(runs))
+        differ = sel & ~same
+        left = sel & ~decided
+        for o, xs in res[0].items():
+            if xs & left:
+                out[o] = out.get(o, 0) | xs & left
+        seen = {}
+        for r in runs:
+            for f in dict.fromkeys(r[1]):
+                seen[f] = seen.get(f, 0) + 1
+        flags = [f for f, k in seen.items() if k >= need]
+        for (x, _), k in seen.items():
+            if k < len(runs):
+                differ |= 1 << x
+        voted = (out, flags)
+        if len(res) > 2:
+            pre = {}
+            for p in res[2]:
+                masks = [r[2][p] for r in runs]
+                pre[p] = at_least(masks, need)
+                differ |= (at_least(masks, 1) ^ at_least(masks, len(runs))) & sel
+            voted += (pre,)
+        k = popcount(differ)
+        self.unsteady[0] += 1
+        self.unsteady[1] += k
+        self.log("the chip does not answer the same every time: clocked in from state %s, "
+                 "%d of %d input vectors read differently in %d sweeps of the same vectors "
+                 "(%s, for one).  Each is taken to lead where most of the sweeps said%s" % (
+                     _state(s), k, popcount(sel), len(runs), self._inputs(lowest(differ)),
+                     "" if not left else "; %d led somewhere else every time or nearly, and "
+                     "stay as first read" % popcount(left)))
+        return voted
+
+    def _unsteady_notes(self):
+        """For the source: what the equations rest on, if sweeps differed."""
+        n, k = self.unsteady
+        if not n:
+            return []
+        return ["The chip did not answer every clock edge the same way each time it was "
+                "asked: in %d sweep%s of the input vectors from a state, %d vector%s read "
+                "differently when the sweep was run again.  These equations are for what "
+                "most of %d sweeps said." % (n, "" if n == 1 else "s", k,
+                                             "" if k == 1 else "s", self.SWEEPS)]
+
+    def _enable_notes(self):
+        """For the source: how the enable pin was read, if it was held."""
+        if not self.oe_alone:
+            return []
+        return ["Pin %d enables the registers' outputs and is read by nothing else, as in "
+                "every %s with registers.  It was held low for the captures, and walked "
+                "alone to see what it switches off." % (self.oe_alone, self.device)]
+
+    def _check_power_up(self, regs=None):
+        """A GAL16V8 or GAL20V8 resets its registers at power-up, and they
+        stand behind an inverting buffer: every registered output is high
+        then, whatever its polarity.  A register that is low after power-up
+        belongs to another device, one that sets the polarity behind the
+        register, as a 22V10 does.  Such a chip gives equations here that
+        no GAL16V8 or GAL20V8 can be programmed with.
+
+        It is the state after a power cycle that is looked at: a chip that
+        the power cycle does not reset looks the same (BrutusRig.
+        check_power_cycle is there to see to that), and the message says
+        so.
+
+        regs: the registers, once they are known; before that, the pins
+        that are driven exactly while the enable pin is low (which only a
+        register is in these devices) and that have another level in
+        another state."""
+        oe = self.dev.get("oe")
+        if oe is None or self.clock_in_v or (oe not in self.V and self.oe_off is None):
+            return
+        t0 = self.states[self.power_up_state][1]
+        low = self.full ^ self.v1[self.V.index(oe)] if oe in self.V else None
+        for r in self.cand if regs is None else regs:
+            if not t0.driven[r] or t0.value[r] & t0.driven[r]:
+                continue                    # not driven, or high somewhere
+            tables = [t for _, t in self.states.values()]
+            if regs is None and not (
+                    (r in self.oe_off if low is None
+                     else all(t.driven[r] == t.care[r] & low for t in tables))
+                    and any(t.value[r] & t.driven[r] for t in tables)):
+                continue
+            raise Limit(
+                "pin %d is a register and low after power-up.  The registers of a %s are "
+                "high then (they are reset, and stand behind an inverting buffer): this "
+                "chip is another device%s.  Or the power cycle does not reset it: a longer "
+                "--off shows" % (
+                    r, self.device,
+                    ".  A 22V10 has the same pins, and sets the polarity behind the "
+                    "register: run again with -d GAL22V10" if self.device == "GAL20V8" else ""))
 
     def _explore_once(self):
         self._walks, self._wsig, self.cmap, self.cvar = {}, {}, {}, {}
@@ -1005,6 +1235,14 @@ class Analysis:
                 if r in self.comb:
                     self.comb.remove(r)
                     self.reg.append(r)
+            if self.oe_off is not None:
+                # (oe_alone) A pin that changes with the state and that the
+                # enable pin does not switch off is a combinational output
+                # that reads the registers.
+                for r in list(self.reg):
+                    if r not in self.oe_off:
+                        self.reg.remove(r)
+                        self.comb.append(r)
         if oe in self.V and not self.clock_in_v:
             # A registered GAL16V8's or GAL20V8's registers are enabled by
             # the OE pin (11, 13) and by nothing else.  A pin that changes with the state but is not
@@ -1018,6 +1256,8 @@ class Analysis:
                     self.comb.append(r)
         self.log("%d states reachable from power-up; inputs %s, registered %s, "
                  "combinational %s" % (len(self.states), self.inputs, self.reg, self.comb))
+        self._check_power_up(self.reg)
+        self._registered()
         self.ar_on = {s for s, (path, _) in self.states.items() if path in self.ar_paths}
         if self.ar:
             self.log("the asynchronous reset term fires in %d of them" % len(self.ar_on))
@@ -1127,8 +1367,8 @@ class Analysis:
             la, lb, _ = self.rig.walk(self.V, b, self.drives(path), **kw)
             tr = None
             if self.reg and self.probe_x:
-                obs = self.rig.transitions(self.V, b, self.drives(path), self.probes(),
-                                           self.cand, avoid=self.ar, **self._tctx())[0]
+                obs = self._trans(s, self.V, b, self.drives(path), self.probes(),
+                                  self.cand, avoid=self.ar, **self._tctx())[0]
                 tr = {}
                 for o, xs in obs.items():
                     s2 = self._reg(self._sig_obs(o))
@@ -1371,14 +1611,20 @@ class Analysis:
                 # with it, a smaller one if this one does not fit
                 limit = self._budget(p, kind)
                 order = self._drop_first(p, kind, sup)
+                if order is not None:
+                    # ... and of those, one that reads another latch only
+                    # where it must, unless that takes more product terms
+                    lat = self._others(p, kind, sup)
+                    alt = sop(on, off, k, order, lat)
+                    if len(alt) <= len(pos):
+                        pos = alt
+                    alt = sop(off, on, k, order, lat)
+                    if len(alt) <= len(neg):
+                        neg = alt
                 if len(pos) > limit:
-                    pos = min(pos, sop(on, off, k, order), key=len)
-                    if len(pos) > limit:
-                        pos = fewer(pos, on, off, k)
+                    pos = fewer(pos, on, off, k)
                 if len(neg) > limit:
-                    neg = min(neg, sop(off, on, k, order), key=len)
-                    if len(neg) > limit:
-                        neg = fewer(neg, off, on, k)
+                    neg = fewer(neg, off, on, k)
                 # ... and claim no more than that
                 own = self._own(p, kind, sup)
                 pos, neg = tight(pos, on, k, own), tight(neg, off, k, own)
@@ -1433,6 +1679,11 @@ class Analysis:
         take in equally much, for a second cover when the first does not
         fit (None: as they come)."""
         return None
+
+    def _others(self, p, kind, sup):
+        """How many variables at the start of _drop_first's order go
+        before all others."""
+        return 0
 
     def _budget(self, p, kind):
         """The product terms a function of pin p may have.  A GAL16V8 or
@@ -1656,7 +1907,10 @@ class Analysis:
                  "Device %s;" % self.dev["cupl"], "", HOW % title, ""]
         if clocked:
             lines.append("Pin 1 = CLK;")
-        for p in sorted(set(self.EV) | set(self.reg) | set(self.comb)):
+        named = set(self.EV) | set(self.reg) | set(self.comb)
+        if clocked and self.oe_alone:
+            named.add(self.oe_alone)
+        for p in sorted(named):
             if p == CLOCK and clocked:
                 continue
             if clocked and p == self.dev.get("oe"):
@@ -1667,7 +1921,7 @@ class Analysis:
         latches = self._latch_names()
         if latches:
             lines += [KEEP, "MIN [%s] = 0;" % ", ".join(latches), ""]
-        for note in self.notes:
+        for note in self.notes + self._enable_notes() + self._unsteady_notes():
             text = textwrap.wrap(note, 72)
             lines += ["/* " + text[0]] + ["   " + t for t in text[1:]]
             lines[-1] += " */"

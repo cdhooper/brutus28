@@ -37,6 +37,9 @@ def build(cc=None):
     cc = cc or os.environ.get("CC") or shutil.which("cc") or shutil.which("gcc")
     if not cc:
         return None
+    if not os.path.exists(os.path.join(FW, "capture.c")):
+        raise RuntimeError("the firmware's capture.c is not beside galtools (looked in %s)"
+                           % os.path.normpath(FW))
     d = tempfile.mkdtemp(prefix="capharness")
     for f in ("capture.c", "capture.h"):
         shutil.copy(os.path.join(FW, f), d)
@@ -71,8 +74,38 @@ class SocketDevice:
     a hundred times faster, but power() and io() are then not called, so
     the counters and writes below stay as they are."""
 
-    def __init__(self, jed, socket, fast=False, race=0):
-        self.fast = fast
+    def __init__(self, jed, socket, fast=False, race=0, glitch=0, glitch_pin=13, hold_ms=0,
+                 bounce=0):
+        self.fast = fast and not glitch and not hold_ms and not bounce
+        self.bounce = bounce         # not 0: when a write switches this many outputs on, or
+                                     # more, each against the level the board holds its pin
+                                     # at, the chip takes that for a clock edge (the supply
+                                     # at the socket gives way while they all switch).  A
+                                     # PALCE20V8 in a PLCC28 did so on a board when the pin
+                                     # that enables its eight registered outputs fell while
+                                     # six or more of their pins were held low, every time;
+                                     # with five or fewer, never.
+        self.bounced = 0             # how often
+        self.hold_ms = hold_ms       # not 0: the chip keeps its charge for so long without
+                                     # power.  Powered again sooner, it is not reset: it comes
+                                     # up with its registers as they were, and as after one
+                                     # more clock edge with every input low.  A part in a
+                                     # PLCC28 did so on a board: after 20 ms without power it
+                                     # came up in the state that such a clock leads to from
+                                     # any state, after 50 ms in its power-up state.
+        self.clock = None            # () -> msec: the firmware's delays so far (the transport)
+        self.wire_ms = 0             # and the time its commands took on the wire
+        self.off_at = None           # when the supply went off; None: the rail was drained
+        self.glitch = glitch         # not 0: a chip that now and then (about one time in
+                                     # eight, by this seed) loses the state of its registers
+                                     # when glitch_pin falls in one write with two or more
+                                     # other input pins, and no input pin rises.  A part in a
+                                     # PLCC28 did so on a board when the pin that enables its
+                                     # outputs fell together with four inputs: where a state
+                                     # is read after a clock, and at a carry of a walk that
+                                     # counts.  Never when the pins fell in two writes.  The
+                                     # seed runs on over power cycles.
+        self.glitch_pin = glitch_pin
         self.race = race             # not 0: the pins that one port write changes arrive one
                                      # after the other, in an order that this seed decides and
                                      # that differs from write to write, as on a board, where
@@ -83,6 +116,9 @@ class SocketDevice:
         npins, vcc, gnd, smap = SOCKETS[socket]
         self.pins = self.g.signal_pins()
         self.sbit = {p: 1 << (smap(p) - 1) for p in range(1, npins + 1)}
+        half = self.g.npins // 2     # the pins that are inputs only: 1 to 9 and 11, or 1 to
+        self.glitch_mask = sum(      # 11 and 13
+            self.sbit[p] for p in self.pins if p < half or p == half + 1)
         self.vcc_bit = self.sbit[vcc]
         self.gnd_bit = self.sbit[gnd]
         # What the board's jumper detection reports; tests change these.
@@ -99,28 +135,56 @@ class SocketDevice:
         self.noise = 1               # for the level read of a pin that oscillates; it runs on
                                      # over power cycles, so that the same walk reads differently
 
+    def _now(self):
+        return (self.clock() if self.clock else 0) + self.wire_ms
+
+    def _come_up(self):
+        low = {p: 0 for p in self.pins}                # drivers come up low
+        if (self.hold_ms and self.off_at is not None
+                and self._now() - self.off_at < self.hold_ms):
+            self.g.apply(low)                          # not reset
+            self.g.apply({**low, 1: 1})
+            self.g.apply(low)
+        else:
+            self.g.power_up()
+            self.g.settle(low)
+        self.last = 0
+
     def jumper_pins(self):
+        self.off_at = None           # the detection drains the VCC rail through the pins
         if not self.jumpers_ok:
             return None
         return self.jumper_vcc, self.jumper_gnd
 
     def supply(self):
         self.supply_measured += 1
+        if self.hold_ms:
+            # the supply is on while it is measured, and off from now
+            self._come_up()
+            self.off_at = self._now()
         return self.supply_mv
 
     def power(self, on):
+        if self.powered and not on:
+            self.off_at = self._now()
         self.powered = bool(on)
         if on:
             self.power_ons += 1
-            self.g.power_up()
-            self.g.settle({p: 0 for p in self.pins})   # drivers come up low
-            self.last = 0
+            self._come_up()
 
     def io(self, value):
         self.io_count += 1
         if not self.powered:
             return 0
         self.writes.append(value)
+        if self.glitch:
+            moved = (value ^ self.last) & self.glitch_mask
+            if (not (moved & value) and moved & self.sbit[self.glitch_pin]
+                    and bin(moved).count("1") >= 3):
+                self.glitch = (self.glitch * 1664525 + 1013904223) & 0xffffffff
+                if self.glitch >> 29 == 0:
+                    self.g.q = {p: 0 for p in self.g.q}
+        was_off = set(self.pins) - set(self.g.driven) if self.bounce else ()
         if self.transients:
             done = 0
             for g in PORT_GROUPS:
@@ -130,6 +194,15 @@ class SocketDevice:
                 if mid != self.last and mid != value:
                     self._apply(mid)
         levels = self._apply(value)
+        if self.bounce and self.g.clock_pin:
+            against = [p for p in self.g.driven if p in was_off
+                       and levels[p] != (1 if value & self.sbit[p] else 0)]
+            if len(against) >= self.bounce:
+                self.bounced += 1
+                ext = {p: 1 if value & self.sbit[p] else 0 for p in self.pins}
+                self.g.apply({**ext, self.g.clock_pin: 0})
+                self.g.apply({**ext, self.g.clock_pin: 1})
+                levels, _ = self.g.apply(ext)
         out = self.vcc_bit
         for p in self.pins:
             if p in self.g.unstable:
@@ -233,6 +306,8 @@ class HarnessTransport:
         self.lib.harness_run.argtypes = [ctypes.c_char_p]
         self.lib.harness_output.restype = ctypes.POINTER(ctypes.c_ubyte)
         self.lib.harness_gal.argtypes = [ctypes.c_void_p]
+        self.lib.harness_msec.restype = ctypes.c_ulong
+        device.clock = self.lib.harness_msec
 
     def _jumper_pins(self, vcc, gnd):
         j = self.dev.jumper_pins()
@@ -245,7 +320,10 @@ class HarnessTransport:
         rail[0] = self.dev.supply()
         return 0
 
+    WIRE_MS = 10                 # a command and its answer on the wire
+
     def _run(self, line):
+        self.dev.wire_ms += self.WIRE_MS
         self.lib.harness_init(self._io, self._pwr, self._pins, self._supply)
         self.lib.harness_gal(self.dev.cgal(self.lib) if self.dev.fast else None)
         n = self.lib.harness_run(line.encode())

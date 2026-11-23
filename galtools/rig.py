@@ -268,11 +268,26 @@ class SimRig:
     chip one after the other, in an order that differs from write to
     write, as on a board (fwsim.SocketDevice).  Only a design with
     asynchronous parts can tell.
+
+    glitch (a seed, not 0): the chip now and then loses the state of its
+    registers when the pin that enables its outputs falls in one write
+    with other inputs (fwsim.SocketDevice).  serial: the firmware changes
+    one pin per write (BrutusRig), so that this cannot happen.  twice: the
+    analysis runs every sweep twice, as on a board (Analysis._trans); by
+    default it does for a chip with a glitch.
+
+    bounce (a number of pins, not 0): the chip takes it for a clock edge
+    when so many of its outputs are switched on at once, each against the
+    level its pin is held at (fwsim.SocketDevice).
     """
 
-    def __init__(self, jed, off_ms=20, on_ms=2, socket=None, careful=False, race=0):
+    def __init__(self, jed, off_ms=20, on_ms=2, socket=None, careful=False, race=0,
+                 glitch=0, serial=True, twice=None, bounce=0):
         self.g = GAL(jed)
         self.race = race
+        self.bounce = bounce
+        self.glitch, self.serial = glitch, serial
+        self.twice = bool(glitch) if twice is None else bool(twice)
         self.device = self.g.kind
         self.bits = Bits(self.g)
         self.pins = self.g.signal_pins()
@@ -280,11 +295,12 @@ class SimRig:
         self.ops = Ops()
         self.q = None
         self.q0 = {o.pin: 0 for o in self.g.olmcs if o.registered}
+        self.live = bool(self.g.live_registers())    # a register drives or is read
         self.async_parts = self.g.async_parts()
         self.fw = None
         self._fw_args = (jed, socket)
         loops = [a for a in self.async_parts if a.startswith("combinational")]
-        if loops or (self.async_parts and not careful):
+        if loops or (self.async_parts and not careful) or glitch or bounce:
             self._firmware()
 
     def _firmware(self):
@@ -297,10 +313,11 @@ class SimRig:
             raise RuntimeError("%s has %s: simulating it needs a C compiler" % (
                 jed, " and ".join(self.async_parts) or "pin 1 walked in a registered design"))
         socket = socket or DEFAULT_SOCKET[self.device]
-        self.socket_device = fwsim.SocketDevice(jed, socket, fast=True, race=self.race)
+        self.socket_device = fwsim.SocketDevice(jed, socket, fast=True, race=self.race,
+                                                glitch=self.glitch, bounce=self.bounce)
         self.fw = BrutusRig(fwsim.HarnessTransport(lib, self.socket_device), self.device,
                             socket, off_ms=self.off_ms, on_ms=self.on_ms, log=lambda *a: None,
-                            jumper_check=False)
+                            jumper_check=False, serial=self.serial)
         for k, v in self.ops.items():
             self.fw.ops[k] += v
         self.ops = self.fw.ops
@@ -350,7 +367,7 @@ class SimRig:
 
     def walk(self, V, base, path, mul=1, rev=0, probes=(), cand=(), gray=0, start=0,
              skip=None, avoid=None, data=True, rot=0, mix=0, psig=False, also=()):
-        if not self.fw and (psig or CLOCK in V and self.q0):
+        if not self.fw and (psig or CLOCK in V and self.live):
             self._firmware()          # the walk clocks the registers
         if self.fw:
             return self.fw.walk(V, base, path, mul=mul, rev=rev, probes=probes, cand=cand,
@@ -500,7 +517,8 @@ class BrutusRig:
     """
 
     def __init__(self, transport, device, socket=None, settle_us=1, off_ms=20,
-                 on_ms=2, log=print, jumper_check=True, follow=True, dclk=True):
+                 on_ms=2, log=print, jumper_check=True, follow=True, dclk=True, serial=True,
+                 twice=True):
         self.socket = socket or DEFAULT_SOCKET[device]
         npins, vcc, gnd, smap = SOCKETS[self.socket]
         if npins != PACKAGE[device][0]:
@@ -509,6 +527,10 @@ class BrutusRig:
         self.settle_us, self.off_ms, self.on_ms = settle_us, off_ms, on_ms
         self.jumper_check = jumper_check
         self.follow, self.dclk = follow, dclk
+        # every write changes one pin (firmware with ser=); None once the
+        # firmware turned out to be older
+        self.serial = serial
+        self.twice = twice           # the analysis runs every sweep twice (Analysis._trans)
         self.pins = [p for p in range(1, npins + 1) if p not in (vcc, gnd)]
         self.sbit = {p: 1 << (smap(p) - 1) for p in range(1, npins + 1)}
         # the device's VCC and GND pins, and the rails as the jobs name them
@@ -592,11 +614,82 @@ class BrutusRig:
                     "".join("\n  board: " + l for l in self.jumper_readings)))
         return self.detected
 
+    LONG_OFF_MS = 1000           # without power for so long, a chip is taken to be reset
+
+    def _power_up_reads(self, base, probes, cand, off_ms):
+        """What the pins read after a power cycle of off_ms."""
+        keep, self.off_ms = self.off_ms, off_ms
+        try:
+            self._job([], base, [], probes, cand)
+            return self._run("state").sigs[0]
+        finally:
+            self.off_ms = keep
+
+    def check_power_cycle(self, io, fixed=None):
+        """Does a power cycle of off_ms reset the chip?
+
+        A chip that keeps its charge while the supply is off is not reset
+        when it comes back: it comes up in some other state, the same one
+        every time, and every job then starts from that state as if it
+        were the power-up state.  (The supply is measured just before
+        each job, so the chip has been powered then.)  Seen with a part
+        in a PLCC28: after 20 ms it came up in the state that one clock
+        with every input low leads to, after 50 ms and more in its
+        power-up state, every registered output high.
+
+        Reads the pins after a power cycle of off_ms and after one of
+        LONG_OFF_MS, with every input low and with every input high (pin 1
+        low), each of the pins io driven both ways.  If they differ,
+        off_ms is doubled until they agree, and raised by half again.
+        Returns off_ms.  Without the jumper check nothing is powered
+        before a job, and the firmware itself goes on to ten times off_ms
+        where a power cycle does not lead back to the state of a job."""
+        if not self.jumper_check:
+            return self.off_ms
+        fixed = dict(fixed or {})
+        base = {p: fixed.get(p, 0) for p in self.pins}
+        high = {p: fixed.get(p, 0 if p == CLOCK else 1) for p in self.pins}
+        cand = [p for p in io if p not in fixed][:MAX_CAND]
+        reads = lambda ms: self._power_up_reads(base, [base, high], cand, ms)  # noqa: E731
+        cold = reads(self.LONG_OFF_MS)
+        if reads(self.LONG_OFF_MS) != cold:
+            self.log("The chip does not come up the same way twice after %d ms without "
+                     "power: the power-off time stays at %d ms." % (self.LONG_OFF_MS, self.off_ms))
+            return self.off_ms
+        first = off = self.off_ms
+        while off < self.LONG_OFF_MS and any(reads(off) != cold for _ in range(3)):
+            off *= 2
+        if off != first:
+            self.off_ms = min(self.LONG_OFF_MS, off + off // 2)
+            self.log("A power cycle of %d ms does not reset this chip: it comes up in another "
+                     "state than after %d ms without power (it keeps its charge), and every "
+                     "job would start from that state.  It does after %d ms: power is now off "
+                     "for %d ms in every power cycle, and the captures take longer." % (
+                         first, self.LONG_OFF_MS, min(off, self.LONG_OFF_MS), self.off_ms))
+        return self.off_ms
+
+    def _serial(self):
+        """Ask for one pin per write (after "pld capture clear", which turns
+        it off).  A firmware that does not know the setting goes on as
+        before, and the run says so once."""
+        if not self.serial:
+            return
+        try:
+            self._cmd("pld capture set ser=1")
+        except CaptureError:
+            self.serial = None
+            self.log("This firmware changes several pins in one write (it has no ser=).  "
+                     "They reach the chip in no certain order, and a chip may now and then "
+                     "take that for a clock edge: install the firmware from the same commit.")
+
     def metadata(self):
         """The setup, for the recording."""
+        self._cmd("pld capture clear")
+        self._serial()
         meta = {"device": self.device, "socket": self.socket, "settle_us": self.settle_us,
                 "off_ms": self.off_ms, "on_ms": self.on_ms, "jumper_check": self.jumper_check,
-                "follow": self.follow, "dclk": self.dclk,
+                "follow": self.follow, "dclk": self.dclk, "serial": bool(self.serial),
+                "twice": bool(self.twice),
                 "firmware": self.t.command("version").strip()}
         if self.detected:
             vcc, gnd, mv = self.detected
@@ -660,6 +753,7 @@ class BrutusRig:
             extra.append("pre=1")
         if extra:
             self._cmd("pld capture set " + " ".join(extra))
+        self._serial()
         new = []
         if psig:
             new.append("psig=1")
@@ -683,27 +777,44 @@ class BrutusRig:
                 self._cmd("pld capture ret %08x %s" % (crc, " ".join("%x" % self._vec(d) for d in drives)))
                 nret += 1
 
+    LOST = 3                     # status: could not get back to the path state
+    RERUNS = 2                   # times a job with that status is run again
+
     def _run(self, what):
-        for attempt in range(4):
-            try:
-                cap = self.t.capture("pld capture " + what)
+        for again in range(self.RERUNS + 1):
+            for attempt in range(4):
+                try:
+                    cap = self.t.capture("pld capture " + what)
+                    break
+                except CaptureError as e:
+                    # rails on pins that are no pins of the device: see preflight
+                    m = re.search(r"preflight: jumpers vcc=([0-9a-fA-F]+) gnd=([0-9a-fA-F]+), "
+                                  r"job expects", str(e))
+                    if not m or attempt == 3 or not self.jumper_check:
+                        raise
+                    vcc, gnd = int(m.group(1), 16), int(m.group(2), 16)
+                    if not self._spare_rails(vcc, gnd):
+                        raise
+                    self.vcc_bit, self.gnd_bit = vcc, gnd
+                    self._cmd("pld capture set vcc=%x gnd=%x" % (vcc, gnd))
+            self.ops["runs"] += 1
+            self.ops["power_cycles"] += 1 + cap.power_cycles
+            self.ops["ret_ok"] += cap.ret_ok
+            self.ops["ret_fail"] += cap.ret_fail
+            self.ops["bytes"] += len(cap.data)
+            if cap.status != self.LOST or again == self.RERUNS:
                 break
-            except CaptureError as e:
-                # rails on pins that are no pins of the device: see preflight
-                m = re.search(r"preflight: jumpers vcc=([0-9a-fA-F]+) gnd=([0-9a-fA-F]+), "
-                              r"job expects", str(e))
-                if not m or attempt == 3 or not self.jumper_check:
-                    raise
-                vcc, gnd = int(m.group(1), 16), int(m.group(2), 16)
-                if not self._spare_rails(vcc, gnd):
-                    raise
-                self.vcc_bit, self.gnd_bit = vcc, gnd
-                self._cmd("pld capture set vcc=%x gnd=%x" % (vcc, gnd))
-        self.ops["runs"] += 1
-        self.ops["power_cycles"] += 1 + cap.power_cycles
-        self.ops["ret_ok"] += cap.ret_ok
-        self.ops["ret_fail"] += cap.ret_fail
-        self.ops["bytes"] += len(cap.data)
+            # The same clocks from power-up led to another state than at the
+            # start of the job, twice.  A chip that reads wrongly now and
+            # then does that; one that has state no pin shows does it every
+            # time, and the job fails as before.
+            self.log("%s: two power cycles and the same clocks did not lead back to the "
+                     "state the job started from (vector %d of %d); running the job again" % (
+                         what, cap.done, cap.count))
+        if cap.status == self.LOST:
+            raise CaptureError("pld capture %s: %s (a chip that keeps its charge through a power "
+                               "cycle of %d ms and of ten times that does this: give a longer "
+                               "--off)" % (what, STATUS[cap.status], self.off_ms))
         if cap.status != 0:
             raise CaptureError("pld capture %s: %s" % (what, STATUS.get(cap.status, cap.status)))
         if cap.done != cap.count:
@@ -890,6 +1001,7 @@ class RecordingRig:
     def __init__(self, rig, path, meta=None):
         self.rig, self.f = rig, open(path, "w")
         self.pins, self.device, self.ops = rig.pins, rig.device, rig.ops
+        self.twice = getattr(rig, "twice", False)
         if meta:
             self.f.write(json.dumps({"meta": meta}) + "\n")
             self.f.flush()
@@ -949,6 +1061,8 @@ class ReplayRig:
                 else:
                     self.db.setdefault(rec["key"], []).append(rec)
         self.device = device or self.meta.get("device")
+        # the analysis asks as it did when the recording was made
+        self.twice = bool(self.meta.get("twice"))
         if self.device not in PACKAGE:
             raise CaptureError("%s does not name the device; give it" % path)
         self.pins = [p for p in range(1, PACKAGE[self.device][0] + 1)
