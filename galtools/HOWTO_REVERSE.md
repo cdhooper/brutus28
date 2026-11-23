@@ -395,8 +395,11 @@ clock is high, with an output of the latch on pin 20:
 - "not seen, for no walk tried gets there (N): !P15 by ... with P8
   high; ...": the named product term decides the latch with that pin at
   that level, by the equations, but the chip was never seen there. The
-  term may lack a literal (`!P8` in the example). If the chip's
-  behaviour in such a case matters, look at it by hand.
+  term may lack a literal (`!P8` in the example). "... by itself"
+  instead of a pin says that no walk showed the term deciding the latch
+  on its own anywhere: it explains a step in which several latches
+  moved at once, and the chip may do that step by other terms. If the
+  chip's behaviour in such a case matters, look at it by hand.
 - "P17 has a product term that is true only in passing: ...": the term
   reads an output together with inputs at levels the output does not
   have once it has followed them, so it is true only for that output's

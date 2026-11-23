@@ -559,10 +559,14 @@ not the reset term. galre then goes on (`reglatch.py`):
      to decide. A pin that the term does not read, and at which it was
      seen to decide at one level only, may be such a missing literal:
      at the other level the latch was seen only where another term (the
-     one that holds it) decides as well. galre takes candidate walks
-     through the learned circuit, runs the one that gets to most of
-     these cases on the chip, and learns from it if the chip does
-     otherwise, until no candidate gets to any more (at most 64 walks).
+     one that holds it) decides as well. A term that was seen to decide
+     nowhere, by itself, is a guess as a whole: it stands for what the
+     circuit was taken to do on its way through a step that moved
+     several latches, and such a step does not show it. galre takes
+     candidate walks through the learned circuit, runs the one that
+     gets to most of these cases on the chip, and learns from it if the
+     chip does otherwise, until no candidate gets to any more (at most
+     64 walks).
      What is left is listed: "not seen, for no walk tried gets there".
 
    In a registered GAL16V8 or GAL20V8, pin 11 (13) enables the registers'
